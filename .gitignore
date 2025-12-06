@@ -1,0 +1,15 @@
+# Next.js build
+.next/
+out/
+node_modules/
+
+# Secrets
+*.json
+*.pem
+*.key
+*.p12
+
+# Environment variables
+.env
+.env.local
+.env.production
