@@ -1,9 +1,9 @@
 export default function Home() {
   return (
-    <main>
-      <h1>Welcome to the KPI System</h1>
-      <p>Use /kpi to view KPI analysis.</p>
-    </main>
+    <div style={{ padding: 40 }}>
+      <h1>🚀 Best Assistant đã deploy thành công!</h1>
+      <p>Đi tới trang KPI: <a href="/kpi">/kpi</a></p>
+    </div>
   );
 }
 
