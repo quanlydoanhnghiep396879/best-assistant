@@ -1,75 +1,88 @@
-import { NextResponse } from "next/server";
-import { getGoogleSheet } from "@/utils/getServiceAccount";
-
-const SHEET_ID = "1fexKo-eMpoeZo5Y1GU67TqBgHTfmCf9GlP9QAnY4lxU";
-const KPI_SHEET = "Bảng KPI theo giờ!A1:G6";
-const REAL_SHEET = "Bảng sản lượng thực tế!A1:G6";
+import { google } from "googleapis";
 
 export async function GET() {
   try {
-    const sheets = await getGoogleSheet();
+    // Load biến môi trường
+    const sheetId = process.env.GOOGLE_SHEET_ID;
+    const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+    const privateKey = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n");
 
-    const kpiRes = await sheets.spreadsheets.values.get({
-      spreadsheetId: SHEET_ID,
-      range: KPI_SHEET,
+    if (!sheetId || !clientEmail || !privateKey) {
+      return Response.json({ error: "Missing Google API credentials" }, { status: 500 });
+    }
+
+    // Tạo kết nối Google API
+    const auth = new google.auth.JWT({
+      email: clientEmail,
+      key: privateKey,
+      scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
     });
 
+    const sheets = google.sheets({ version: "v4", auth });
+
+    // ĐỌC Sheet KPI
+    const kpiRes = await sheets.spreadsheets.values.get({
+      spreadsheetId: sheetId,
+      range: "Bảng KPI theo giờ!A1:G6",
+    });
+
+    // ĐỌC Sheet Sản lượng thực tế
     const realRes = await sheets.spreadsheets.values.get({
-      spreadsheetId: SHEET_ID,
-      range: REAL_SHEET,
+      spreadsheetId: sheetId,
+      range: "Bảng sản lượng thực tế!A1:G6",
     });
 
     const kpi = kpiRes.data.values;
     const real = realRes.data.values;
 
-    let alerts = [];
-    let summary = {};
+    if (!kpi || !real) {
+      return Response.json({ error: "Cannot read sheets data" });
+    }
 
-    for (let r = 2; r <= 6; r++) {
-      for (let c = 1; c <= 6; c++) {
-        const kpiVal = Number(kpi[r][c] || 0);
-        const realVal = Number(real[r][c] || 0);
+    // ======== Xử lý KPI tổng ngày ========
+    const summary = {};
+
+    for (let col = 1; col < kpi[1].length; col++) {
+      const step = kpi[0][col];
+      const kpiValue = Number(kpi[1][col] || 0);
+      const realValue = Number(real[1][col] || 0);
+      const diff = realValue - kpiValue;
+
+      summary[step] = {
+        kpi: kpiValue,
+        real: realValue,
+        diff,
+        status:
+          diff < 0 ? "lack" :
+          diff > 0 ? "over" :
+          "equal"
+      };
+    }
+
+    // ======== Xử lý chi tiết theo giờ ========
+    const alerts = [];
+
+    for (let row = 2; row < kpi.length; row++) {
+      for (let col = 1; col < kpi[row].length; col++) {
+        const step = kpi[0][col];
+        const time = kpi[row][0];
+        const kpiVal = Number(kpi[row][col] || 0);
+        const realVal = Number(real[row][col] || 0);
         const diff = realVal - kpiVal;
 
-        let status =
-          diff < 0 ? "lack" : diff > 0 ? "over" : "equal";
-
-        alerts.push(
-          `dòng ${r}, cột ${c}: ${
-            status === "lack"
-              ? "thiếu " + Math.abs(diff)
-              : status === "over"
-              ? "vượt " + diff
-              : "đủ 0"
-          }`
-        );
-
-        // Daily summary (total per step)
-        const stepName = kpi[1][c];
-
-        if (!summary[stepName]) {
-          summary[stepName] = { kpi: 0, real: 0 };
+        if (diff !== 0) {
+          alerts.push(`Giờ ${time} – ${step}: KPI ${kpiVal}, Thực tế ${realVal}, Chênh lệch ${diff}`);
         }
-
-        summary[stepName].kpi += kpiVal;
-        summary[stepName].real += realVal;
       }
     }
 
-    // Compute summary diff + status
-    Object.keys(summary).forEach((step) => {
-      const s = summary[step];
-      s.diff = s.real - s.kpi;
-      s.status =
-        s.diff < 0 ? "lack" : s.diff > 0 ? "over" : "equal";
+    return Response.json({
+      dailySummary: summary,
+      alerts,
     });
 
-    return NextResponse.json({
-      alerts,
-      dailySummary: summary,
-    });
-  } catch (err) {
-    console.error(err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+  } catch (e) {
+    console.error("API error:", e);
+    return Response.json({ error: e.message });
   }
 }
