@@ -2,7 +2,7 @@ import { google } from "googleapis";
 
 export async function GET() {
   try {
-    // Load biến môi trường
+    // Load environment variables
     const sheetId = process.env.GOOGLE_SHEET_ID;
     const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
     const privateKey = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n");
@@ -11,7 +11,7 @@ export async function GET() {
       return Response.json({ error: "Missing Google API credentials" }, { status: 500 });
     }
 
-    // Tạo kết nối Google API
+    // Create Google API client
     const auth = new google.auth.JWT({
       email: clientEmail,
       key: privateKey,
@@ -20,13 +20,13 @@ export async function GET() {
 
     const sheets = google.sheets({ version: "v4", auth });
 
-    // ĐỌC Sheet KPI
+    // Read KPI Sheet
     const kpiRes = await sheets.spreadsheets.values.get({
       spreadsheetId: sheetId,
       range: "Bảng KPI theo giờ!A1:G6",
     });
 
-    // ĐỌC Sheet Sản lượng thực tế
+    // Read Real Output Sheet
     const realRes = await sheets.spreadsheets.values.get({
       spreadsheetId: sheetId,
       range: "Bảng sản lượng thực tế!A1:G6",
@@ -39,7 +39,7 @@ export async function GET() {
       return Response.json({ error: "Cannot read sheets data" });
     }
 
-    // ======== Xử lý KPI tổng ngày ========
+    // ======== Daily Summary ========
     const summary = {};
 
     for (let col = 1; col < kpi[1].length; col++) {
@@ -59,7 +59,7 @@ export async function GET() {
       };
     }
 
-    // ======== Xử lý chi tiết theo giờ ========
+    // ======== Hourly Alerts ========
     const alerts = [];
 
     for (let row = 2; row < kpi.length; row++) {
