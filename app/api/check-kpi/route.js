@@ -1,6 +1,4 @@
-import { getServiceAccount } from "@/utils/getServiceAccount";
-import { getSheetsClient } from "@/app/googleSheets";
-
+import { google } from "googleapis";
 export async function POST() {
   try {
     const service = getServiceAccount();
