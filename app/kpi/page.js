@@ -3,15 +3,14 @@ import { useEffect, useState } from "react";
 
 export default function KPIPage() {
   const [rows, setRows] = useState([]);
-  const [summary, setSummary] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     fetch("/api/check-kpi")
       .then((res) => res.json())
       .then((data) => {
-        setRows(convertAlertsToHours(data.alerts || []));
-        setSummary(data.dailySummary || {});
+        const parsed = convertAlertsToTable(data.alerts || []);
+        setRows(parsed);
         setLoading(false);
       })
       .catch((err) => {
@@ -22,178 +21,119 @@ export default function KPIPage() {
 
   if (loading)
     return (
-      <p style={{ padding: 20, fontSize: 18 }}>⏳ Đang tải dữ liệu KPI...</p>
+      <p style={{ padding: 20, textAlign: "center", color: "#fff" }}>
+        ⏳ Đang tải dữ liệu...
+      </p>
     );
 
   return (
-    <div style={{ padding: 20, maxWidth: 900, margin: "0 auto" }}>
-      <h1 style={{ textAlign: "center", fontSize: 32, marginBottom: 20 }}>
-        📊 <b>Dashboard KPI Nhà Máy</b>
+    <div
+      style={{
+        padding: 20,
+        maxWidth: 900,
+        margin: "0 auto",
+        background: "#0d1117",
+        minHeight: "100vh",
+        color: "#e6edf3",
+      }}
+    >
+      <h1 style={{ textAlign: "center", fontSize: 32, marginBottom: 30 }}>
+        📊 Dashboard KPI Nhà Máy
       </h1>
 
-      {/* ================== TỔNG HỢP KPI NGÀY ================== */}
-      <SummarySection summary={summary} />
-
-      {/* ================== KPI THEO GIỜ ================== */}
+      {/* ======================= KPI THEO GIỜ ======================= */}
       {rows.map((row, idx) => (
-        <HourCard key={idx} row={row} />
+        <div
+          key={idx}
+          style={{
+            marginBottom: 25,
+            padding: 20,
+            borderRadius: 12,
+            background: "#161b22",
+            boxShadow: "0 0 12px rgba(0,0,0,0.45)",
+            border: "1px solid #30363d",
+          }}
+        >
+          <h2 style={{ marginBottom: 12, fontSize: 22 }}>
+            ⏰ {row.time}
+          </h2>
+
+          {Object.entries(row.data).map(([step, result], i2) => (
+            <div
+              key={i2}
+              style={{
+                padding: "12px 16px",
+                margin: "10px 0",
+                borderRadius: 8,
+                background:
+                  result.type === "lack"
+                    ? "rgba(255, 75, 75, 0.15)"
+                    : result.type === "over"
+                    ? "rgba(255, 200, 0, 0.15)"
+                    : "rgba(0, 200, 100, 0.15)",
+                border:
+                  result.type === "lack"
+                    ? "1px solid #ff4d4d"
+                    : result.type === "over"
+                    ? "1px solid #e6c200"
+                    : "1px solid #28a745",
+                display: "flex",
+                justifyContent: "space-between",
+                color:
+                  result.type === "lack"
+                    ? "#ff7b7b"
+                    : result.type === "over"
+                    ? "#f2d46f"
+                    : "#7ee787",
+                fontSize: 17,
+              }}
+            >
+              <b>{step}</b>
+              <span>
+                {icon(result.type)} {result.message}
+              </span>
+            </div>
+          ))}
+        </div>
       ))}
     </div>
   );
 }
 
-function SummarySection({ summary }) {
-  return (
-    <div
-      style={{
-        background: "linear-gradient(to right, #fff3b0, #ffe8a0)",
-        padding: 20,
-        borderRadius: 15,
-        marginBottom: 30,
-        boxShadow: "0 4px 12px rgba(0,0,0,0.1)",
-      }}
-    >
-      <h2>📌 TỔNG HỢP KPI NGÀY</h2>
-
-      {Object.entries(summary).map(([step, data]) => (
-        <SummaryItem key={step} step={step} data={data} />
-      ))}
-    </div>
-  );
+/* -------------------- ICON HIỂN THỊ -------------------- */
+function icon(type) {
+  if (type === "lack") return "🔻"; // Thiếu
+  if (type === "over") return "⚠️"; // Vượt
+  return "✔️"; // Đủ
 }
 
-function SummaryItem({ step, data }) {
-  const icon =
-    data.status === "lack" ? "🔻" : data.status === "over" ? "⚠️" : "✅";
-
-  const bg =
-    data.status === "lack"
-      ? "#ffe5e5"
-      : data.status === "over"
-      ? "#fff6d6"
-      : "#e8ffe8";
-
-  const border =
-    data.status === "lack"
-      ? "1px solid #ff4d4d"
-      : data.status === "over"
-      ? "1px solid #e6b800"
-      : "1px solid #28a745";
-
-  return (
-    <div
-      style={{
-        marginTop: 8,
-        padding: "10px 14px",
-        borderRadius: 10,
-        background: bg,
-        border: border,
-        display: "flex",
-        justifyContent: "space-between",
-        fontSize: 16,
-      }}
-    >
-      <b>
-        {icon} {step}
-      </b>
-
-      <span>
-        KPI: <b>{data.kpi}</b> — Thực tế: <b>{data.real}</b> — Chênh lệch:{" "}
-        <b>{data.diff}</b>
-      </span>
-    </div>
-  );
-}
-
-function HourCard({ row }) {
-  return (
-    <div
-      style={{
-        marginBottom: 25,
-        padding: 20,
-        borderRadius: 15,
-        background: "linear-gradient(to right, #f8fbff, #eef3ff)",
-        boxShadow: "0 4px 10px rgba(0,0,0,0.1)",
-      }}
-    >
-      <h2>⏰ {row.time}</h2>
-
-      {Object.entries(row.data).map(([step, d], id2) => (
-        <HourItem key={id2} step={step} data={d} />
-      ))}
-    </div>
-  );
-}
-
-function HourItem({ step, data }) {
-  const icon =
-    data.type === "lack" ? "🔻" : data.type === "over" ? "⚠️" : "✅";
-
-  const bg =
-    data.type === "lack"
-      ? "#ffe5e5"
-      : data.type === "over"
-      ? "#fff6d6"
-      : "#e8ffe8";
-
-  const border =
-    data.type === "lack"
-      ? "1px solid #ff4d4d"
-      : data.type === "over"
-      ? "1px solid #e6b800"
-      : "1px solid #28a745";
-
-  return (
-    <div
-      style={{
-        padding: 12,
-        margin: "6px 0",
-        borderRadius: 10,
-        background: bg,
-        border,
-        display: "flex",
-        justifyContent: "space-between",
-        fontSize: 16,
-      }}
-    >
-      <b>
-        {icon} {step}
-      </b>
-      <span>{data.message}</span>
-    </div>
-  );
-}
-
-/* ======================== ALERT → KPI GIỜ ======================== */
-function convertAlertsToHours(alerts) {
+/* -------------------- CHUYỂN ALERT → DỮ LIỆU THEO GIỜ -------------------- */
+function convertAlertsToTable(alerts) {
   const stepNames = ["Giờ", "Cắt", "In/Thêu", "May 1", "May 2", "Đính nút", "Đóng gói"];
 
-  const rows = {
-    "2": { time: "08:00", data: {} },
-    "3": { time: "09:00", data: {} },
-    "4": { time: "10:00", data: {} },
-    "5": { time: "11:00", data: {} },
-    "6": { time: "12:00", data: {} },
+  const rowsMap = {
+    "09:00": { time: "09:00", data: {} },
+    "10:00": { time: "10:00", data: {} },
+    "11:00": { time: "11:00", data: {} },
+    "12:00": { time: "12:00", data: {} },
   };
 
-  const regex = /dòng (\d+), cột (\d+): (.*)/;
+  const regex = /Giờ (\d\d:\d\d) – ([^:]+): KPI (\d+), Thực tế (\d+), Chênh lệch ([\-0-9]+)/;
 
   alerts.forEach((alert) => {
-    const match = alert.match(regex);
-    if (!match) return;
+    const m = alert.match(regex);
+    if (!m) return;
 
-    const [_, row, col, msg] = match;
-    const step = stepNames[col];
+    const [, time, step, kpi, real, diff] = m;
 
-    let type = "equal";
-    if (msg.includes("thiếu")) type = "lack";
-    if (msg.includes("vượt")) type = "over";
+    const type =
+      diff < 0 ? "lack" : diff > 0 ? "over" : "equal";
 
-    rows[row].data[step] = {
-      message: msg,
+    rowsMap[time].data[step] = {
+      message: `Chênh lệch ${diff}`,
       type,
     };
   });
 
-  return Object.values(rows);
+  return Object.values(rowsMap);
 }
