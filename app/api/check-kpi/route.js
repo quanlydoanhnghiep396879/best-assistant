@@ -1,88 +1,78 @@
-import { google } from "googleapis";
+import { getServiceAccount } from "@/utils/getServiceAccount";
+import { getSheetsClient } from "@/app/googleSheets";
 
-export async function GET() {
+export async function POST() {
   try {
-    // Load environment variables
-    const sheetId = process.env.GOOGLE_SHEET_ID;
-    const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-    const privateKey = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n");
+    const service = getServiceAccount();
+    const sheets = await getSheetsClient(service);
 
-    if (!sheetId || !clientEmail || !privateKey) {
-      return Response.json({ error: "Missing Google API credentials" }, { status: 500 });
-    }
+    const spreadsheetId = process.env.GOOGLE_SHEET_ID;
 
-    // Create Google API client
-    const auth = new google.auth.JWT({
-      email: clientEmail,
-      key: privateKey,
-      scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
-    });
-
-    const sheets = google.sheets({ version: "v4", auth });
-
-    // Read KPI Sheet
+    // Lấy bảng KPI
     const kpiRes = await sheets.spreadsheets.values.get({
-      spreadsheetId: sheetId,
+      spreadsheetId,
       range: "KPI!A1:G6",
     });
 
-    // Read Real Output Sheet
+    // Lấy bảng sản lượng thực tế
     const realRes = await sheets.spreadsheets.values.get({
-      spreadsheetId: sheetId,
+      spreadsheetId,
       range: "PRODUCTION!A1:G6",
     });
 
-    const kpi = kpiRes.data.values;
-    const real = realRes.data.values;
+    const kpiData = kpiRes.data.values;
+    const realData = realRes.data.values;
 
-    if (!kpi || !real) {
-      return Response.json({ error: "Cannot read sheets data" });
-    }
-
-    // ======== Daily Summary ========
-    const summary = {};
-
-    for (let col = 1; col < kpi[1].length; col++) {
-      const step = kpi[0][col];
-      const kpiValue = Number(kpi[1][col] || 0);
-      const realValue = Number(real[1][col] || 0);
-      const diff = realValue - kpiValue;
-
-      summary[step] = {
-        kpi: kpiValue,
-        real: realValue,
-        diff,
-        status:
-          diff < 0 ? "lack" :
-          diff > 0 ? "over" :
-          "equal"
-      };
-    }
-
-    // ======== Hourly Alerts ========
     const alerts = [];
 
-    for (let row = 2; row < kpi.length; row++) {
-      for (let col = 1; col < kpi[row].length; col++) {
-        const step = kpi[0][col];
-        const time = kpi[row][0];
-        const kpiVal = Number(kpi[row][col] || 0);
-        const realVal = Number(real[row][col] || 0);
-        const diff = realVal - kpiVal;
+    for (let row = 1; row < kpiData.length; row++) {
+      const time = kpiData[row][0];
 
-        if (diff !== 0) {
-          alerts.push(`Giờ ${time} – ${step}: KPI ${kpiVal}, Thực tế ${realVal}, Chênh lệch ${diff}`);
+      for (let col = 1; col < kpiData[row].length; col++) {
+        const stepName = kpiData[0][col];
+        const kpi = Number(kpiData[row][col]);
+        const real = Number(realData[row][col]);
+
+        if (!isNaN(kpi) && !isNaN(real)) {
+          const diff = real - kpi;
+
+          let status = "";
+          let message = "";
+
+          if (diff === 0) {
+            status = "equal";
+            message = "Đủ chỉ tiêu";
+          } else if (diff > 0) {
+            status = "over";
+            message = `Vượt ${diff}`;
+          } else {
+            status = "lack";
+            message = `Thiếu ${Math.abs(diff)}`;
+          }
+
+          alerts.push({
+            time,
+            step: stepName,
+            kpi,
+            real,
+            diff,
+            status,
+            message,
+          });
         }
       }
     }
 
     return Response.json({
-      dailySummary: summary,
+      status: "success",
       alerts,
     });
 
-  } catch (e) {
-    console.error("API error:", e);
-    return Response.json({ error: e.message });
+  } catch (error) {
+    console.error("❌ ERROR CHECK KPI:", error);
+    return Response.json({
+      status: "error",
+      message: error.message,
+    });
   }
 }
