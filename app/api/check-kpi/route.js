@@ -44,10 +44,10 @@ export async function POST() {
             message = "Đủ chỉ tiêu";
           } else if (diff > 0) {
             status = "over";
-            message = Vượt ${diff};
+            message = `Vượt ${diff}`;
           } else {
             status = "lack";
-            message = Thiếu ${Math.abs(diff)};
+            message = `Thiếu ${Math.abs(diff)}`;
           }
 
           alerts.push({
@@ -76,3 +76,4 @@ export async function POST() {
     });
   }
 }
+          
