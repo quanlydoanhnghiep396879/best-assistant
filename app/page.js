@@ -6,10 +6,12 @@ export default function Home() {
 
       <h2>Test API</h2>
       <ul>
-        <li><a href="/api/sheet" target="_blank">Test /api/sheet</a></li>
-        <li><a href="/api/chat" target="_blank">Test /api/chat</a></li>
-        <li><a href="/api/check-kpi" target="_blank">Test /api/check-kpi</a></li>
-        <li><a href="/api/input" target="_blank">Test /api/input</a></li>
+        <li>
+          <a href="/api/sheet" target="_blank">/api/sheet</a>
+        </li>
+        <li>
+          <a href="/api/chat" target="_blank">/api/chat</a>
+        </li>
       </ul>
     </div>
   );
