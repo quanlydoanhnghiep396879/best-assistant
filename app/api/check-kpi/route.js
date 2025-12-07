@@ -11,13 +11,13 @@ export async function POST() {
     // Lấy bảng KPI
     const kpiRes = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: "Bảng KPI theo giờ!A1:G6",
+      range: "KPI!A1:G6",
     });
 
     // Lấy bảng sản lượng thực tế
     const realRes = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: "Bảng sản lượng thực tế!A1:G6",
+      range: "PRODUCTION!A1:G6",
     });
 
     const kpiData = kpiRes.data.values;
