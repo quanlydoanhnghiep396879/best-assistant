@@ -4,10 +4,12 @@ out/
 node_modules/
 
 # Secrets
-*.json
 *.pem
 *.key
 *.p12
+# Ignore Google service account key
+kpi-automation-api-*.json
+
 
 # Environment variables
 .env
