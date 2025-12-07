@@ -23,13 +23,13 @@ export async function GET() {
     // Read KPI Sheet
     const kpiRes = await sheets.spreadsheets.values.get({
       spreadsheetId: sheetId,
-      range: "Bảng KPI theo giờ!A1:G6",
+      range: "KPI!A1:G6",
     });
 
     // Read Real Output Sheet
     const realRes = await sheets.spreadsheets.values.get({
       spreadsheetId: sheetId,
-      range: "Bảng sản lượng thực tế!A1:G6",
+      range: "PRODUCTION!A1:G6",
     });
 
     const kpi = kpiRes.data.values;
