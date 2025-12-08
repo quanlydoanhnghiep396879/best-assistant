@@ -16,6 +16,8 @@ export async function POST() {
       ["https://www.googleapis.com/auth/spreadsheets.readonly"]
     );
 
+    await auth.authorize();
+
     const sheets = google.sheets({ version: "v4", auth });
     const spreadsheetId = process.env.GOOGLE_SHEET_ID;
 
