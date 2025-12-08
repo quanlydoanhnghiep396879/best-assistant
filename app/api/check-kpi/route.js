@@ -3,7 +3,7 @@ import { google } from "googleapis";
 
 export async function POST() {
   try {
-    // Kết nối Google Sheets
+    // AUTH GOOGLE SHEETS
     const auth = new google.auth.JWT(
       process.env.GOOGLE_CLIENT_EMAIL,
       null,
@@ -14,16 +14,16 @@ export async function POST() {
     const sheets = google.sheets({ version: "v4", auth });
     const spreadsheetId = process.env.GOOGLE_SHEET_ID;
 
-    // Đọc sheet KPI
+    // Đọc toàn bộ dữ liệu KPI
     const kpiRes = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: "KPI!A2:G6",
+      range: "KPI!A2:G100",     // đọc rộng hơn cho an toàn
     });
 
-    // Đọc sheet PRODUCTION
+    // Đọc toàn bộ dữ liệu sản lượng thực tế
     const realRes = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: "PRODUCTION!A2:G6",
+      range: "PRODUCTION!A2:G100",
     });
 
     const kpi = kpiRes.data.values || [];
@@ -37,8 +37,9 @@ export async function POST() {
 
       for (let col = 1; col < headers.length; col++) {
         const step = headers[col];
-        const kpiValue = Number(kpi[i][col] || 0);
-        const realValue = Number(real[i][col] || 0);
+
+        const kpiValue = Number(kpi[i]?.[col] || 0);
+        const realValue = Number(real[i]?.[col] || 0);
 
         const diff = realValue - kpiValue;
 
@@ -68,10 +69,7 @@ export async function POST() {
       }
     }
 
-    return NextResponse.json({
-      status: "success",
-      alerts,
-    });
+    return NextResponse.json({ status: "success", alerts });
   } catch (error) {
     console.error("❌ CHECK KPI ERROR:", error);
     return NextResponse.json({
