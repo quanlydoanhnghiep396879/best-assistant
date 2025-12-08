@@ -1,3 +1,5 @@
+console.log("ENV KEY LENGTH:", process.env.GOOGLE_PRIVATE_KEY ?.length);
+
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
 
@@ -38,7 +40,7 @@ export async function POST() {
     );
 
     await auth.authorize();
-    
+
     const sheets = google.sheets({ version: "v4", auth });
     const spreadsheetId = process.env.GOOGLE_SHEET_ID;
 
