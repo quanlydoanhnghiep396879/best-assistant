@@ -1,8 +1,9 @@
+export const runtime = "nodejs";
+
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
 
 export const dynamic = "force-dynamic";
-export const runtime = "edge";
 
 export async function POST() {
   try {
