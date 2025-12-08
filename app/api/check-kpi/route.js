@@ -1,11 +1,29 @@
-import { getServiceAccount } from "@/utils/getServiceAccount";
-import { getSheetsClient } from "@/app/googleSheets";
+
+import { google } from "googleapis";
+
+// ==== KẾT NỐI GOOGLE SHEETS ====
+function getGoogleClient() {
+  const clientEmail = process.env.GOOGLE_CLIENT_EMAIL;
+  const privateKey = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n");
+
+  if (!clientEmail || !privateKey) {
+    throw new Error("Missing Google API credentials");
+  }
+
+  const auth = new google.auth.JWT({
+    email: clientEmail,
+    key: privateKey,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
+  });
+
+  return google.sheets({ version: "v4", auth });
+}
+
+// ==================================================================
 
 export async function POST() {
   try {
-    const service = getServiceAccount();
-    const sheets = await getSheetsClient(service);
-
+    const sheets = getGoogleClient();
     const spreadsheetId = process.env.GOOGLE_SHEET_ID;
 
     // Lấy bảng KPI
@@ -14,7 +32,7 @@ export async function POST() {
       range: "KPI!A1:G6",
     });
 
-    // Lấy bảng sản lượng thực tế
+    // Lấy bảng thực tế
     const realRes = await sheets.spreadsheets.values.get({
       spreadsheetId,
       range: "PRODUCTION!A1:G6",
@@ -29,7 +47,7 @@ export async function POST() {
       const time = kpiData[row][0];
 
       for (let col = 1; col < kpiData[row].length; col++) {
-        const stepName = kpiData[0][col];
+        const stepName = kpiData[0][col] ?? "";
         const kpi = Number(kpiData[row][col]);
         const real = Number(realData[row][col]);
 
@@ -44,10 +62,10 @@ export async function POST() {
             message = "Đủ chỉ tiêu";
           } else if (diff > 0) {
             status = "over";
-            message = `Vượt ${diff}`;
+            message = Vượt ${diff};
           } else {
             status = "lack";
-            message = `Thiếu ${Math.abs(diff)}`;
+            message = Thiếu ${Math.abs(diff)};
           }
 
           alerts.push({
@@ -76,4 +94,11 @@ export async function POST() {
     });
   }
 }
-          
+
+// CHO PHÉP TEST API TRÊN TRÌNH DUYỆT
+export async function GET() {
+  return Response.json({
+    status: "error",
+    message: "API này chỉ hỗ trợ POST – không hỗ trợ GET",
+  });
+}

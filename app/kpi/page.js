@@ -21,9 +21,9 @@ export default function KPIPage() {
     return () => clearInterval(interval);
   }, []);
 
-  if (loading) return <p style={{ padding: 20 }}>⏳ Đang tải dữ liệu...</p>;
+  if (loading)
+    return <p style={{ padding: 20 }}>⏳ Đang tải dữ liệu...</p>;
 
-  // Nhóm dữ liệu theo giờ
   const grouped = {};
   alerts.forEach((item) => {
     if (!grouped[item.time]) grouped[item.time] = [];
@@ -59,6 +59,7 @@ export default function KPIPage() {
                 <th style={th}>Trạng thái</th>
               </tr>
             </thead>
+
             <tbody>
               {items.map((i, idx) => (
                 <tr key={idx} style={{ background: idx % 2 ? "#0F1E33" : "#14263F" }}>
@@ -75,7 +76,7 @@ export default function KPIPage() {
                           ? "#FF4F4F"
                           : i.status === "over"
                           ? "#FFD400"
-                          : "#00FF9C", // màu xanh cho "Đủ"
+                          : "#00FF9C",
                       textShadow:
                         i.status === "lack"
                           ? "0 0 6px #FF4F4F"
