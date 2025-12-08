@@ -3,6 +3,8 @@ import { google } from "googleapis";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const preferredRegion = "auto";
+export const revalidate = 0;
 
 export async function POST() {
   try {
