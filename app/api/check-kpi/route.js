@@ -1,15 +1,8 @@
-export const dynamic = "force-dynamic";
-export const runtime = "nodejs";
-export const preferredRegion = "auto";
-export const config = {
-  api: {
-    bodyParser: false,
-    externalResolver: true,
-  },
-};
-
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
+
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 export async function POST() {
   try {
@@ -17,7 +10,7 @@ export async function POST() {
     const auth = new google.auth.JWT(
       process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
       null,
-      process.env.GOOGLE_PRIVATE_KEY,
+      process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
       ["https://www.googleapis.com/auth/spreadsheets.readonly"]
     );
 
