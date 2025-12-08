@@ -71,7 +71,7 @@ export async function POST() {
 
         let status = "";
         let message = "";
-
+        
         if (diff === 0) {
           status = "equal";
           message = "Đủ chỉ tiêu";
