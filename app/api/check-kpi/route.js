@@ -1,9 +1,15 @@
+export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
+export const preferredRegion = "auto";
+export const config = {
+  api: {
+    bodyParser: false,
+    externalResolver: true,
+  },
+};
 
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
-
-export const dynamic = "force-dynamic";
 
 export async function POST() {
   try {
