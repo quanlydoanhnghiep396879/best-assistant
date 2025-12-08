@@ -8,26 +8,45 @@ export const revalidate = 0;
 
 export async function POST() {
   try {
+    // ==== DEBUG ENV GOOGLE KEY ====
+    const rawKey = process.env.GOOGLE_PRIVATE_KEY;
+    const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+
+    console.log("DEBUG GOOGLE EMAIL:", email);
+    console.log("DEBUG HAS KEY:", !!rawKey);
+    console.log("DEBUG KEY LENGTH:", rawKey ? rawKey.length : 0);
+
+    if (!rawKey) {
+      // Nếu vào đây thì chắc chắn env không load
+      return NextResponse.json({
+        status: "error",
+        message: "SERVER: GOOGLE_PRIVATE_KEY is empty (env không có giá trị)",
+      });
+    }
+
+    // Nếu key đang ở dạng có kí tự \n trong chuỗi thì replace, còn không thì để nguyên
+    const privateKey = rawKey.includes("\\n")
+      ? rawKey.replace(/\\n/g, "\n")
+      : rawKey;
+
     // AUTH GOOGLE SHEETS
     const auth = new google.auth.JWT(
-      process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+      email,
       null,
-      process.env.GOOGLE_PRIVATE_KEY,
+      privateKey,
       ["https://www.googleapis.com/auth/spreadsheets.readonly"]
     );
-
-    await auth.authorize();
 
     const sheets = google.sheets({ version: "v4", auth });
     const spreadsheetId = process.env.GOOGLE_SHEET_ID;
 
-    // Đọc toàn bộ dữ liệu KPI
+    // Đọc KPI
     const kpiRes = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: "KPI!A2:G100",     // đọc rộng hơn cho an toàn
+      range: "KPI!A2:G100",
     });
 
-    // Đọc toàn bộ dữ liệu sản lượng thực tế
+    // Đọc sản lượng
     const realRes = await sheets.spreadsheets.values.get({
       spreadsheetId,
       range: "PRODUCTION!A2:G100",
@@ -64,15 +83,7 @@ export async function POST() {
           message = `Thiếu ${Math.abs(diff)}`;
         }
 
-        alerts.push({
-          time,
-          step,
-          kpi: kpiValue,
-          real: realValue,
-          diff,
-          status,
-          message,
-        });
+        alerts.push({ time, step, kpi: kpiValue, real: realValue, diff, status, message });
       }
     }
 
