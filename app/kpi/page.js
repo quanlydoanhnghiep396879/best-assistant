@@ -1,29 +1,37 @@
 "use client";
+
 import { useEffect, useState } from "react";
 
 export default function KPIPage() {
   const [alerts, setAlerts] = useState([]);
   const [loading, setLoading] = useState(true);
 
+  // HÀM LOAD KPI
   const loadKPI = () => {
-    fetch("/api/check-kpi", { method: "POST" })
+    fetch("/api/check-kpi", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }
+    })
       .then((res) => res.json())
       .then((data) => {
+        console.log("KPI RESULT:", data);
         setAlerts(data.alerts || []);
         setLoading(false);
       })
       .catch((err) => console.error("Lỗi load KPI:", err));
   };
 
+  // TỰ ĐỘNG CHẠY
   useEffect(() => {
-    loadKPI();
-    const interval = setInterval(loadKPI, 5000);
-    return () => clearInterval(interval);
+    loadKPI();                         // chạy lần đầu
+    const timer = setInterval(loadKPI, 60000); // 60 giây cập nhật
+    return () => clearInterval(timer);
   }, []);
 
   if (loading)
     return <p style={{ padding: 20 }}>⏳ Đang tải dữ liệu...</p>;
 
+  // GROUP THEO GIỜ
   const grouped = {};
   alerts.forEach((item) => {
     if (!grouped[item.time]) grouped[item.time] = [];
@@ -77,12 +85,6 @@ export default function KPIPage() {
                           : i.status === "over"
                           ? "#FFD400"
                           : "#00FF9C",
-                      textShadow:
-                        i.status === "lack"
-                          ? "0 0 6px #FF4F4F"
-                          : i.status === "over"
-                          ? "0 0 6px #FFD400"
-                          : "0 0 6px #00FF9C",
                     }}
                   >
                     {i.status === "lack"
@@ -111,26 +113,3 @@ const td = {
   padding: 10,
   textAlign: "center",
 };
-useEffect(() => {
-  const loadKPI = () => {
-    fetch("/api/check-kpi", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      }
-    })
-      .then(res => res.json())
-      .then(data => {
-        console.log("KPI RESULT:", data);
-        setAlerts(data.alerts || []);
-        setLoading(false);
-      })
-      .catch(err => {
-        console.error("Error:", err);
-      });
-  };
-
-  loadKPI();               // chạy lần đầu
-  const timer = setInterval(loadKPI, 60000); // chạy mỗi phút
-  return () => clearInterval(timer);
-}, []);
