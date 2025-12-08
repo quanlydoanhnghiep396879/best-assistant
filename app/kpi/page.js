@@ -111,3 +111,26 @@ const td = {
   padding: 10,
   textAlign: "center",
 };
+useEffect(() => {
+  const loadKPI = () => {
+    fetch("/api/check-kpi", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      }
+    })
+      .then(res => res.json())
+      .then(data => {
+        console.log("KPI RESULT:", data);
+        setAlerts(data.alerts || []);
+        setLoading(false);
+      })
+      .catch(err => {
+        console.error("Error:", err);
+      });
+  };
+
+  loadKPI();               // chạy lần đầu
+  const timer = setInterval(loadKPI, 60000); // chạy mỗi phút
+  return () => clearInterval(timer);
+}, []);
