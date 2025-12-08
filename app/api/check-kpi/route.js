@@ -9,6 +9,7 @@ export const preferredRegion = "auto";
 export const revalidate = 0;
 
 export async function POST() {
+  console.log("✅ CHECK KPI API CALLED");
   try {
     // ==== DEBUG ENV GOOGLE KEY ====
     const rawKey = process.env.GOOGLE_PRIVATE_KEY;
