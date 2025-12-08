@@ -37,6 +37,8 @@ export async function POST() {
       ["https://www.googleapis.com/auth/spreadsheets.readonly"]
     );
 
+    await auth.authorize();
+    
     const sheets = google.sheets({ version: "v4", auth });
     const spreadsheetId = process.env.GOOGLE_SHEET_ID;
 
@@ -71,7 +73,7 @@ export async function POST() {
 
         let status = "";
         let message = "";
-        
+
         if (diff === 0) {
           status = "equal";
           message = "Đủ chỉ tiêu";
