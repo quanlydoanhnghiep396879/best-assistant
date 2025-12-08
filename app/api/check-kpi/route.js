@@ -28,9 +28,7 @@ export async function POST() {
     }
 
     // Nếu key đang ở dạng có kí tự \n trong chuỗi thì replace, còn không thì để nguyên
-    const privateKey = rawKey.includes("\\n")
-      ? rawKey.replace(/\\n/g, "\n")
-      : rawKey;
+    const privateKey = rawKey.replace(/\\n/g, "\n");
 
     // AUTH GOOGLE SHEETS
     const auth = new google.auth.JWT(
