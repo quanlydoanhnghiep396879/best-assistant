@@ -11,14 +11,14 @@ export async function POST() {
 
   try {
     // === LOAD ENV ===
-    const rawkey = process.env.GOOGLE_PRIVATE_KEY;
+    const rawKey = process.env.GOOGLE_PRIVATE_KEY;   // tên biến đúng
     const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
 
     console.log("DEBUG GOOGLE EMAIL:", email);
-    console.log("DEBUG HAS KEY:", !!rawkey);
-    console.log("DEBUG RAW KEY LENGTH:", rawkey ? rawkey.length : 0);
+    console.log("DEBUG HAS KEY:", !!rawKey);
+    console.log("DEBUG RAW KEY LENGTH:", rawKey ? rawKey.length : 0);
 
-    if (!rawkey) {
+    if (!rawKey) {
       return NextResponse.json({
         status: "error",
         message: "SERVER: GOOGLE_PRIVATE_KEY is empty",
@@ -26,17 +26,17 @@ export async function POST() {
     }
 
     // === FIX KEY FORMAT ===
-    const privatekey = rawkey.includes("\\n")
-      ? rawkey.replace(/\\n/g, "\n")
-      : rawkey;
+    const privateKey = rawKey.includes("\\n")
+      ? rawKey.replace(/\\n/g, "\n")
+      : rawKey;
 
-    console.log("DEBUG FIXED KEY LENGTH:", privatekey.length);
+    console.log("DEBUG FIXED KEY LENGTH:", privateKey.length);
 
     // === AUTH GOOGLE SHEETS ===
     const auth = new google.auth.JWT(
       email,
       null,
-      privatekey,
+      privateKey,
       ["https://www.googleapis.com/auth/spreadsheets.readonly"]
     );
 
@@ -78,7 +78,7 @@ export async function POST() {
           diff === 0
             ? "Đủ chỉ tiêu"
             : diff > 0
-            ?`Vượt ${diff}`
+            ? `Vượt ${diff}`
             : `Thiếu ${Math.abs(diff)}`;
 
         alerts.push({ time, step, kpi: kpiValue, real: realValue, diff, status, message });
