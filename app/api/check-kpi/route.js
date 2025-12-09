@@ -8,52 +8,49 @@ export async function POST() {
   console.log("✅ CHECK KPI API CALLED");
 
   try {
-    // ==== LOAD ENV ====
-    const rawkey = process.env.GOOGLE_PRIVATE_KEY;
+    // === LOAD ENV ===
+    const base64Key = process.env.GOOGLE_PRIVATE_KEY_BASE64;
     const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
     const spreadsheetId = process.env.GOOGLE_SHEET_ID;
 
-    console.log("DEBUG GOOGLE EMAIL:", email);
-    console.log("DEBUG HAS KEY:", !!rawkey);
-    console.log("DEBUG RAW KEY LENGTH:", rawkey ? rawkey.length : 0);
+    console.log("DEBUG EMAIL:", email);
+    console.log("HAS BASE64 KEY:", !!base64Key);
+    console.log("BASE64 LENGTH:", base64Key?.length);
 
-    if (!rawkey) {
+    if (!base64Key) {
       return NextResponse.json({
         status: "error",
-        message: "SERVER: GOOGLE_PRIVATE_KEY is empty",
+        message: "Missing GOOGLE_PRIVATE_KEY_BASE64",
       });
     }
 
-    // ==== FIX PRIVATE KEY FORMAT ====
-    const privatekey = rawkey.includes("\\n")
-      ? rawkey.replace(/\\n/g, "\n")
-      : rawkey;
+    // === DECODE BASE64 → PEM KEY ===
+    const privateKey = Buffer.from(base64Key, "base64").toString("utf8");
 
-    console.log("DEBUG FIXED KEY LENGTH:", privatekey.length);
-    console.log("PRIVATE KEY FIRST 30:", privatekey.substring(0, 30));
-    console.log("PRIVATE KEY LAST 30:", privatekey.substring(privatekey.length - 30));
+    console.log("PEM FIRST LINE:", privateKey.split("\n")[0]);
+    console.log("PEM LAST LINE:", privateKey.split("\n").slice(-1)[0]);
 
-    // ==== AUTH GOOGLE SHEETS ====
+    // === AUTH GOOGLE SHEETS ===
     const auth = new google.auth.JWT(
-      email,       // Service Account Email
-      null,        // keyFile (null = không dùng file)
-      privatekey,  // 🔥 PHẢI TRUYỀN ĐÚNG privatekey
+      email,
+      null,
+      privateKey,
       ["https://www.googleapis.com/auth/spreadsheets.readonly"]
     );
 
-    console.log("🔥 TRY GOOGLE AUTH...");
+    console.log("🔥 TRY AUTH...");
     await auth.authorize();
-    console.log("🔥 GOOGLE AUTH SUCCESS!");
+    console.log("✅ AUTH OK");
 
     const sheets = google.sheets({ version: "v4", auth });
 
-    // ==== READ KPI ====
+    // === READ KPI ===
     const kpiRes = await sheets.spreadsheets.values.get({
       spreadsheetId,
       range: "KPI!A2:G100",
     });
 
-    // ==== READ REAL ====
+    // === READ PRODUCTION ===
     const realRes = await sheets.spreadsheets.values.get({
       spreadsheetId,
       range: "PRODUCTION!A2:G100",
@@ -72,24 +69,29 @@ export async function POST() {
         const step = headers[col];
         const kpiValue = Number(kpi[i]?.[col] || 0);
         const realValue = Number(real[i]?.[col] || 0);
+
         const diff = realValue - kpiValue;
 
-        const status = diff === 0 ? "equal" : diff > 0 ? "over" : "lack";
-        const message =
-          diff === 0
-            ? "Đủ chỉ tiêu"
-            : diff > 0
-            ? `Vượt ${diff}`
-            : `Thiếu ${Math.abs(diff)}`;
-
-        alerts.push({ time, step, kpi: kpiValue, real: realValue, diff, status, message });
+        alerts.push({
+          time,
+          step,
+          kpi: kpiValue,
+          real: realValue,
+          diff,
+          status: diff === 0 ? "equal" : diff > 0 ? "over" : "lack",
+          message:
+            diff === 0
+              ? "Đủ chỉ tiêu"
+              : diff > 0
+              ? `Vượt ${diff}`
+              : `Thiếu ${Math.abs(diff)}`,
+        });
       }
     }
 
     return NextResponse.json({ status: "success", alerts });
-
   } catch (error) {
-    console.error("❌ CHECK KPI ERROR:", error.message);
+    console.error("❌ CHECK KPI ERROR:", error);
     return NextResponse.json({
       status: "error",
       message: error.message,
