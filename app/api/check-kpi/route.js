@@ -29,6 +29,8 @@ export async function POST() {
       : rawkey;
 
     console.log("DEBUG FIXED KEY LENGTH:", privatekey.length);
+    console.log("PRIVATE KEY FIRST 30:", privatekey.substring(0, 30));
+    console.log("PRIVATE KEY LAST 30:", privatekey.substring(privatekey.length - 30));
 
     // ==== AUTH GOOGLE SHEETS ====
     const auth = new google.auth.JWT(
