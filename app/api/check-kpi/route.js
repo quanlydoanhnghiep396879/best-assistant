@@ -8,7 +8,6 @@ export async function POST() {
   console.log("✅ CHECK KPI API CALLED");
 
   try {
-    // === LOAD ENV ===
     const base64Key = process.env.GOOGLE_PRIVATE_KEY_BASE64;
     const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
     const spreadsheetId = process.env.GOOGLE_SHEET_ID;
@@ -23,19 +22,22 @@ export async function POST() {
         message: "Missing GOOGLE_PRIVATE_KEY_BASE64",
       });
     }
-    // === DECODE BASE64 → PEM KEY ===
-    const privateKey = Buffer.from(base64Key, "base64").toString("utf8");
+
+    // DECODE BASE64 -> PEM
+    const privateKey = Buffer.from(base64Key, "base64")
+      .toString("utf8")
+      .replace(/\r/g, "")
+      .trim();
 
     console.log("PEM FIRST LINE:", privateKey.split("\n")[0]);
     console.log("PEM LAST LINE:", privateKey.split("\n").slice(-1)[0]);
 
-    // === AUTH GOOGLE SHEETS ===
-    const auth = new google.auth.JWT(
-      email,
-      null,
-      privateKey,
-      ["https://www.googleapis.com/auth/spreadsheets.readonly"]
-    );
+    // CORRECT GOOGLE AUTH FORMAT
+    const auth = new google.auth.JWT({
+      email: email,
+      key: privateKey,
+      scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
+    });
 
     console.log("🔥 TRY AUTH...");
     await auth.authorize();
@@ -43,13 +45,11 @@ export async function POST() {
 
     const sheets = google.sheets({ version: "v4", auth });
 
-    // === READ KPI ===
     const kpiRes = await sheets.spreadsheets.values.get({
       spreadsheetId,
       range: "KPI!A2:G100",
     });
 
-    // === READ PRODUCTION ===
     const realRes = await sheets.spreadsheets.values.get({
       spreadsheetId,
       range: "PRODUCTION!A2:G100",
@@ -68,7 +68,6 @@ export async function POST() {
         const step = headers[col];
         const kpiValue = Number(kpi[i]?.[col] || 0);
         const realValue = Number(real[i]?.[col] || 0);
-
         const diff = realValue - kpiValue;
 
         alerts.push({
