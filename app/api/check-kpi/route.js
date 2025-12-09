@@ -3,6 +3,7 @@ import { google } from "googleapis";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate =0;
 
 export async function POST() {
   console.log("✅ CHECK KPI API CALLED");
@@ -78,8 +79,8 @@ export async function POST() {
           diff === 0
             ? "Đủ chỉ tiêu"
             : diff > 0
-            ? Vượt `${diff}`
-            : Thiếu `${Math.abs(diff)}`;
+            ? `Vượt ${diff}`
+            : `Thiếu ${Math.abs(diff)}`;
 
         alerts.push({ time, step, kpi: kpiValue, real: realValue, diff, status, message });
       }
