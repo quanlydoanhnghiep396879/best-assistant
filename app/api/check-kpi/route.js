@@ -3,7 +3,6 @@ import { google } from "googleapis";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const revalidate =0;
 
 export async function POST() {
   console.log("✅ CHECK KPI API CALLED");
@@ -12,6 +11,7 @@ export async function POST() {
     // ==== LOAD ENV ====
     const rawkey = process.env.GOOGLE_PRIVATE_KEY;
     const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+    const spreadsheetId = process.env.GOOGLE_SHEET_ID;
 
     console.log("DEBUG GOOGLE EMAIL:", email);
     console.log("DEBUG HAS KEY:", !!rawkey);
@@ -35,16 +35,17 @@ export async function POST() {
 
     // ==== AUTH GOOGLE SHEETS ====
     const auth = new google.auth.JWT(
-      email,
-      null,
-      privatekey, // đúng biến
+      email,       // Service Account Email
+      null,        // keyFile (null = không dùng file)
+      privatekey,  // 🔥 PHẢI TRUYỀN ĐÚNG privatekey
       ["https://www.googleapis.com/auth/spreadsheets.readonly"]
     );
 
+    console.log("🔥 TRY GOOGLE AUTH...");
     await auth.authorize();
+    console.log("🔥 GOOGLE AUTH SUCCESS!");
 
     const sheets = google.sheets({ version: "v4", auth });
-    const spreadsheetId = process.env.GOOGLE_SHEET_ID;
 
     // ==== READ KPI ====
     const kpiRes = await sheets.spreadsheets.values.get({
@@ -71,7 +72,6 @@ export async function POST() {
         const step = headers[col];
         const kpiValue = Number(kpi[i]?.[col] || 0);
         const realValue = Number(real[i]?.[col] || 0);
-
         const diff = realValue - kpiValue;
 
         const status = diff === 0 ? "equal" : diff > 0 ? "over" : "lack";
@@ -89,7 +89,7 @@ export async function POST() {
     return NextResponse.json({ status: "success", alerts });
 
   } catch (error) {
-    console.error("❌ CHECK KPI ERROR:", error);
+    console.error("❌ CHECK KPI ERROR:", error.message);
     return NextResponse.json({
       status: "error",
       message: error.message,
