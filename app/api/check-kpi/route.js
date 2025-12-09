@@ -23,7 +23,6 @@ export async function POST() {
         message: "Missing GOOGLE_PRIVATE_KEY_BASE64",
       });
     }
-
     // === DECODE BASE64 → PEM KEY ===
     const privateKey = Buffer.from(base64Key, "base64").toString("utf8");
 
