@@ -1,5 +1,3 @@
-console.log("ENV KEY LENGTH:", process.env.GOOGLE_PRIVATE_KEY ?.length);
-
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
 
@@ -10,31 +8,35 @@ export const revalidate = 0;
 
 export async function POST() {
   console.log("✅ CHECK KPI API CALLED");
+
   try {
-    // ==== DEBUG ENV GOOGLE KEY ====
-    const rawKey = process.env.GOOGLE_PRIVATE_KEY;
+    // === LOAD ENV ===
+    const rawkey = process.env.GOOGLE_PRIVATE_KEY;
     const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
 
     console.log("DEBUG GOOGLE EMAIL:", email);
-    console.log("DEBUG HAS KEY:", !!rawKey);
-    console.log("DEBUG KEY LENGTH:", rawKey ? rawKey.length : 0);
+    console.log("DEBUG HAS KEY:", !!rawkey);
+    console.log("DEBUG RAW KEY LENGTH:", rawkey ? rawkey.length : 0);
 
-    if (!rawKey) {
-      // Nếu vào đây thì chắc chắn env không load
+    if (!rawkey) {
       return NextResponse.json({
         status: "error",
-        message: "SERVER: GOOGLE_PRIVATE_KEY is empty (env không có giá trị)",
+        message: "SERVER: GOOGLE_PRIVATE_KEY is empty",
       });
     }
 
-    // Nếu key đang ở dạng có kí tự \n trong chuỗi thì replace, còn không thì để nguyên
-    const privateKey = rawKey.replace(/\\n/g, "\n");
+    // === FIX KEY FORMAT ===
+    const privatekey = rawkey.includes("\\n")
+      ? rawkey.replace(/\\n/g, "\n")
+      : rawkey;
 
-    // AUTH GOOGLE SHEETS
+    console.log("DEBUG FIXED KEY LENGTH:", privatekey.length);
+
+    // === AUTH GOOGLE SHEETS ===
     const auth = new google.auth.JWT(
       email,
       null,
-      privateKey,
+      privatekey,
       ["https://www.googleapis.com/auth/spreadsheets.readonly"]
     );
 
@@ -43,13 +45,13 @@ export async function POST() {
     const sheets = google.sheets({ version: "v4", auth });
     const spreadsheetId = process.env.GOOGLE_SHEET_ID;
 
-    // Đọc KPI
+    // === READ KPI ===
     const kpiRes = await sheets.spreadsheets.values.get({
       spreadsheetId,
       range: "KPI!A2:G100",
     });
 
-    // Đọc sản lượng
+    // === READ REAL ===
     const realRes = await sheets.spreadsheets.values.get({
       spreadsheetId,
       range: "PRODUCTION!A2:G100",
@@ -69,28 +71,22 @@ export async function POST() {
 
         const kpiValue = Number(kpi[i]?.[col] || 0);
         const realValue = Number(real[i]?.[col] || 0);
-
         const diff = realValue - kpiValue;
 
-        let status = "";
-        let message = "";
-
-        if (diff === 0) {
-          status = "equal";
-          message = "Đủ chỉ tiêu";
-        } else if (diff > 0) {
-          status = "over";
-          message = `Vượt ${diff}`;
-        } else {
-          status = "lack";
-          message = `Thiếu ${Math.abs(diff)}`;
-        }
+        let status = diff === 0 ? "equal" : diff > 0 ? "over" : "lack";
+        let message =
+          diff === 0
+            ? "Đủ chỉ tiêu"
+            : diff > 0
+            ?`Vượt ${diff}`
+            : `Thiếu ${Math.abs(diff)}`;
 
         alerts.push({ time, step, kpi: kpiValue, real: realValue, diff, status, message });
       }
     }
 
     return NextResponse.json({ status: "success", alerts });
+
   } catch (error) {
     console.error("❌ CHECK KPI ERROR:", error);
     return NextResponse.json({
@@ -103,6 +99,6 @@ export async function POST() {
 export function GET() {
   return NextResponse.json({
     status: "error",
-    message: "API này chỉ hỗ trợ POST – không hỗ trợ GET",
+    message: "API này chỉ hỗ trợ POST",
   });
 }
