@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
+import { sendMail } from "@/lib/sendMail";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -97,6 +98,130 @@ export async function POST() {
   }
 }
 
+// alerts = [
+//   { time, step, kpi, real, diff }
+// ]
+
+const workingHours = ["08:00", "09:00", "10:00", "11:00", "12:00"];
+const currentHour = alerts[0]?.time;
+
+// =======================
+// 🔔 BÁO THEO TỪNG GIỜ
+// =======================
+const alertsThisHour = alerts.filter(a => a.time === currentHour);
+const hasProblemThisHour = alertsThisHour.some(a => a.diff !== 0);
+
+if (alertsThisHour.length > 0) {
+  const rows = alertsThisHour.map(a => `
+    <tr>
+      <td>${a.step}</td>
+      <td>${a.kpi}</td>
+      <td>${a.real}</td>
+      <td style="color:${a.diff < 0 ? "#dc2626" : a.diff > 0 ? "#f59e0b" : "#16a34a"};
+                  font-weight:bold">
+        ${
+          a.diff < 0
+            ? `Thiếu ${Math.abs(a.diff)}`
+            : a.diff > 0
+            ? `Vượt ${a.diff}`
+            : "Đạt KPI"
+        }
+      </td>
+    </tr>
+  `).join("");
+
+  await sendMail({
+    subject: hasProblemThisHour
+      ? `🚨 KPI ${currentHour} – CẦN XỬ LÝ`
+      : `🎉 KPI ${currentHour} – ĐẠT`,
+    html: `
+      <h3>${hasProblemThisHour ? "🚨 Cảnh báo KPI" : "🎉 KPI ĐẠT"} – ${currentHour}</h3>
+      <table border="1" cellpadding="6">
+        <tr>
+          <th>Công đoạn</th>
+          <th>KPI</th>
+          <th>Thực tế</th>
+          <th>Trạng thái</th>
+        </tr>
+        ${rows}
+      </table>
+
+      ${
+        hasProblemThisHour
+          ? "<p><b>👉 Gợi ý:</b> tăng nhân lực / điều chỉnh nhịp chuyền</p>"
+          : "<p style='color:#16a34a'><b>🎉 Nhịp chuyền ổn định, tiếp tục duy trì</b></p>"
+      }
+
+      <p>— KPI Assistant</p>
+    `
+  });
+}
+
+// =======================
+// 🏁 TỔNG KẾT CUỐI NGÀY
+// =======================
+const hoursDone = [...new Set(alerts.map(a => a.time))];
+const isFullDay = workingHours.every(h => hoursDone.includes(h));
+const hasAnyProblem = alerts.some(a => a.diff !== 0);
+
+if (isFullDay) {
+  if (!hasAnyProblem) {
+    // 🏆 CHÚC MỪNG LỚN
+    await sendMail({
+      subject: "🏆 CHÚC MỪNG! HOÀN THÀNH KPI NGÀY HÔM NAY",
+      html: `
+        <h1 style="color:#16a34a">🏆 HOÀN THÀNH KPI NGÀY</h1>
+        <p>🎉 Toàn bộ 5 khung giờ đều đạt KPI.</p>
+
+        <ul>
+          <li>✅ Không thiếu công đoạn</li>
+          <li>✅ Không vượt gây tồn</li>
+          <li>✅ Nhịp chuyền ổn định</li>
+        </ul>
+
+        <p><b>👉 Đề xuất:</b> duy trì cấu hình chuyền hiện tại.</p>
+        <p>— KPI Assistant</p>
+      `
+    });
+  } else {
+    // 📊 TỔNG KẾT CÓ VẤN ĐỀ
+    const problemRows = alerts
+      .filter(a => a.diff !== 0)
+      .map(a => `
+        <tr>
+          <td>${a.time}</td>
+          <td>${a.step}</td>
+          <td style="color:${a.diff < 0 ? "#dc2626" : "#f59e0b"};font-weight:bold">
+            ${a.diff < 0 ? `Thiếu ${Math.abs(a.diff)}` : `Vượt ${a.diff}`}
+          </td>
+        </tr>
+      `)
+      .join("");
+
+    await sendMail({
+      subject: "📊 TỔNG KẾT KPI NGÀY – CẦN CẢI THIỆN",
+      html: `
+        <h2>📊 Tổng kết KPI trong ngày</h2>
+        <table border="1" cellpadding="6">
+          <tr>
+            <th>Giờ</th>
+            <th>Công đoạn</th>
+            <th>Trạng thái</th>
+          </tr>
+          ${problemRows}
+        </table>
+
+        <p><b>👉 Gợi ý:</b></p>
+        <ul>
+          <li>Thiếu → tăng nhân lực / giảm chuyển chuyền</li>
+          <li>Vượt → điều tiết nhịp / tránh tồn</li>
+        </ul>
+
+        <p>— KPI Assistant</p>
+      `
+    });
+  }
+}
 export function GET() {
   return NextResponse.json({
     status: "error",
