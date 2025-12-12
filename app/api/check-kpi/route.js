@@ -124,7 +124,7 @@ export async function POST() {
         });
       } else {
         await sendMail({
-          subject:`🎉 KPI ${currentHour} ĐẠT`,
+          subject: `🎉 KPI ${currentHour} ĐẠT`,
           html: `
             <h3 style="color:#16a34a">🎉 KPI ${currentHour} ĐẠT</h3>
             <p>Tất cả công đoạn đạt chỉ tiêu.</p>
