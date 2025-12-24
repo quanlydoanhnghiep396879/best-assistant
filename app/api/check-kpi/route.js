@@ -51,13 +51,14 @@ export async function POST() {
     const alerts = [];
 
     for (let i = 0; i < kpi.length; i++) {
-      const kpiVal = Number(kpi[i]?.[col] || 0);
-      const realVal = Number(real[i]?.[col] || 0);
-      if (kpiVal === 0 && realVal === 0) continue; // bỏ qua nếu cả 2 đều 0
+      
       const time = kpi[i]?.[0];
       if (!WORKING_HOURS.includes(time)) continue;
 
       for (let col = 1; col < headers.length; col++) {
+           const kpiVal = Number(kpi[i]?.[col] || 0);
+      const realVal = Number(real[i]?.[col] || 0);
+      if (kpiVal === 0 && realVal === 0) continue;
         const diff = Number(real[i]?.[col] || 0) - Number(kpi[i]?.[col] || 0);
 
         alerts.push({
