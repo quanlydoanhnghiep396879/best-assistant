@@ -5,103 +5,59 @@ export const fetchCache = "force-no-store";
 
 import { useEffect, useState } from "react";
 
-export default function KPIPage() {
+export default function Dashboard() {
   const [alerts, setAlerts] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // HÀM LOAD KPI
-  const loadKPI = () => {
-    fetch("/api/check-kpi", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" }
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        console.log("KPI RESULT:", data);
+  useEffect(() => {
+    fetch("/api/check-kpi", { method: "POST" })
+      .then(res => res.json())
+      .then(data => {
         setAlerts(data.alerts || []);
         setLoading(false);
-      })
-      .catch((err) => console.error("Lỗi load KPI:", err));
-  };
-
-  // TỰ ĐỘNG CHẠY
-  useEffect(() => {
-    loadKPI();                         // chạy lần đầu
-    const timer = setInterval(loadKPI, 60000); // 60 giây cập nhật
-    return () => clearInterval(timer);
+      });
   }, []);
 
-  if (loading)
-    return <p style={{ padding: 20 }}>⏳ Đang tải dữ liệu...</p>;
-
-  // GROUP THEO GIỜ
-  const grouped = {};
-  alerts.forEach((item) => {
-    if (!grouped[item.time]) grouped[item.time] = [];
-    grouped[item.time].push(item);
-  });
+  if (loading) return <p>⏳ Đang tải dashboard...</p>;
 
   return (
-    <div style={{ padding: 30, background: "#0A192F", minHeight: "100vh", color: "white" }}>
-      <h1 style={{ textAlign: "center", color: "#00E5FF", fontSize: 32 }}>
-        📊 Dashboard KPI theo giờ (Tự động cập nhật)
-      </h1>
+    <div style={{ padding: 20 }}>
+      <h2>📊 KPI Dashboard</h2>
 
-      {Object.entries(grouped).map(([time, items]) => (
-        <div
-          key={time}
-          style={{
-            background: "#112240",
-            padding: 20,
-            borderRadius: 12,
-            marginBottom: 25,
-            boxShadow: "0 0 12px rgba(0,255,255,0.2)",
-          }}
-        >
-          <h2 style={{ color: "#7B61FF", fontSize: 24 }}>🕒 Giờ: {time}</h2>
-
-          <table style={{ width: "100%", marginTop: 12, borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ background: "#1B2F4A" }}>
-                <th style={th}>Công đoạn</th>
-                <th style={th}>KPI</th>
-                <th style={th}>Thực tế</th>
-                <th style={th}>Chênh lệch</th>
-                <th style={th}>Trạng thái</th>
-              </tr>
-            </thead>
-
-            <tbody>
-              {items.map((i, idx) => (
-                <tr key={idx} style={{ background: idx % 2 ? "#0F1E33" : "#14263F" }}>
-                  <td style={td}>{i.step}</td>
-                  <td style={td}>{i.kpi}</td>
-                  <td style={td}>{i.real}</td>
-                  <td style={td}>{i.diff}</td>
-                  <td
-                    style={{
-                      ...td,
-                      fontWeight: "bold",
-                      color:
-                        i.status === "lack"
-                          ? "#FF4F4F"
-                          : i.status === "over"
-                          ? "#FFD400"
-                          : "#00FF9C",
-                    }}
-                  >
-                    {i.status === "lack"
-                      ? "❌ Thiếu"
-                      : i.status === "over"
-                      ? "⚠️ Vượt"
-                      : "✅ Đủ"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ))}
+      <table border="1" cellPadding="6">
+        <thead>
+          <tr>
+            <th>Giờ</th>
+            <th>Công đoạn</th>
+            <th>KPI</th>
+            <th>Thực tế</th>
+            <th>Trạng thái</th>
+          </tr>
+        </thead>
+        <tbody>
+          {alerts.map((a, i) => (
+            <tr key={i}>
+              <td>{a.time}</td>
+              <td>{a.step}</td>
+              <td>{a.kpi}</td>
+              <td>{a.real}</td>
+              <td
+                style={{
+                  color:
+                    a.diff < 0
+                      ? "#dc2626"
+                      : a.diff > 0
+                      ? "#f59e0b"
+                      : "#16a34a",
+                  fontWeight: "bold",
+                }}
+              >
+                {a.message}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
