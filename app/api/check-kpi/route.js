@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
 const WORKING_HOURS = ["08:00", "09:00", "10:00", "11:00", "12:00"];
 const KPI_RANGE = "KPI!A2:G100";
 const REAL_RANGE = "PRODUCTION!A2:G100";
-const LOG_RANGE = "LOG!A2:B100"; // LOG: Giờ | Đã gửi mail (TRUE)
+const LOG_RANGE = "SYSTEM_LOG!A2:B100"; // LOG: Giờ | Đã gửi mail (TRUE)
 
 /**
  * POST /api/check-kpi
@@ -124,10 +124,10 @@ export async function POST() {
       `,
     });
 
-    // ===== 6. GHI LOG ĐÃ GỬI =====
+    // ===== 6. GHI SYSTEM_LOG ĐÃ GỬI =====
     await sheets.spreadsheets.values.append({
       spreadsheetId,
-      range: "LOG!A:B",
+      range: "SYSTEM_LOG!A:B",
       valueInputOption: "RAW",
       requestBody: {
         values: [[newHour, "TRUE"]],
