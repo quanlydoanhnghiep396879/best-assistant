@@ -115,79 +115,7 @@ async function getGoogleAuth() {
   });
 }
 
-/* ========= GỬI EMAIL (NẾU CÓ CẤU HÌNH) ========= */
-
-async function sendKpiEmail(hourAlerts, dayAlerts) {
-  const from = process.env.ALERT_EMAIL_FROM;
-  const to = process.env.ALERT_EMAIL_TO;
-  const pass = process.env.ALERT_EMAIL_PASS;
-
-  // nếu chưa cấu hình email thì bỏ qua, không cho app crash
-  if (!from || !to || !pass) {
-    console.warn("Email env not set, skip sending KPI email");
-    return;
-  }
-
-  const transporter = nodemailer.createTransport({
-    service: "gmail",
-    auth: { user: from, pass },
-  });
-
-  const problemsHour = hourAlerts.filter((a) => a.status !== "equal");
-  const problemsDay = dayAlerts.filter((a) => a.status === "day_fail");
-
-  let subject = "Báo cáo KPI sản xuất";
-  if (problemsHour.length > 0 || problemsDay.length > 0) {
-    subject = "⚠️ Cảnh báo KPI – Có chuyền thiếu/vượt hoặc không đạt ngày";
-  } else {
-    subject = "✅ Tất cả chuyền đang đạt KPI theo giờ & trong ngày";
-  }
-
-  const lines = [];
-
-  if (problemsHour.length > 0) {
-    lines.push("=== CẢNH BÁO THEO GIỜ ===");
-    problemsHour.forEach((a) => {
-      lines.push(
-        `Chuyền ${a.chuyen} – ${a.hour}: Thực tế ${a.actual}, Kế hoạch lũy tiến ${a.target}, Chênh lệch ${a.diff} (${a.message})`
-      );
-      lines.push(`Gợi ý xử lý: ${a.advice}`);
-      lines.push("");
-    });
-  }
-
-  if (problemsDay.length > 0) {
-    lines.push("=== CẢNH BÁO HIỆU SUẤT NGÀY ===");
-    problemsDay.forEach((a) => {
-      lines.push(
-        `Chuyền ${a.chuyen}: Hiệu suất ngày ${a.effDay.toFixed(
-          2
-        )}%, Định mức ${a.targetEffDay.toFixed(2)}% (${a.status === "day_ok"
-          ? "Đạt"
-          : "Không đạt"})`
-      );
-      lines.push(`Gợi ý xử lý: ${a.advice}`);
-      lines.push("");
-    });
-  }
-
-  if (lines.length === 0) {
-    lines.push(
-      "Tất cả chuyền đều đạt hoặc vượt KPI theo giờ và hiệu suất ngày so với định mức."
-    );
-  }
-
-  const text = lines.join("\n");
-
-  await transporter.sendMail({
-    from,
-    to,
-    subject,
-    text,
-  });
-}
-
-/* ========= LOGIC CHÍNH ========= */
+/* ========= LOGIC CHÍNH – CHỈ TRẢ JSON, KHÔNG GỬI MAIL ========= */
 
 async function handleKpi() {
   const spreadsheetId = process.env.GOOGLE_SHEET_ID;
@@ -246,9 +174,9 @@ async function handleKpi() {
             : status === "over"
             ? `Vượt ${diff} sp`
             : `Thiếu ${Math.abs(diff)} sp`,
-        advice: getAdviceHour(chuyen, h.label, status, diff),
+            advice: getAdviceHour(chuyen, h.label, status, diff),
       });
-       await writeLog(a.time, "hour");
+      await writeLog(a.time, "hour");
     }
 
     // ===== HIỆU SUẤT TRONG NGÀY (khi TG SX >= 8h) =====
@@ -267,10 +195,7 @@ async function handleKpi() {
     }
   }
 
-  // gửi email tổng hợp (nếu có cấu hình env email)
-  await sendKpiEmail(hourAlerts, dayAlerts);
-
-  // trả JSON cho dashboard
+  
   return { hourAlerts, dayAlerts };
 }
 
@@ -289,7 +214,7 @@ export async function POST() {
   }
 }
 
-// Cho GET để dễ debug trên trình duyệt
+
 export async function GET() {
   return POST();
 }
