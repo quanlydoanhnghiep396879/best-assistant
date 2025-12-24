@@ -1,11 +1,12 @@
+/* eslint-disable */
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/* ========= MAPPING CỘT (TÍNH TỪ H5) ========= */
-// range đọc là KPI!H5:T200 → index 0 tương ứng cột H
+/* ========= CẤU HÌNH CỘT (TÍNH TỪ H5) =========
+   Đọc range KPI!H5:T200  → index 0 = cột H  */
 const COL_DM_DAY = 0;          // H: DM/NGÀY
 const COL_DM_HOUR = 1;         // I: DM/H
 const COL_9H = 2;              // J: 9h
@@ -16,11 +17,11 @@ const COL_13H30 = 6;           // N: 13h30
 const COL_14H30 = 7;           // O: 14h30
 const COL_15H30 = 8;           // P: 15h30
 const COL_16H30 = 9;           // Q: 16h30
-const COL_TG_SX = 10;          // R: TG SX (số giờ sản xuất)
+const COL_TG_SX = 10;          // R: TG SX (giờ sản xuất)
 const COL_EFF_DAY = 11;        // S: HIỆU SUẤT ĐẠT TRONG NGÀY (%)
 const COL_TARGET_EFF_DAY = 12; // T: ĐỊNH MỨC HIỆU SUẤT NGÀY (%)
 
-// từng cột giờ + số giờ lũy tiến tương ứng
+// mỗi cột giờ + số giờ lũy tiến tương ứng
 const HOUR_COLUMNS = [
   { label: "9h",     index: COL_9H,     hours: 1 },
   { label: "10h",    index: COL_10H,    hours: 2 },
@@ -60,10 +61,12 @@ async function getGoogleAuth() {
   if (!base64Key) throw new Error("Missing GOOGLE_PRIVATE_KEY_BASE64");
   if (!email) throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_EMAIL");
 
+  // decode base64 → PEM
   let privateKey = Buffer.from(base64Key, "base64")
     .toString("utf8")
     .replace(/\r/g, "");
 
+  // chỉ lấy block PRIVATE KEY
   const match = privateKey.match(
     /-----BEGIN PRIVATE KEY-----[\s\S]+?-----END PRIVATE KEY-----/
   );
@@ -79,7 +82,7 @@ async function getGoogleAuth() {
   });
 }
 
-/* ========= LOGIC CHÍNH – CHỈ TRẢ JSON, KHÔNG GỬI MAIL ========= */
+/* ========= LOGIC CHÍNH ========= */
 
 async function handleKpi() {
   const spreadsheetId = process.env.GOOGLE_SHEET_ID;
@@ -112,16 +115,16 @@ async function handleKpi() {
     const row = rows[i];
     if (!row || row.length === 0) continue;
 
-    const chuyen = names[i]?.[0] || Row ${i + 5};
+    const chuyen = names[i]?.[0] || `Row ${i + 5}`;
     const dmHour = toNumber(row[COL_DM_HOUR]);
     const tgSx = toNumber(row[COL_TG_SX]);
 
-    // ===== THEO GIỜ (lũy tiến) =====
+    // ===== KIỂM SOÁT THEO GIỜ (LŨY TIẾN) =====
     for (const h of HOUR_COLUMNS) {
       const actual = toNumber(row[h.index]);
-      if (actual === 0 && dmHour === 0) continue;
+      if (actual === 0 && dmHour === 0) continue; // không có dữ liệu
 
-      const target = dmHour * h.hours;
+      const target = dmHour * h.hours; // kế hoạch lũy tiến
       const diff = actual - target;
       const status = diff === 0 ? "equal" : diff > 0 ? "over" : "lack";
 
@@ -141,7 +144,7 @@ async function handleKpi() {
       });
     }
 
-    // ===== HIỆU SUẤT TRONG NGÀY (khi TG SX >= 8h) =====
+    // ===== HIỆU SUẤT TRONG NGÀY (KHI TG SX ≥ 8 GIỜ) =====
     if (tgSx >= 8) {
       const effDay = toPercentNumber(row[COL_EFF_DAY]);
       const targetEffDay = toPercentNumber(row[COL_TARGET_EFF_DAY]);
@@ -164,7 +167,11 @@ async function handleKpi() {
 export async function POST() {
   try {
     const result = await handleKpi();
-    return NextResponse.json({ status: "success", ...result });
+    return NextResponse.json({
+      status: "success",
+      hourAlerts: result.hourAlerts,
+      dayAlerts: result.dayAlerts,
+    });
   } catch (err) {
     console.error("❌ KPI API ERROR:", err);
     return NextResponse.json(
