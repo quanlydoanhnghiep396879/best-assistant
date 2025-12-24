@@ -1,130 +1,292 @@
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
-import { sendMail } from "@/lib/sendMail";
+import nodemailer from "nodemailer";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const WORKING_HOURS = ["09:00", "10:00", "11:00", "12:30", "13:30", "14:30", "15:30", "16:30"];
-function today() {
-  return new Date().toISOString().slice(0, 10);
+/* ========= MAPPING CỘT (TÍNH TỪ H5) ========= */
+// range đọc là KPI!H5:T200 → index 0 tương ứng cột H
+const COL_DM_DAY = 0;          // H: DM/NGÀY
+const COL_DM_HOUR = 1;         // I: DM/H
+const COL_9H = 2;              // J: 9h
+const COL_10H = 3;             // K: 10h
+const COL_11H = 4;             // L: 11h
+const COL_12H30 = 5;           // M: 12h30
+const COL_13H30 = 6;           // N: 13h30
+const COL_14H30 = 7;           // O: 14h30
+const COL_15H30 = 8;           // P: 15h30
+const COL_16H30 = 9;           // Q: 16h30
+const COL_TG_SX = 10;          // R: TG SX (số giờ sản xuất)
+const COL_EFF_DAY = 11;        // S: HIỆU SUẤT ĐẠT TRONG NGÀY (%)
+const COL_TARGET_EFF_DAY = 12; // T: ĐỊNH MỨC HIỆU SUẤT NGÀY (%)
+
+// từng cột giờ + số giờ lũy tiến tương ứng
+const HOUR_COLUMNS = [
+  { label: "9h",     index: COL_9H,     hours: 1 },
+  { label: "10h",    index: COL_10H,    hours: 2 },
+  { label: "11h",    index: COL_11H,    hours: 3 },
+  { label: "12h30",  index: COL_12H30,  hours: 4 },
+  { label: "13h30",  index: COL_13H30,  hours: 5 },
+  { label: "14h30",  index: COL_14H30,  hours: 6 },
+  { label: "15h30",  index: COL_15H30,  hours: 7 },
+  { label: "16h30",  index: COL_16H30,  hours: 8 },
+];
+
+/* ========= HÀM PHỤ ========= */
+
+function toNumber(v) {
+  if (v === null || v === undefined) return 0;
+  if (typeof v === "number") return v;
+  const t = String(v).replace(/,/g, "").trim();
+  if (!t) return 0;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : 0;
 }
+
+// "95.87%" -> 95.87
+function toPercentNumber(v) {
+  if (v === null || v === undefined) return 0;
+  const t = String(v).replace("%", "").replace(",", ".").trim();
+  const n = Number(t);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function getAdviceHour(chuyen, hourLabel, status, diff) {
+  if (status === "equal") {
+    return `Chuyền ${chuyen} tại ${hourLabel} đang đạt đúng kế hoạch. Tiếp tục duy trì nhịp độ hiện tại.`;
+  }
+  if (status === "over") {
+    return `Chuyền ${chuyen} tại ${hourLabel} đang vượt kế hoạch ${diff} sản phẩm.
+- Xem xét giảm OT / tốc độ để tiết kiệm chi phí.
+- Kiểm tra công đoạn sau có bị dồn hàng hay không.
+- Có thể chia bớt nhân lực sang chuyền đang thiếu.`;
+  }
+  // status === "lack"
+  return `Chuyền ${chuyen} tại ${hourLabel} đang thiếu ${Math.abs(diff)} sản phẩm so với kế hoạch.
+- Kiểm tra: thiếu NPL, máy hỏng, công nhân vắng, thao tác chậm, hay tắc từ công đoạn trước.
+- Cân nhắc hỗ trợ thêm nhân lực hoặc tăng ca cục bộ.
+- Nếu thiếu liên tục nhiều giờ cần xem lại phân chuyền và kế hoạch.`;
+}
+
+function getAdviceDay(chuyen, eff, target, status) {
+  if (status === "day_ok") {
+    return `Chuyền ${chuyen} đạt ${eff.toFixed(
+      2
+    )}% so với định mức ${target.toFixed(
+      2
+    )}%. Hoàn thành tốt kế hoạch ngày, có thể xem xét tối ưu lại định mức hoặc giảm OT.`;
+  }
+  return `Chuyền ${chuyen} chỉ đạt ${eff.toFixed(
+    2
+  )}% so với định mức ${target.toFixed(
+    2
+  )}%. Cần phân tích nguyên nhân (NPL, máy móc, tay nghề, bố trí lao động) và đề xuất hành động khắc phục cho ngày hôm sau.`;
+}
+
+/* ========= GOOGLE AUTH (BASE64 PRIVATE KEY) ========= */
+
+async function getGoogleAuth() {
+  const base64Key = process.env.GOOGLE_PRIVATE_KEY_BASE64;
+  const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+
+  if (!base64Key) throw new Error("Missing GOOGLE_PRIVATE_KEY_BASE64");
+  if (!email) throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_EMAIL");
+
+  let privateKey = Buffer.from(base64Key, "base64")
+    .toString("utf8")
+    .replace(/\r/g, "");
+
+  const match = privateKey.match(
+    /-----BEGIN PRIVATE KEY-----[\s\S]+?-----END PRIVATE KEY-----/
+  );
+  if (!match) {
+    throw new Error("Decoded key does not contain a PRIVATE KEY block");
+  }
+  privateKey = match[0].trim();
+
+  return new google.auth.JWT({
+    email,
+    key: privateKey,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
+  });
+}
+
+/* ========= GỬI EMAIL (NẾU CÓ CẤU HÌNH) ========= */
+
+async function sendKpiEmail(hourAlerts, dayAlerts) {
+  const from = process.env.ALERT_EMAIL_FROM;
+  const to = process.env.ALERT_EMAIL_TO;
+  const pass = process.env.ALERT_EMAIL_PASS;
+
+  // nếu chưa cấu hình email thì bỏ qua, không cho app crash
+  if (!from || !to || !pass) {
+    console.warn("Email env not set, skip sending KPI email");
+    return;
+  }
+
+  const transporter = nodemailer.createTransport({
+    service: "gmail",
+    auth: { user: from, pass },
+  });
+
+  const problemsHour = hourAlerts.filter((a) => a.status !== "equal");
+  const problemsDay = dayAlerts.filter((a) => a.status === "day_fail");
+
+  let subject = "Báo cáo KPI sản xuất";
+  if (problemsHour.length > 0 || problemsDay.length > 0) {
+    subject = "⚠️ Cảnh báo KPI – Có chuyền thiếu/vượt hoặc không đạt ngày";
+  } else {
+    subject = "✅ Tất cả chuyền đang đạt KPI theo giờ & trong ngày";
+  }
+
+  const lines = [];
+
+  if (problemsHour.length > 0) {
+    lines.push("=== CẢNH BÁO THEO GIỜ ===");
+    problemsHour.forEach((a) => {
+      lines.push(
+        `Chuyền ${a.chuyen} – ${a.hour}: Thực tế ${a.actual}, Kế hoạch lũy tiến ${a.target}, Chênh lệch ${a.diff} (${a.message})`
+      );
+      lines.push(`Gợi ý xử lý: ${a.advice}`);
+      lines.push("");
+    });
+  }
+
+  if (problemsDay.length > 0) {
+    lines.push("=== CẢNH BÁO HIỆU SUẤT NGÀY ===");
+    problemsDay.forEach((a) => {
+      lines.push(
+        `Chuyền ${a.chuyen}: Hiệu suất ngày ${a.effDay.toFixed(
+          2
+        )}%, Định mức ${a.targetEffDay.toFixed(2)}% (${a.status === "day_ok"
+          ? "Đạt"
+          : "Không đạt"})`
+      );
+      lines.push(`Gợi ý xử lý: ${a.advice}`);
+      lines.push("");
+    });
+  }
+
+  if (lines.length === 0) {
+    lines.push(
+      "Tất cả chuyền đều đạt hoặc vượt KPI theo giờ và hiệu suất ngày so với định mức."
+    );
+  }
+
+  const text = lines.join("\n");
+
+  await transporter.sendMail({
+    from,
+    to,
+    subject,
+    text,
+  });
+}
+
+/* ========= LOGIC CHÍNH ========= */
+
+async function handleKpi() {
+  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+  if (!spreadsheetId) throw new Error("Missing GOOGLE_SHEET_ID");
+
+  const auth = await getGoogleAuth();
+  await auth.authorize();
+
+  const sheets = google.sheets({ version: "v4", auth });
+
+  // tên chuyền ở cột B
+  const namesRes = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: "KPI!B5:B200",
+  });
+
+  // dữ liệu KPI ở cột H → T
+  const dataRes = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: "KPI!H5:T200",
+  });
+
+  const names = namesRes.data.values || [];
+  const rows = dataRes.data.values || [];
+
+  const hourAlerts = [];
+  const dayAlerts = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row || row.length === 0) continue;
+
+    const chuyen = names[i]?.[0] || `Row ${i + 5}`;
+    const dmHour = toNumber(row[COL_DM_HOUR]);
+    const tgSx = toNumber(row[COL_TG_SX]);
+
+    // ===== THEO GIỜ (lũy tiến) =====
+    for (const h of HOUR_COLUMNS) {
+      const actual = toNumber(row[h.index]);
+      if (actual === 0 && dmHour === 0) continue;
+
+      const target = dmHour * h.hours;
+      const diff = actual - target;
+      const status = diff === 0 ? "equal" : diff > 0 ? "over" : "lack";
+
+      hourAlerts.push({
+        chuyen,
+        hour: h.label,
+        target,
+        actual,
+        diff,
+        status,
+        message:
+          status === "equal"
+            ? "Đủ kế hoạch"
+            : status === "over"
+            ? `Vượt ${diff} sp`
+            : `Thiếu ${Math.abs(diff)} sp`,
+        advice: getAdviceHour(chuyen, h.label, status, diff),
+      });
+       await writeLog(a.time, "hour");
+    }
+
+    // ===== HIỆU SUẤT TRONG NGÀY (khi TG SX >= 8h) =====
+    if (tgSx >= 8) {
+      const effDay = toPercentNumber(row[COL_EFF_DAY]);
+      const targetEffDay = toPercentNumber(row[COL_TARGET_EFF_DAY]);
+      const statusDay = effDay >= targetEffDay ? "day_ok" : "day_fail";
+
+      dayAlerts.push({
+        chuyen,
+        effDay,
+        targetEffDay,
+        status: statusDay,
+        advice: getAdviceDay(chuyen, effDay, targetEffDay, statusDay),
+      });
+    }
+  }
+
+  // gửi email tổng hợp (nếu có cấu hình env email)
+  await sendKpiEmail(hourAlerts, dayAlerts);
+
+  // trả JSON cho dashboard
+  return { hourAlerts, dayAlerts };
+}
+
+/* ========= ROUTES ========= */
 
 export async function POST() {
   try {
-    // ================= AUTH GOOGLE =================
-    const auth = new google.auth.JWT({
-      email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-      key: Buffer.from(
-        process.env.GOOGLE_PRIVATE_KEY_BASE64,
-        "base64"
-      ).toString("utf8"),
-      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-    });
-
-    const sheets = google.sheets({ version: "v4", auth });
-    const spreadsheetId = process.env.GOOGLE_SHEET_ID;
-
-    // ================= READ KPI =================
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range: "KPI!A2:Z",
-    });
-
-    const rows = res.data.values || [];
-
-    // Giả định:
-    // A = Giờ
-    // B = ĐM/Giờ
-    // C = Thực tế lũy tiến
-    // D = Hiệu suất ngày
-    // E = Hiệu suất định mức ngày
-
-    const alerts = rows.map(r => ({
-      time: r[0],
-      target: Number(r[1] || 0),
-      actual: Number(r[2] || 0),
-      effDay: Number(r[3] || 0),
-      effTarget: Number(r[4] || 0),
-      diff: Number(r[2] || 0) - Number(r[1] || 0),
-    }));
-
-    // ================= MAIL LOG =================
-    const logRes = await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range: "MAIL_LOG!A2:C",
-    });
-
-    const logs = logRes.data.values || [];
-    const sent = (key) =>
-      logs.some(r => r[0] === key && r[2] === today());
-
-    const writeLog = async (key, type) => {
-      await sheets.spreadsheets.values.append({
-        spreadsheetId,
-        range: "MAIL_LOG!A:C",
-        valueInputOption: "USER_ENTERED",
-        requestBody: {
-          values: [[key, type, today()]],
-        },
-      });
-    };
-
-    // ================= THEO TỪNG GIỜ =================
-    for (const a of alerts) {
-      if (!WORKING_HOURS.includes(a.time)) continue;
-      if (sent(a.time)) continue;
-
-      if (a.actual === 0 && a.target === 0) continue;
-
-      await sendMail({
-        subject:
-          a.diff === 0
-            ? `🎉 KPI ${a.time} ĐẠT`
-            : `🚨 KPI ${a.time} CẦN XỬ LÝ`,
-        html: `
-          <h3>${a.time}</h3>
-          <ul>
-            <li>ĐM/Giờ: ${a.target}</li>
-            <li>Thực tế: ${a.actual}</li>
-            <li><b>${a.diff === 0 ? "✅ Đạt" : a.diff < 0 ? `❌ Thiếu ${Math.abs(a.diff)}` : `⚠️ Vượt ${a.diff}`}</b></li>
-          </ul>
-          <p><b>Gợi ý:</b> ${a.diff < 0 ? "Tăng nhân lực / điều chỉnh nhịp" : a.diff > 0 ? "Điều tiết tránh tồn" : "Duy trì"}</p>
-        `,
-      });
-
-      await writeLog(a.time, "hour");
-    }
-
-    // ================= CUỐI NGÀY =================
-    const hasFullDay = WORKING_HOURS.every(h =>
-      alerts.some(a => a.time === h && a.actual > 0)
+    const result = await handleKpi();
+    return NextResponse.json({ status: "success", ...result });
+  } catch (err) {
+    console.error("❌ KPI API ERROR:", err);
+    return NextResponse.json(
+      { status: "error", message: err?.message || "Unknown error" },
+      { status: 500 }
     );
-
-    if (hasFullDay && !sent("DAY")) {
-      const last = alerts[alerts.length - 1];
-
-      await sendMail({
-        subject:
-          last.effDay >= last.effTarget
-            ? "🏆 HOÀN THÀNH KPI NGÀY"
-            : "📊 KPI NGÀY CHƯA ĐẠT",
-        html: `
-          <h2>TỔNG KẾT NGÀY</h2>
-          <ul>
-            <li>Hiệu suất đạt: ${last.effDay}%</li>
-            <li>Định mức: ${last.effTarget}%</li>
-          </ul>
-          <p><b>${last.effDay >= last.effTarget ? "🎉 Chúc mừng!" : "⚠️ Cần cải thiện"}</b></p>
-        `,
-      });
-
-      await writeLog("DAY", "day");
-    }
-
-    return NextResponse.json({ status: "ok" });
-  } catch (e) {
-    console.error(e);
-    return NextResponse.json({ error: e.message }, { status: 500 });
+  }
 }
+
+// Cho GET để dễ debug trên trình duyệt
+export async function GET() {
+  return POST();
 }
