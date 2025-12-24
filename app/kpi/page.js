@@ -99,8 +99,8 @@ export default function KpiDashboardPage() {
       <table border={1} cellPadding={6} style={{ borderCollapse: "collapse" }}>
         <thead>
           <tr>
-            <th>Giờ</th>
             <th>Chuyền</th>
+            <th>Giờ</th>
             <th>Kế hoạch lũy tiến</th>
             <th>Thực tế</th>
             <th>Chênh lệch</th>
