@@ -1,9 +1,6 @@
 "use client";
 
-export const dynamic = "force-dynamic";
-export const fetchCache = "force-no-store";
-
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 
 export default function KpiDashboardPage() {
   const [hourAlerts, setHourAlerts] = useState([]);
@@ -11,6 +8,7 @@ export default function KpiDashboardPage() {
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [raw, setRaw] = useState(null); // debug
+  const [selectedChuyen, setSelectedChuyen] = useState("ALL");
 
   useEffect(() => {
     let isMounted = true;
@@ -20,7 +18,6 @@ export default function KpiDashboardPage() {
         if (!isMounted) return;
         setError(null);
 
-        // GỌI API CHECK-KPI
         const res = await fetch("/api/check-kpi", { method: "POST" });
         const json = await res.json();
         setRaw(json);
@@ -41,8 +38,8 @@ export default function KpiDashboardPage() {
       }
     }
 
-    fetchData(); // gọi lần đầu
-    const id = setInterval(fetchData, 5000); // auto refresh mỗi 5s
+    fetchData();
+    const id = setInterval(fetchData, 5000); // refresh 5s
 
     return () => {
       isMounted = false;
@@ -50,11 +47,49 @@ export default function KpiDashboardPage() {
     };
   }, []);
 
-  if (loading) return <p>⏳ Đang tải dashboard...</p>;
+  // ====== LẤY DANH SÁCH CHUYỀN (UNIQUES) ======
+  const chuyenOptions = useMemo(() => {
+    const set = new Set();
+    hourAlerts.forEach((a) => {
+      if (a.chuyen) set.add(a.chuyen);
+    });
+    dayAlerts.forEach((a) => {
+      if (a.chuyen) set.add(a.chuyen);
+    });
+    return ["ALL", ...Array.from(set)];
+  }, [hourAlerts, dayAlerts]);
+
+  // ====== FILTER THEO CHUYỀN ======
+  const filteredHourAlerts =
+    selectedChuyen === "ALL"
+      ? hourAlerts
+      : hourAlerts.filter((a) => a.chuyen === selectedChuyen);
+
+  const filteredDayAlerts =
+    selectedChuyen === "ALL"
+      ? dayAlerts
+      : dayAlerts.filter((a) => a.chuyen === selectedChuyen);
 
   return (
     <main style={{ padding: "20px" }}>
       <h1>📊 KPI Dashboard</h1>
+
+      {/* CHỌN CHUYỀN */}
+      <div style={{ margin: "10px 0 20px 0" }}>
+        <label>
+          <strong>Chọn chuyền:&nbsp;</strong>
+          <select
+            value={selectedChuyen}
+            onChange={(e) => setSelectedChuyen(e.target.value)}
+          >
+            {chuyenOptions.map((name) => (
+              <option key={name} value={name}>
+                {name === "ALL" ? "Tất cả chuyền" : name}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
 
       {loading && <p>Đang tải dữ liệu...</p>}
       {error && <p style={{ color: "red" }}>Lỗi: {error}</p>}
@@ -73,7 +108,7 @@ export default function KpiDashboardPage() {
           </tr>
         </thead>
         <tbody>
-          {hourAlerts.map((a, idx) => (
+          {filteredHourAlerts.map((a, idx) => (
             <tr key={idx}>
               <td>{a.hour}</td>
               <td>{a.chuyen}</td>
@@ -87,9 +122,9 @@ export default function KpiDashboardPage() {
               </td>
             </tr>
           ))}
-          {hourAlerts.length === 0 && !loading && !error && (
+          {filteredHourAlerts.length === 0 && !loading && !error && (
             <tr>
-              <td colSpan={6}>Chưa có dữ liệu hourAlerts từ API.</td>
+              <td colSpan={6}>Không có dữ liệu cho chuyền đã chọn.</td>
             </tr>
           )}
         </tbody>
@@ -107,7 +142,7 @@ export default function KpiDashboardPage() {
           </tr>
         </thead>
         <tbody>
-          {dayAlerts.map((a, idx) => (
+          {filteredDayAlerts.map((a, idx) => (
             <tr key={idx}>
               <td>{a.chuyen}</td>
               <td>{a.effDay.toFixed(2)}</td>
@@ -115,9 +150,9 @@ export default function KpiDashboardPage() {
               <td>{a.status === "day_ok" ? "✅ Đạt" : "❌ Không đạt"}</td>
             </tr>
           ))}
-          {dayAlerts.length === 0 && !loading && !error && (
+          {filteredDayAlerts.length === 0 && !loading && !error && (
             <tr>
-              <td colSpan={4}>Chưa có dữ liệu dayAlerts từ API.</td>
+              <td colSpan={4}>Không có dữ liệu cho chuyền đã chọn.</td>
             </tr>
           )}
         </tbody>
