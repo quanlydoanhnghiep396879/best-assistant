@@ -102,7 +102,7 @@ async function handleKpi() {
   // dữ liệu KPI ở cột H → T
   const dataRes = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: "KPI!H5:T200",
+    range: "KPI!H4:T200",
   });
 
   const names = namesRes.data.values || [];
