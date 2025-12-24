@@ -110,8 +110,8 @@ export default function KpiDashboardPage() {
         <tbody>
           {filteredHourAlerts.map((a, idx) => (
             <tr key={idx}>
-              <td>{a.hour}</td>
               <td>{a.chuyen}</td>
+              <td>{a.hour}</td>
               <td>{a.target}</td>
               <td>{a.actual}</td>
               <td>{a.diff}</td>
