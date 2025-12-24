@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
 import nodemailer from "nodemailer";
+function writeLog(...args){
+  console.log("[KPI]", ...args);
+}
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
