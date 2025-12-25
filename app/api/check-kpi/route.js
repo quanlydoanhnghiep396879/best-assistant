@@ -5,7 +5,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * RANGE THEO NGÀY – nhớ chỉnh đúng theo sheet KPI của em
+ * RANGE THEO NGÀY – nhớ chỉnh cho đúng với sheet KPI thực tế
  */
 const DATE_MAP = {
   "2025-12-23": { range: "KPI!A21:AJ37" },
@@ -14,7 +14,7 @@ const DATE_MAP = {
 
 /** CỘT (A = 0) */
 const COL_CHUYEN = 0;
-const COL_DM_DAY = 6;       // DM/NGÀY (chưa dùng)
+const COL_DM_DAY = 6;       // DM/NGÀY (hiện chưa dùng)
 const COL_DM_HOUR = 7;      // DM/H
 
 const COL_9H = 8;
@@ -59,7 +59,7 @@ function buildKpiFromRows(rows) {
   for (const row of rows) {
     const chuyen = (row[COL_CHUYEN] || "").toString().trim();
 
-    // Chỉ lấy C1, C2,... C10
+    // Chỉ lấy C1..C10
     if (!/^C\d+/i.test(chuyen)) continue;
 
     const dmHour = toNumber(row[COL_DM_HOUR]);
@@ -114,9 +114,10 @@ function buildKpiFromRows(rows) {
 }
 
 /**
- * LẤY DỮ LIỆU TỪ GOOGLE SHEETS CHO 1 NGÀY
+ * LẤY KPI CHO 1 NGÀY TỪ GOOGLE SHEETS
+ * (hàm này THAY CHO handleKpi, tên mới là fetchKpiForDate)
  */
-async function handleKpi(date) {
+async function fetchKpiForDate(date) {
   const base64Key = process.env.GOOGLE_PRIVATE_KEY_BASE64;
   const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
   const spreadsheetId = process.env.GOOGLE_SHEET_ID;
@@ -152,38 +153,26 @@ async function handleKpi(date) {
   });
 
   const rows = res.data.values || [];
-  return buildKpiFromRows(rows);
+  const { hourAlerts, dayAlerts } = buildKpiFromRows(rows);
+
+  return { date, hourAlerts, dayAlerts };
 }
 
-/* ========= HÀM CHUNG CHO GET & POST ========= */
+/* ========= HÀM XỬ LÝ CHUNG CHO GET & POST ========= */
 
 async function handleRequest(request) {
   const url = new URL(request.url);
   const date = url.searchParams.get("date") || "2025-12-24"; // default ngày mới nhất
 
-  const result = await handleKpi(date);
+  const data = await fetchKpiForDate(date);
 
   return NextResponse.json({
     status: "success",
-    date,
-    ...result,
+    ...data,
   });
 }
 
 /* ========= EXPORT ROUTES ========= */
-
-export async function POST(request) {
-  console.log("✅ CHECK KPI API CALLED (POST)");
-  try {
-    return await handleRequest(request);
-  } catch (err) {
-    console.error("❌ KPI API ERROR (POST):", err);
-    return NextResponse.json(
-      { status: "error", message: err.message || "Unknown error" },
-      { status: 500 }
-    );
-  }
-}
 
 export async function GET(request) {
   console.log("✅ CHECK KPI API CALLED (GET)");
@@ -191,6 +180,19 @@ export async function GET(request) {
     return await handleRequest(request);
   } catch (err) {
     console.error("❌ KPI API ERROR (GET):", err);
+    return NextResponse.json(
+      { status: "error", message: err.message || "Unknown error" },
+      { status: 500 }
+    );
+  }
+}
+
+export async function POST(request) {
+  console.log("✅ CHECK KPI API CALLED (POST)");
+  try {
+    return await handleRequest(request);
+  } catch (err) {
+    console.error("❌ KPI API ERROR (POST):", err);
     return NextResponse.json(
       { status: "error", message: err.message || "Unknown error" },
       { status: 500 }
