@@ -119,77 +119,40 @@ function buildKpiFromRows(rows) {
 }
 
 /** Lấy dữ liệu từ Google Sheets cho 1 ngày */
-async function handleKpi(date) {
-  const base64Key = process.env.GOOGLE_PRIVATE_KEY_BASE64;
-  const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+async function handleRequest(request) {
+  const url = new URL(request.url);
+  const date = url.searchParams.get("date") || "2025-12-24";
+  const result = await handleKpi(date);
 
-  if (!base64Key || !email || !spreadsheetId) {
-    throw new Error("Thiếu biến môi trường Google Sheets");
-  }
-
-  const privateKey = Buffer.from(base64Key, "base64")
-    .toString("utf8")
-    .replace(/\r/g, "")
-    .trim();
-
-  const auth = new google.auth.JWT({
-    email,
-    key: privateKey,
-    scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
+  return NextResponse.json({
+    status: "success",
+    date,
+    ...result,
   });
-
-  await auth.authorize();
-
-  const sheets = google.sheets({ version: "v4", auth });
-
-  const cfg = DATE_MAP[date];
-  if (!cfg) {
-    throw new Error(`Không tìm thấy range cho ngày ${date} trong DATE_MAP`);
-  }
-
-  console.log("🔎 KPI DATE:", date, "RANGE:", cfg.range);
-
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range: cfg.range,
-  });
-
-  const rows = res.data.values || [];
-  return buildKpiFromRows(rows);
 }
 
-/* ========= ROUTES ========= */
-
 export async function POST(request) {
-  console.log("✅ CHECK KPI API CALLED");
-
+  console.log("✅ CHECK KPI API CALLED (POST)");
   try {
-    const url = new URL(request.url);
-    const date = url.searchParams.get("date") || "2025-12-24"; // default ngày mới nhất
-
-    const result = await handleKpi(date);
-
-    return NextResponse.json({
-      status: "success",
-      date,
-      ...result,
-    });
+    return await handleRequest(request);
   } catch (err) {
-    console.error("❌ KPI API ERROR:", err);
+    console.error("❌ KPI API ERROR (POST):", err);
     return NextResponse.json(
-      {
-        status: "error",
-        message: err.message || "Unknown error",
-      },
+      { status: "error", message: err.message || "Unknown error" },
       { status: 500 }
     );
   }
 }
 
-export function GET() {
-  return NextResponse.json({
-    status: "error",
-    message: "API này chỉ hỗ trợ POST",
-  });
+export async function GET(request) {
+  console.log("✅ CHECK KPI API CALLED (GET)");
+  try {
+    return await handleRequest(request);
+  } catch (err) {
+    console.error("❌ KPI API ERROR (GET):", err);
+    return NextResponse.json(
+      { status: "error", message: err.message || "Unknown error" },
+      { status: 500 }
+    );
+  }
 }
