@@ -1,377 +1,196 @@
-"use client";
+import { NextResponse } from "next/server";
+import { google } from "googleapis";
 
-import { useEffect, useMemo, useState } from "react";
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-// Danh sách ngày có trong DATE_MAP
-const DATE_OPTIONS = [
-  { label: "23/12/2025", value: "2025-12-23" },
-  { label: "24/12/2025", value: "2025-12-24" },
+/**
+ * RANGE THEO NGÀY
+ * Em đã đo trong sheet:
+ *  23/12/2025: KPI!A21:AJ37
+ *  24/12/2025: KPI!A4:AJ18
+ */
+const DATE_MAP = {
+  "2025-12-23": { range: "KPI!A21:AJ37" },
+  "2025-12-24": { range: "KPI!A4:AJ18" },
+};
+
+/**
+ * CÁC CỘT TRONG BẢNG (tính từ A = 0)
+ * Nếu layout đổi cột thì sửa mấy số này.
+ */
+const COL_CHUYEN = 0;
+const COL_DM_DAY = 6;       // DM/NGÀY (nếu cần)
+const COL_DM_HOUR = 7;      // DM/H
+
+const COL_9H = 8;
+const COL_10H = 9;
+const COL_11H = 10;
+const COL_12H30 = 11;
+const COL_13H30 = 12;
+const COL_14H30 = 13;
+const COL_15H30 = 14;
+const COL_16H30 = 15;
+
+const COL_EFF_DAY = 17;        // Hiệu suất đạt trong ngày
+const COL_TARGET_EFF_DAY = 18; // Hiệu suất định mức trong ngày
+
+// Cấu hình các cột lũy tiến theo giờ
+const HOUR_COLUMNS = [
+  { label: "9h", index: COL_9H, hours: 1 },
+  { label: "10h", index: COL_10H, hours: 2 },
+  { label: "11h", index: COL_11H, hours: 3 },
+  { label: "12h30", index: COL_12H30, hours: 4 },
+  { label: "13h30", index: COL_13H30, hours: 5 },
+  { label: "14h30", index: COL_14H30, hours: 6 },
+  { label: "15h30", index: COL_15H30, hours: 7 },
+  { label: "16h30", index: COL_16H30, hours: 8 },
 ];
 
-export default function KpiDashboardPage() {
-  const [hourAlerts, setHourAlerts] = useState([]);
-  const [dayAlerts, setDayAlerts] = useState([]);
-  const [error, setError] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [raw, setRaw] = useState(null);
-  const [selectedChuyen, setSelectedChuyen] = useState("ALL");
-  const [selectedDate, setSelectedDate] = useState(
-    DATE_OPTIONS[DATE_OPTIONS.length - 1].value // mặc định ngày mới nhất
-  );
+/* ========= HÀM PHỤ: ÉP KIỂU SỐ ========= */
+function toNumber(v) {
+  if (v === null || v === undefined) return 0;
+  if (typeof v === "number") return v;
+  const t = String(v).trim();
+  if (!t) return 0;
+  const cleaned = t.replace("%", "").replace(/,/g, "");
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : 0;
+}
 
-  // ====== GỌI API THEO NGÀY ======
-  useEffect(() => {
-    let isMounted = true;
+/* ========= XỬ LÝ 1 BLOCK DỮ LIỆU CỦA 1 NGÀY ========= */
+function buildKpiFromRows(rows) {
+  const hourAlerts = [];
+  const dayAlerts = [];
 
-    async function fetchData() {
-      try {
-        if (!isMounted) return;
+  for (const row of rows) {
+    const chuyen = (row[COL_CHUYEN] || "").toString().trim();
 
-        setError(null);
-        setLoading(true);
+    // Chỉ lấy các dòng C1..C10, bỏ CẮT, KCS, HOÀN TẤT, NM...
+    if (!/^C\d+/i.test(chuyen)) continue;
 
-        const res = await fetch(`/api/check-kpi?date=${selectedDate}`, {
-          method: "POST",
-        });
+    const dmHour = toNumber(row[COL_DM_HOUR]);
 
-        const json = await res.json();
-        setRaw(json);
+    // ===== THEO GIỜ (LŨY TIẾN) =====
+    for (const h of HOUR_COLUMNS) {
+      const target = dmHour * h.hours;
+      const actual = toNumber(row[h.index]);
+      const diff = actual - target;
 
-        if (!res.ok || json.status !== "success") {
-          throw new Error(json.message || "API error");
-        }
+      let status = "equal";
+      let message = "Đủ kế hoạch";
 
-        if (!isMounted) return;
-        setHourAlerts(json.hourAlerts || []);
-        setDayAlerts(json.dayAlerts || []);
-        setLoading(false);
-      } catch (e) {
-        console.error("KPI PAGE ERROR:", e);
-        if (!isMounted) return;
-        setError(e.message || "Unknown error");
-        setLoading(false);
+      if (diff > 0) {
+        status = "over";
+        message = `Vượt ${diff}`;
+      } else if (diff < 0) {
+        status = "lack";
+        message = `Thiếu ${Math.abs(diff)}`;
       }
-    }
 
-    fetchData();
-    const id = setInterval(fetchData, 5000); // refresh 5s
-
-    return () => {
-      isMounted = false;
-      clearInterval(id);
-    };
-  }, [selectedDate]);
-
-  // ====== DANH SÁCH CHUYỀN ======
-  const chuyenOptions = useMemo(() => {
-    const set = new Set();
-    hourAlerts.forEach((a) => a.chuyen && set.add(a.chuyen));
-    dayAlerts.forEach((a) => a.chuyen && set.add(a.chuyen));
-    return ["ALL", ...Array.from(set)];
-  }, [hourAlerts, dayAlerts]);
-
-  const filteredHourAlerts =
-    selectedChuyen === "ALL"
-      ? hourAlerts
-      : hourAlerts.filter((a) => a.chuyen === selectedChuyen);
-
-  const filteredDayAlerts =
-    selectedChuyen === "ALL"
-      ? dayAlerts
-      : dayAlerts.filter((a) => a.chuyen === selectedChuyen);
-
-  // ====== GROUP THEO CHUYỀN (dùng cho chế độ ALL) ======
-  const HOUR_ORDER = ["9h", "10h", "11h", "12h30", "13h30", "14h30", "15h30", "16h30"];
-
-  const groupedHourByChuyen = useMemo(() => {
-    const map = new Map();
-    hourAlerts.forEach((a) => {
-      if (!a.chuyen) return;
-      if (!map.has(a.chuyen)) map.set(a.chuyen, []);
-      map.get(a.chuyen).push(a);
-    });
-
-    for (const [chuyen, list] of map.entries()) {
-      list.sort(
-        (x, y) => HOUR_ORDER.indexOf(x.hour) - HOUR_ORDER.indexOf(y.hour)
-      );
-    }
-
-    return map;
-  }, [hourAlerts]);
-
-  // ====== TỔNG HỢP NHANH ======
-  const summaryRows = useMemo(() => {
-    const rows = [];
-    for (const [chuyen, list] of groupedHourByChuyen.entries()) {
-      const equal = list.filter((x) => x.status === "equal").length;
-      const over = list.filter((x) => x.status === "over").length;
-      const lack = list.filter((x) => x.status === "lack").length;
-      const day = dayAlerts.find((d) => d.chuyen === chuyen) || null;
-
-      rows.push({
+      hourAlerts.push({
         chuyen,
-        equal,
-        over,
-        lack,
-        effDay: day ? day.effDay : null,
-        targetEffDay: day ? day.targetEffDay : null,
-        dayStatus: day ? day.status : null,
+        hour: h.label,
+        target,
+        actual,
+        diff,
+        status,
+        message,
       });
     }
-    return rows;
-  }, [groupedHourByChuyen, dayAlerts]);
 
-  const totalLines = summaryRows.length;
-  const totalDayOk = summaryRows.filter((r) => r.dayStatus === "day_ok").length;
-  const totalDayFail = summaryRows.filter((r) => r.dayStatus === "day_fail").length;
+    // ===== HIỆU SUẤT NGÀY =====
+    let effDay = toNumber(row[COL_EFF_DAY]);
+    let targetEffDay = toNumber(row[COL_TARGET_EFF_DAY]);
 
-  return (
-    <main style={{ padding: "20px" }}>
-      <h1>📊 KPI Dashboard</h1>
+    // Nếu trong sheet đang là 0.95 thì convert thành 95 (%)
+    if (effDay > 0 && effDay <= 1) effDay *= 100;
+    if (targetEffDay > 0 && targetEffDay <= 1) targetEffDay *= 100;
 
-      {/* CHỌN NGÀY */}
-      <div style={{ margin: "10px 0" }}>
-        <label>
-          <strong>Chọn ngày:&nbsp;</strong>
-          <select
-            value={selectedDate}
-            onChange={(e) => {
-              setSelectedDate(e.target.value);
-              setSelectedChuyen("ALL");
-            }}
-          >
-            {DATE_OPTIONS.map((d) => (
-              <option key={d.value} value={d.value}>
-                {d.label}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
+    const statusDay = effDay >= targetEffDay ? "day_ok" : "day_fail";
 
-      {/* CHỌN CHUYỀN */}
-      <div style={{ margin: "0 0 20px 0" }}>
-        <label>
-          <strong>Chọn chuyền:&nbsp;</strong>
-          <select
-            value={selectedChuyen}
-            onChange={(e) => setSelectedChuyen(e.target.value)}
-          >
-            {chuyenOptions.map((name) => (
-              <option key={name} value={name}>
-                {name === "ALL" ? "Tất cả chuyền" : name}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
+    dayAlerts.push({
+      chuyen,
+      effDay,
+      targetEffDay,
+      status: statusDay,
+    });
+  }
 
-      {loading && <p>Đang tải dữ liệu...</p>}
-      {error && <p style={{ color: "red" }}>Lỗi: {error}</p>}
+  return { hourAlerts, dayAlerts };
+}
 
-      {/* ====================== TỔNG HỢP NHANH ====================== */}
-      {selectedChuyen === "ALL" && (
-        <>
-          <h2>Tổng hợp nhanh</h2>
-          <p style={{ marginBottom: 6 }}>
-            Ngày{" "}
-            <b>
-              {DATE_OPTIONS.find((d) => d.value === selectedDate)?.label ||
-                selectedDate}
-            </b>{" "}
-            — Tổng số chuyền: <b>{totalLines}</b> — ✅ Đạt:{" "}
-            <b>{totalDayOk}</b> — ❌ Không đạt: <b>{totalDayFail}</b>
-          </p>
+/* ========= LẤY DỮ LIỆU TỪ GOOGLE SHEETS ========= */
+async function handleKpi(date) {
+  const base64Key = process.env.GOOGLE_PRIVATE_KEY_BASE64;
+  const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
 
-          <table
-            border={1}
-            cellPadding={6}
-            style={{ borderCollapse: "collapse", marginBottom: 20 }}
-          >
-            <thead>
-              <tr>
-                <th>Chuyền</th>
-                <th>Giờ đủ</th>
-                <th>Giờ vượt</th>
-                <th>Giờ thiếu</th>
-                <th>Hiệu suất ngày (%)</th>
-                <th>Định mức ngày (%)</th>
-                <th>Trạng thái ngày</th>
-              </tr>
-            </thead>
-            <tbody>
-              {summaryRows.map((r) => (
-                <tr key={r.chuyen}>
-                  <td>{r.chuyen}</td>
-                  <td>{r.equal}</td>
-                  <td>{r.over}</td>
-                  <td>{r.lack}</td>
-                  <td>{r.effDay != null ? r.effDay.toFixed(2) : "-"}</td>
-                  <td>
-                    {r.targetEffDay != null
-                      ? r.targetEffDay.toFixed(2)
-                      : "-"}
-                  </td>
-                  <td>
-                    {r.dayStatus === "day_ok"
-                      ? "✅ Đạt"
-                      : r.dayStatus === "day_fail"
-                      ? "❌ Không đạt"
-                      : ""}
-                  </td>
-                </tr>
-              ))}
-              {summaryRows.length === 0 && !loading && !error && (
-                <tr>
-                  <td colSpan={7}>Chưa có dữ liệu tổng hợp.</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </>
-      )}
+  if (!base64Key || !email || !spreadsheetId) {
+    throw new Error("Thiếu biến môi trường Google Sheets");
+  }
 
-      /* ====================== BẢNG THEO GIỜ ====================== */
-      <h2>Kiểm soát theo giờ (lũy tiến)</h2>
+  const privateKey = Buffer.from(base64Key, "base64")
+    .toString("utf8")
+    .replace(/\r/g, "")
+    .trim();
 
-      {selectedChuyen === "ALL" ? (
-        <div>
-          {Array.from(groupedHourByChuyen.entries()).map(
-            ([chuyen, list]) => {
-              const countLack = list.filter((x) => x.status === "lack").length;
-              const countOver = list.filter((x) => x.status === "over").length;
-              const countEqual = list.filter((x) => x.status === "equal")
-                .length;
+  const auth = new google.auth.JWT({
+    email,
+    key: privateKey,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
+  });
 
-              return (
-                <details
-                  key={chuyen}
-                  style={{
-                    marginBottom: 12,
-                    border: "1px solid #ccc",
-                    padding: 6,
-                  }}
-                >
-                  <summary style={{ cursor: "pointer" }}>
-                    <strong>{chuyen}</strong>{" "}
-                    — ❌ Thiếu: {countLack} | ⚠️ Vượt: {countOver} | ✅ Đủ:{" "}
-                    {countEqual}
-                  </summary>
+  await auth.authorize();
 
-                  <table
-                    border={1}
-                    cellPadding={6}
-                    style={{
-                      marginTop: 8,
-                      borderCollapse: "collapse",
-                      width: "100%",
-                    }}
-                  >
-                    <thead>
-                      <tr>
-                        <th>Giờ</th>
-                        <th>Kế hoạch lũy tiến</th>
-                        <th>Thực tế</th>
-                        <th>Chênh lệch</th>
-                        <th>Trạng thái</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {list.map((a, idx) => (
-                        <tr key={idx}>
-                          <td>{a.hour}</td>
-                          <td>{a.target}</td>
-                          <td>{a.actual}</td>
-                          <td>{a.diff}</td>
-                          <td>
-                            {a.status === "equal" && "✅ Đủ"}
-                            {a.status === "over" && "⚠️ Vượt"}
-                            {a.status === "lack" && "❌ Thiếu"}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </details>
-              );
-            }
-          )}
-          {groupedHourByChuyen.size === 0 && !loading && !error && (
-            <p>Chưa có dữ liệu hourAlerts.</p>
-          )}
-        </div>
-      ) : (
-        <table border={1} cellPadding={6} style={{ borderCollapse: "collapse" }}>
-          <thead>
-            <tr>
-              <th>Chuyền</th>
-              <th>Giờ</th>
-              <th>Kế hoạch lũy tiến</th>
-              <th>Thực tế</th>
-              <th>Chênh lệch</th>
-              <th>Trạng thái</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filteredHourAlerts.map((a, idx) => (
-              <tr key={idx}>
-                <td>{a.chuyen}</td>
-                <td>{a.hour}</td>
-                <td>{a.target}</td>
-                <td>{a.actual}</td>
-                <td>{a.diff}</td>
-                <td>
-                  {a.status === "equal" && "✅ Đủ"}
-                  {a.status === "over" && "⚠️ Vượt"}
-                  {a.status === "lack" && "❌ Thiếu"}
-                </td>
-              </tr>
-            ))}
-            {filteredHourAlerts.length === 0 && !loading && !error && (
-              <tr>
-                <td colSpan={6}>Không có dữ liệu cho chuyền đã chọn.</td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      )}
+  const sheets = google.sheets({ version: "v4", auth });
 
-      {/* ====================== BẢNG HIỆU SUẤT NGÀY ====================== */}
-      <h2 style={{ marginTop: 30 }}>Hiệu suất trong ngày</h2>
-      <table border={1} cellPadding={6} style={{ borderCollapse: "collapse" }}>
-        <thead>
-          <tr>
-            <th>Chuyền</th>
-            <th>Hiệu suất ngày (%)</th>
-            <th>Định mức ngày (%)</th>
-            <th>Trạng thái</th>
-          </tr>
-        </thead>
-        <tbody>
-          {filteredDayAlerts.map((a, idx) => (
-            <tr key={idx}>
-              <td>{a.chuyen}</td>
-              <td>{a.effDay.toFixed(2)}</td>
-              <td>{a.targetEffDay.toFixed(2)}</td>
-              <td>{a.status === "day_ok" ? "✅ Đạt" : "❌ Không đạt"}</td>
-            </tr>
-          ))}
-          {filteredDayAlerts.length === 0 && !loading && !error && (
-            <tr>
-              <td colSpan={4}>Không có dữ liệu cho chuyền đã chọn.</td>
-            </tr>
-          )}
-        </tbody>
-      </table>
+  const cfg = DATE_MAP[date];
+  if (!cfg) {
+    throw new Error(`Không tìm thấy range cho ngày ${date} trong DATE_MAP`);
+  }
 
-      {/* DEBUG JSON */}
-      {raw && (
-        <details style={{ marginTop: 20 }}>
-          <summary>Debug JSON từ /api/check-kpi</summary>
-          <pre style={{ fontSize: 11 }}>{JSON.stringify(raw, null, 2)}</pre>
-        </details>
-      )}
-    </main>
-  );
+  console.log("🔎 KPI DATE:", date, "RANGE:", cfg.range);
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: cfg.range,
+  });
+
+  const rows = res.data.values || [];
+  return buildKpiFromRows(rows);
+}
+
+/* ========= ROUTES ========= */
+export async function POST(request) {
+  console.log("✅ CHECK KPI API CALLED");
+
+  try {
+    const url = new URL(request.url);
+    const date = url.searchParams.get("date") || "2025-12-24"; // mặc định ngày mới nhất
+
+    const result = await handleKpi(date);
+
+    return NextResponse.json({
+      status: "success",
+      date,
+      ...result,
+    });
+  } catch (err) {
+    console.error("❌ KPI API ERROR:", err);
+    return NextResponse.json(
+      {
+        status: "error",
+        message: err.message || "Unknown error",
+      },
+      { status: 500 }
+    );
+  }
+}
+
+export function GET() {
+  return NextResponse.json({
+    status: "error",
+    message: "API này chỉ hỗ trợ POST",
+  });
 }
