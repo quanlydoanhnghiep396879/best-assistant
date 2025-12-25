@@ -5,7 +5,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * RANGE THEO NGÀY – nhớ chỉnh cho đúng với sheet KPI thực tế
+ * RANGE THEO NGÀY – chỉnh đúng theo sheet KPI của em
  */
 const DATE_MAP = {
   "2025-12-23": { range: "KPI!A21:AJ37" },
@@ -114,10 +114,9 @@ function buildKpiFromRows(rows) {
 }
 
 /**
- * LẤY KPI CHO 1 NGÀY TỪ GOOGLE SHEETS
- * (hàm này THAY CHO handleKpi, tên mới là fetchKpiForDate)
+ * ===== HÀM handleKpi – TÊN NÀY GIỮ NGUYÊN ĐỂ KHỎI LỖI =====
  */
-async function fetchKpiForDate(date) {
+async function handleKpi(date) {
   const base64Key = process.env.GOOGLE_PRIVATE_KEY_BASE64;
   const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
   const spreadsheetId = process.env.GOOGLE_SHEET_ID;
@@ -158,26 +157,20 @@ async function fetchKpiForDate(date) {
   return { date, hourAlerts, dayAlerts };
 }
 
-/* ========= HÀM XỬ LÝ CHUNG CHO GET & POST ========= */
-
-async function handleRequest(request) {
-  const url = new URL(request.url);
-  const date = url.searchParams.get("date") || "2025-12-24"; // default ngày mới nhất
-
-  const data = await fetchKpiForDate(date);
-
-  return NextResponse.json({
-    status: "success",
-    ...data,
-  });
-}
-
-/* ========= EXPORT ROUTES ========= */
+/* ========= ROUTES ========= */
 
 export async function GET(request) {
   console.log("✅ CHECK KPI API CALLED (GET)");
   try {
-    return await handleRequest(request);
+    const url = new URL(request.url);
+    const date = url.searchParams.get("date") || "2025-12-24";
+
+    const data = await handleKpi(date);
+
+    return NextResponse.json({
+      status: "success",
+      ...data,
+    });
   } catch (err) {
     console.error("❌ KPI API ERROR (GET):", err);
     return NextResponse.json(
@@ -190,7 +183,15 @@ export async function GET(request) {
 export async function POST(request) {
   console.log("✅ CHECK KPI API CALLED (POST)");
   try {
-    return await handleRequest(request);
+    const url = new URL(request.url);
+    const date = url.searchParams.get("date") || "2025-12-24";
+
+    const data = await handleKpi(date);
+
+    return NextResponse.json({
+      status: "success",
+      ...data,
+    });
   } catch (err) {
     console.error("❌ KPI API ERROR (POST):", err);
     return NextResponse.json(
@@ -199,3 +200,4 @@ export async function POST(request) {
     );
   }
 }
+
