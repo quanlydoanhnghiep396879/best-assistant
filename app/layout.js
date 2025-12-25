@@ -1,6 +1,9 @@
+// app/layout.js
+import "./globals.css";
+
 export const metadata = {
   title: "Best Assistant",
-  description: "Dashboard for KPI assistant",
+  description: "KPI Dashboard",
 };
 
 export default function RootLayout({ children }) {
