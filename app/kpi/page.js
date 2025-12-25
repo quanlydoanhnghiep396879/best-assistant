@@ -7,20 +7,18 @@ export const dynamic = "force-dynamic";
 /**
  * RANGE THEO NGÀY
  * Em đã đo trong sheet:
- *  23/12/2025: KPI!A21:AJ37
- *  24/12/2025: KPI!A4:AJ18
+ *   23/12/2025: KPI!A21:AJ37
+ *   24/12/2025: KPI!A4:AJ18
+ * Nếu sau này thêm ngày mới thì thêm vào đây.
  */
 const DATE_MAP = {
   "2025-12-23": { range: "KPI!A21:AJ37" },
   "2025-12-24": { range: "KPI!A4:AJ18" },
 };
 
-/**
- * CÁC CỘT TRONG BẢNG (tính từ A = 0)
- * Nếu layout đổi cột thì sửa mấy số này.
- */
+/** CỘT (tính A = 0). Số cột nhớ chỉnh đúng theo sheet KPI. */
 const COL_CHUYEN = 0;
-const COL_DM_DAY = 6;       // DM/NGÀY (nếu cần)
+const COL_DM_DAY = 6;       // DM/NGÀY (nếu cần sau này dùng)
 const COL_DM_HOUR = 7;      // DM/H
 
 const COL_9H = 8;
@@ -35,7 +33,7 @@ const COL_16H30 = 15;
 const COL_EFF_DAY = 17;        // Hiệu suất đạt trong ngày
 const COL_TARGET_EFF_DAY = 18; // Hiệu suất định mức trong ngày
 
-// Cấu hình các cột lũy tiến theo giờ
+// Cấu hình cột lũy tiến theo giờ
 const HOUR_COLUMNS = [
   { label: "9h", index: COL_9H, hours: 1 },
   { label: "10h", index: COL_10H, hours: 2 },
@@ -47,7 +45,7 @@ const HOUR_COLUMNS = [
   { label: "16h30", index: COL_16H30, hours: 8 },
 ];
 
-/* ========= HÀM PHỤ: ÉP KIỂU SỐ ========= */
+/* ========= HÀM PHỤ ========= */
 function toNumber(v) {
   if (v === null || v === undefined) return 0;
   if (typeof v === "number") return v;
@@ -58,7 +56,7 @@ function toNumber(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
-/* ========= XỬ LÝ 1 BLOCK DỮ LIỆU CỦA 1 NGÀY ========= */
+/** Xử lý 1 block dữ liệu của 1 ngày */
 function buildKpiFromRows(rows) {
   const hourAlerts = [];
   const dayAlerts = [];
@@ -66,7 +64,7 @@ function buildKpiFromRows(rows) {
   for (const row of rows) {
     const chuyen = (row[COL_CHUYEN] || "").toString().trim();
 
-    // Chỉ lấy các dòng C1..C10, bỏ CẮT, KCS, HOÀN TẤT, NM...
+    // Chỉ lấy C1, C2, ... C10; bỏ CẮT, KCS, HOÀN TẤT, NM...
     if (!/^C\d+/i.test(chuyen)) continue;
 
     const dmHour = toNumber(row[COL_DM_HOUR]);
@@ -103,7 +101,7 @@ function buildKpiFromRows(rows) {
     let effDay = toNumber(row[COL_EFF_DAY]);
     let targetEffDay = toNumber(row[COL_TARGET_EFF_DAY]);
 
-    // Nếu trong sheet đang là 0.95 thì convert thành 95 (%)
+    // Nếu trong sheet là 0.95 thì chuyển thành 95 (%)
     if (effDay > 0 && effDay <= 1) effDay *= 100;
     if (targetEffDay > 0 && targetEffDay <= 1) targetEffDay *= 100;
 
@@ -120,7 +118,7 @@ function buildKpiFromRows(rows) {
   return { hourAlerts, dayAlerts };
 }
 
-/* ========= LẤY DỮ LIỆU TỪ GOOGLE SHEETS ========= */
+/** Lấy dữ liệu từ Google Sheets cho 1 ngày */
 async function handleKpi(date) {
   const base64Key = process.env.GOOGLE_PRIVATE_KEY_BASE64;
   const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
@@ -162,12 +160,13 @@ async function handleKpi(date) {
 }
 
 /* ========= ROUTES ========= */
+
 export async function POST(request) {
   console.log("✅ CHECK KPI API CALLED");
 
   try {
     const url = new URL(request.url);
-    const date = url.searchParams.get("date") || "2025-12-24"; // mặc định ngày mới nhất
+    const date = url.searchParams.get("date") || "2025-12-24"; // default ngày mới nhất
 
     const result = await handleKpi(date);
 
