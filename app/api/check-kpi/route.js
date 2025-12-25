@@ -5,7 +5,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * RANGE THEO NGÀY
+ * RANGE THEO NGÀY – nhớ chỉnh đúng theo sheet KPI của em
  */
 const DATE_MAP = {
   "2025-12-23": { range: "KPI!A21:AJ37" },
@@ -14,7 +14,7 @@ const DATE_MAP = {
 
 /** CỘT (A = 0) */
 const COL_CHUYEN = 0;
-const COL_DM_DAY = 6;       // DM/NGÀY (hiện chưa dùng)
+const COL_DM_DAY = 6;       // DM/NGÀY (chưa dùng)
 const COL_DM_HOUR = 7;      // DM/H
 
 const COL_9H = 8;
@@ -40,6 +40,8 @@ const HOUR_COLUMNS = [
   { label: "16h30", index: COL_16H30, hours: 8 },
 ];
 
+/* ========= HÀM PHỤ ========= */
+
 function toNumber(v) {
   if (v === null || v === undefined) return 0;
   if (typeof v === "number") return v;
@@ -57,12 +59,12 @@ function buildKpiFromRows(rows) {
   for (const row of rows) {
     const chuyen = (row[COL_CHUYEN] || "").toString().trim();
 
-    // Chỉ lấy C1..C10
+    // Chỉ lấy C1, C2,... C10
     if (!/^C\d+/i.test(chuyen)) continue;
 
     const dmHour = toNumber(row[COL_DM_HOUR]);
 
-    // ===== THEO GIỜ =====
+    // ===== THEO GIỜ (lũy tiến) =====
     for (const h of HOUR_COLUMNS) {
       const target = dmHour * h.hours;
       const actual = toNumber(row[h.index]);
@@ -94,6 +96,7 @@ function buildKpiFromRows(rows) {
     let effDay = toNumber(row[COL_EFF_DAY]);
     let targetEffDay = toNumber(row[COL_TARGET_EFF_DAY]);
 
+    // Nếu trong sheet là 0.95 thì chuyển thành 95 (%)
     if (effDay > 0 && effDay <= 1) effDay *= 100;
     if (targetEffDay > 0 && targetEffDay <= 1) targetEffDay *= 100;
 
@@ -110,6 +113,9 @@ function buildKpiFromRows(rows) {
   return { hourAlerts, dayAlerts };
 }
 
+/**
+ * LẤY DỮ LIỆU TỪ GOOGLE SHEETS CHO 1 NGÀY
+ */
 async function handleKpi(date) {
   const base64Key = process.env.GOOGLE_PRIVATE_KEY_BASE64;
   const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
@@ -134,7 +140,9 @@ async function handleKpi(date) {
   const sheets = google.sheets({ version: "v4", auth });
 
   const cfg = DATE_MAP[date];
-  if (!cfg) throw new Error(`Không tìm thấy range cho ngày ${date} trong DATE_MAP`);
+  if (!cfg) {
+    throw new Error(`Không tìm thấy range cho ngày ${date} trong DATE_MAP`);
+  }
 
   console.log("🔎 KPI DATE:", date, "RANGE:", cfg.range);
 
@@ -147,9 +155,12 @@ async function handleKpi(date) {
   return buildKpiFromRows(rows);
 }
 
+/* ========= HÀM CHUNG CHO GET & POST ========= */
+
 async function handleRequest(request) {
   const url = new URL(request.url);
-  const date = url.searchParams.get("date") || "2025-12-24";
+  const date = url.searchParams.get("date") || "2025-12-24"; // default ngày mới nhất
+
   const result = await handleKpi(date);
 
   return NextResponse.json({
@@ -158,6 +169,8 @@ async function handleRequest(request) {
     ...result,
   });
 }
+
+/* ========= EXPORT ROUTES ========= */
 
 export async function POST(request) {
   console.log("✅ CHECK KPI API CALLED (POST)");
