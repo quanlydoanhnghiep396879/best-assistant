@@ -1,18 +1,11 @@
-export default function Home() {
-  return (
-    <div style={{ padding: 40 }}>
-      <h1>Best Assistant Dashboard</h1>
-      <p>API đã triển khai thành công!</p>
+"use client";
 
-      <h2>Test API</h2>
-      <ul>
-        <li>
-          <a href="/api/sheet" target="_blank">/api/sheet</a>
-        </li>
-        <li>
-          <a href="/api/chat" target="_blank">/api/chat</a>
-        </li>
-      </ul>
-    </div>
+export default function KpiPage() {
+  return (
+    <main style={{ padding: 20 }}>
+      <h1>📊 KPI Dashboard – TEST</h1>
+      <p>Nếu em đang thấy dòng chữ này thì lỗi Server Component đã hết.</p>
+      <p>Sau đó mình mới thêm phần fetch API / hiển thị bảng vào.</p>
+    </main>
   );
 }
