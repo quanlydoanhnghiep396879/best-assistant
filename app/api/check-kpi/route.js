@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// API CŨ - CHỈ ĐỂ TRÁNH LỖI, KHÔNG XÀI NỮA
+// API CŨ – TẠM THỜI CHỈ TRẢ THÔNG BÁO, KHÔNG XÀI KPI
 
 export async function GET() {
   console.log("🔴 /api/check-kpi (OLD) được gọi – trả stub");
