@@ -107,7 +107,7 @@ export async function GET(request) {
     const { searchParams } = new URL(request.url);
     const date = searchParams.get("date") || "24/12/2025";
 
-    const result = await handleKpi(date);
+    
     return NextResponse.json({ status: "success", ...result });
   } catch (err) {
     console.error("❌ KPI-DEBUG API ERROR (GET):", err);
@@ -128,7 +128,7 @@ export async function POST(request) {
     const body = await request.json().catch(() => ({}));
     const date = body?.date || "24/12/2025";
 
-    const result = await handleKpi(date);
+    
     return NextResponse.json({ status: "success", ...result });
   } catch (err) {
     console.error("❌ KPI-DEBUG API ERROR (POST):", err);
