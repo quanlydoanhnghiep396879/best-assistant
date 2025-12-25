@@ -5,7 +5,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * RANGE THEO NGÀY – chỉnh đúng theo sheet KPI của em
+ * RANGE THEO NGÀY
  */
 const DATE_MAP = {
   "2025-12-23": { range: "KPI!A21:AJ37" },
@@ -14,7 +14,7 @@ const DATE_MAP = {
 
 /** CỘT (A = 0) */
 const COL_CHUYEN = 0;
-const COL_DM_DAY = 6;       // DM/NGÀY (hiện chưa dùng)
+const COL_DM_DAY = 6;       // DM/NGÀY (chưa dùng)
 const COL_DM_HOUR = 7;      // DM/H
 
 const COL_9H = 8;
@@ -39,8 +39,6 @@ const HOUR_COLUMNS = [
   { label: "15h30", index: COL_15H30, hours: 7 },
   { label: "16h30", index: COL_16H30, hours: 8 },
 ];
-
-/* ========= HÀM PHỤ ========= */
 
 function toNumber(v) {
   if (v === null || v === undefined) return 0;
@@ -96,7 +94,6 @@ function buildKpiFromRows(rows) {
     let effDay = toNumber(row[COL_EFF_DAY]);
     let targetEffDay = toNumber(row[COL_TARGET_EFF_DAY]);
 
-    // Nếu trong sheet là 0.95 thì chuyển thành 95 (%)
     if (effDay > 0 && effDay <= 1) effDay *= 100;
     if (targetEffDay > 0 && targetEffDay <= 1) targetEffDay *= 100;
 
@@ -113,9 +110,6 @@ function buildKpiFromRows(rows) {
   return { hourAlerts, dayAlerts };
 }
 
-/**
- * ===== HÀM handleKpi – TÊN NÀY GIỮ NGUYÊN ĐỂ KHỎI LỖI =====
- */
 async function handleKpi(date) {
   const base64Key = process.env.GOOGLE_PRIVATE_KEY_BASE64;
   const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
@@ -144,7 +138,7 @@ async function handleKpi(date) {
     throw new Error(`Không tìm thấy range cho ngày ${date} trong DATE_MAP`);
   }
 
-  console.log("🔎 KPI DATE:", date, "RANGE:", cfg.range);
+  console.log("🔎 KPI-DEBUG DATE:", date, "RANGE:", cfg.range);
 
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
@@ -157,10 +151,8 @@ async function handleKpi(date) {
   return { date, hourAlerts, dayAlerts };
 }
 
-/* ========= ROUTES ========= */
-
 export async function GET(request) {
-  console.log("✅ CHECK KPI API CALLED (GET)");
+  console.log("✅ KPI-DEBUG API CALLED (GET)");
   try {
     const url = new URL(request.url);
     const date = url.searchParams.get("date") || "2025-12-24";
@@ -172,7 +164,7 @@ export async function GET(request) {
       ...data,
     });
   } catch (err) {
-    console.error("❌ KPI API ERROR (GET):", err);
+    console.error("❌ KPI-DEBUG API ERROR (GET):", err);
     return NextResponse.json(
       { status: "error", message: err.message || "Unknown error" },
       { status: 500 }
@@ -181,7 +173,7 @@ export async function GET(request) {
 }
 
 export async function POST(request) {
-  console.log("✅ CHECK KPI API CALLED (POST)");
+  console.log("✅ KPI-DEBUG API CALLED (POST)");
   try {
     const url = new URL(request.url);
     const date = url.searchParams.get("date") || "2025-12-24";
@@ -193,11 +185,10 @@ export async function POST(request) {
       ...data,
     });
   } catch (err) {
-    console.error("❌ KPI API ERROR (POST):", err);
+    console.error("❌ KPI-DEBUG API ERROR (POST):", err);
     return NextResponse.json(
       { status: "error", message: err.message || "Unknown error" },
       { status: 500 }
     );
   }
 }
-
