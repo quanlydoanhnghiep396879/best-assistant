@@ -1,24 +1,39 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
+
+// Danh sách ngày có trong DATE_MAP
+const DATE_OPTIONS = [
+  { label: "23/12/2025", value: "2025-12-23" },
+  { label: "24/12/2025", value: "2025-12-24" },
+];
 
 export default function KpiDashboardPage() {
   const [hourAlerts, setHourAlerts] = useState([]);
   const [dayAlerts, setDayAlerts] = useState([]);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [raw, setRaw] = useState(null); // debug
+  const [raw, setRaw] = useState(null);
   const [selectedChuyen, setSelectedChuyen] = useState("ALL");
+  const [selectedDate, setSelectedDate] = useState(
+    DATE_OPTIONS[DATE_OPTIONS.length - 1].value // mặc định ngày mới nhất
+  );
 
+  // ====== GỌI API THEO NGÀY ======
   useEffect(() => {
     let isMounted = true;
 
     async function fetchData() {
       try {
         if (!isMounted) return;
-        setError(null);
 
-        const res = await fetch("/api/check-kpi", { method: "POST" });
+        setError(null);
+        setLoading(true);
+
+        const res = await fetch(`/api/check-kpi?date=${selectedDate}`, {
+          method: "POST",
+        });
+
         const json = await res.json();
         setRaw(json);
 
@@ -45,9 +60,9 @@ export default function KpiDashboardPage() {
       isMounted = false;
       clearInterval(id);
     };
-  }, []);
+  }, [selectedDate]);
 
-  // ====== LẤY DANH SÁCH CHUYỀN ======
+  // ====== DANH SÁCH CHUYỀN ======
   const chuyenOptions = useMemo(() => {
     const set = new Set();
     hourAlerts.forEach((a) => a.chuyen && set.add(a.chuyen));
@@ -55,7 +70,6 @@ export default function KpiDashboardPage() {
     return ["ALL", ...Array.from(set)];
   }, [hourAlerts, dayAlerts]);
 
-  // ====== FILTER THEO CHUYỀN (cho chế độ 1 chuyền) ======
   const filteredHourAlerts =
     selectedChuyen === "ALL"
       ? hourAlerts
@@ -66,7 +80,7 @@ export default function KpiDashboardPage() {
       ? dayAlerts
       : dayAlerts.filter((a) => a.chuyen === selectedChuyen);
 
-  // ====== GROUP THEO CHUYỀN (cho chế độ ALL) ======
+  // ====== GROUP THEO CHUYỀN (dùng cho chế độ ALL) ======
   const HOUR_ORDER = ["9h", "10h", "11h", "12h30", "13h30", "14h30", "15h30", "16h30"];
 
   const groupedHourByChuyen = useMemo(() => {
@@ -77,7 +91,6 @@ export default function KpiDashboardPage() {
       map.get(a.chuyen).push(a);
     });
 
-    // sort theo thứ tự giờ
     for (const [chuyen, list] of map.entries()) {
       list.sort(
         (x, y) => HOUR_ORDER.indexOf(x.hour) - HOUR_ORDER.indexOf(y.hour)
@@ -87,14 +100,13 @@ export default function KpiDashboardPage() {
     return map;
   }, [hourAlerts]);
 
-  // ====== BẢNG TỔNG HỢP MỖI CHUYỀN ======
+  // ====== TỔNG HỢP NHANH ======
   const summaryRows = useMemo(() => {
     const rows = [];
     for (const [chuyen, list] of groupedHourByChuyen.entries()) {
       const equal = list.filter((x) => x.status === "equal").length;
       const over = list.filter((x) => x.status === "over").length;
       const lack = list.filter((x) => x.status === "lack").length;
-
       const day = dayAlerts.find((d) => d.chuyen === chuyen) || null;
 
       rows.push({
@@ -118,8 +130,28 @@ export default function KpiDashboardPage() {
     <main style={{ padding: "20px" }}>
       <h1>📊 KPI Dashboard</h1>
 
+      {/* CHỌN NGÀY */}
+      <div style={{ margin: "10px 0" }}>
+        <label>
+          <strong>Chọn ngày:&nbsp;</strong>
+          <select
+            value={selectedDate}
+            onChange={(e) => {
+              setSelectedDate(e.target.value);
+              setSelectedChuyen("ALL");
+            }}
+          >
+            {DATE_OPTIONS.map((d) => (
+              <option key={d.value} value={d.value}>
+                {d.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
       {/* CHỌN CHUYỀN */}
-      <div style={{ margin: "10px 0 20px 0" }}>
+      <div style={{ margin: "0 0 20px 0" }}>
         <label>
           <strong>Chọn chuyền:&nbsp;</strong>
           <select
@@ -143,7 +175,12 @@ export default function KpiDashboardPage() {
         <>
           <h2>Tổng hợp nhanh</h2>
           <p style={{ marginBottom: 6 }}>
-            Tổng số chuyền: <b>{totalLines}</b> — ✅ Đạt:{" "}
+            Ngày{" "}
+            <b>
+              {DATE_OPTIONS.find((d) => d.value === selectedDate)?.label ||
+                selectedDate}
+            </b>{" "}
+            — Tổng số chuyền: <b>{totalLines}</b> — ✅ Đạt:{" "}
             <b>{totalDayOk}</b> — ❌ Không đạt: <b>{totalDayFail}</b>
           </p>
 
@@ -171,7 +208,11 @@ export default function KpiDashboardPage() {
                   <td>{r.over}</td>
                   <td>{r.lack}</td>
                   <td>{r.effDay != null ? r.effDay.toFixed(2) : "-"}</td>
-                  <td>{r.targetEffDay != null ? r.targetEffDay.toFixed(2) : "-"}</td>
+                  <td>
+                    {r.targetEffDay != null
+                      ? r.targetEffDay.toFixed(2)
+                      : "-"}
+                  </td>
                   <td>
                     {r.dayStatus === "day_ok"
                       ? "✅ Đạt"
@@ -191,12 +232,10 @@ export default function KpiDashboardPage() {
         </>
       )}
 
-      {/* ====================== BẢNG THEO GIỜ ====================== */}
-
+      /* ====================== BẢNG THEO GIỜ ====================== */
       <h2>Kiểm soát theo giờ (lũy tiến)</h2>
 
       {selectedChuyen === "ALL" ? (
-        // ==== CHẾ ĐỘ TẤT CẢ CHUYỀN: MỖI CHUYỀN 1 KHUNG GẬP / MỞ ====
         <div>
           {Array.from(groupedHourByChuyen.entries()).map(
             ([chuyen, list]) => {
@@ -208,7 +247,11 @@ export default function KpiDashboardPage() {
               return (
                 <details
                   key={chuyen}
-                  style={{ marginBottom: 12, border: "1px solid #ccc", padding: 6 }}
+                  style={{
+                    marginBottom: 12,
+                    border: "1px solid #ccc",
+                    padding: 6,
+                  }}
                 >
                   <summary style={{ cursor: "pointer" }}>
                     <strong>{chuyen}</strong>{" "}
@@ -259,7 +302,6 @@ export default function KpiDashboardPage() {
           )}
         </div>
       ) : (
-        // ==== CHẾ ĐỘ 1 CHUYỀN: BẢNG THẲNG ====
         <table border={1} cellPadding={6} style={{ borderCollapse: "collapse" }}>
           <thead>
             <tr>
@@ -295,7 +337,7 @@ export default function KpiDashboardPage() {
         </table>
       )}
 
-      /* ====================== BẢNG HIỆU SUẤT NGÀY ====================== */
+      {/* ====================== BẢNG HIỆU SUẤT NGÀY ====================== */}
       <h2 style={{ marginTop: 30 }}>Hiệu suất trong ngày</h2>
       <table border={1} cellPadding={6} style={{ borderCollapse: "collapse" }}>
         <thead>
