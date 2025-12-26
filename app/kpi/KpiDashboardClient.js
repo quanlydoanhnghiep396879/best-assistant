@@ -55,7 +55,6 @@ export default function KpiDashboardClient() {
     }
   }
 
-  // Load lần đầu
   useEffect(() => {
     fetchKpi();
   }, []);
