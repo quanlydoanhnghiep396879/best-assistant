@@ -4,21 +4,25 @@ import { NextResponse } from "next/server";
 
 const SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"];
 
-/* ====== GOOGLE AUTH ====== */
+/* ========= GOOGLE AUTH ========= */
 function getPrivateKey() {
   const base64 = process.env.GOOGLE_PRIVATE_KEY_BASE64;
   const plain = process.env.GOOGLE_PRIVATE_KEY;
 
-  if (base64) {
-    return Buffer.from(base64, "base64").toString("utf8");
+  if (base64 && base64.trim()) {
+    const decoded = Buffer.from(base64, "base64").toString("utf8").trim();
+    if (!decoded) {
+      throw new Error("GOOGLE_PRIVATE_KEY_BASE64 decode empty");
+    }
+    return decoded;
   }
-  if (plain) {
-    // nếu để dạng có \n trong .env
+
+  if (plain && plain.trim()) {
+    // nếu lưu dạng text có \n trong .env
     return plain.replace(/\\n/g, "\n");
   }
-  throw new Error(
-    "Missing GOOGLE_PRIVATE_KEY_BASE64 or GOOGLE_PRIVATE_KEY env"
-  );
+
+  throw new Error("Missing GOOGLE_PRIVATE_KEY_BASE64 or GOOGLE_PRIVATE_KEY env");
 }
 
 function getJwtClient() {
@@ -26,9 +30,15 @@ function getJwtClient() {
   if (!email) {
     throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_EMAIL env");
   }
+
   const key = getPrivateKey();
 
-  return new google.auth.JWT(email, undefined, key, SCOPES);
+  // dùng cú pháp object để chắc chắn truyền key
+  return new google.auth.JWT({
+    email,
+    key,
+    scopes: SCOPES,
+  });
 }
 
 async function getSheetsClient() {
@@ -37,7 +47,7 @@ async function getSheetsClient() {
   return google.sheets({ version: "v4", auth });
 }
 
-/* ====== ĐỌC CONFIG_KPI ====== */
+/* ========= ĐỌC CONFIG_KPI ========= */
 async function getConfigRows(sheets) {
   const spreadsheetId = process.env.GOOGLE_SHEET_ID;
   if (!spreadsheetId) {
@@ -48,21 +58,18 @@ async function getConfigRows(sheets) {
 
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${configSheet}!A2:B`, // A: DATE, B: RANGE
+    range: `${configSheet}!A2:B`,
   });
 
   return res.data.values || [];
 }
 
-/* ====== PARSE BẢNG KPI CHO 1 NGÀY ====== */
-// Tìm dòng header có chữ "DM/NGAY" rồi suy ra các cột
+/* ========= PARSE BẢNG KPI 1 NGÀY ========= */
 function parseKpi(values) {
-  // không có data
   if (!values || !values.length) {
     return { lines: [], raw: values };
   }
 
-  // tìm dòng chứa "DM/NGAY"
   const headerIndex = values.findIndex((row) =>
     row?.some((cell) =>
       String(cell).toUpperCase().includes("DM/NGAY")
@@ -70,7 +77,6 @@ function parseKpi(values) {
   );
 
   if (headerIndex === -1) {
-    // Không tìm được header => trả raw để debug
     return { lines: [], raw: values };
   }
 
@@ -104,7 +110,6 @@ function parseKpi(values) {
     if (idx !== -1) hourCols[label] = idx;
   });
 
-  // dòng data bắt đầu: bỏ qua 1 dòng dưới header (dòng "DM", "H")
   const startRow = headerIndex + 2;
   const lines = [];
 
@@ -113,7 +118,6 @@ function parseKpi(values) {
     const chuyen = (row[0] || "").toString().trim();
 
     if (!chuyen) continue;
-    // bỏ dòng tổng, dòng khác nếu có
     if (/^(TỔNG|TONG|TOTAL)/i.test(chuyen)) continue;
 
     const dmDay = Number((row[colDmDay] || "0").toString().replace(/,/g, ""));
@@ -138,7 +142,7 @@ function parseKpi(values) {
   return { lines, raw: values };
 }
 
-/* ====== API GET /api/check-kpi ====== */
+/* ========= API GET /api/check-kpi ========= */
 export async function GET(request) {
   console.log("✅ CHECK KPI API CALLED (GET)");
 
@@ -158,7 +162,6 @@ export async function GET(request) {
 
     const dates = configRows.map((r) => r[0]).filter(Boolean);
 
-    // Nếu query ?date=... không khớp thì lấy dòng đầu tiên
     let date = dateParam && dates.includes(dateParam) ? dateParam : dates[0];
 
     const rangeRow = configRows.find((r) => r[0] === date);
@@ -175,11 +178,11 @@ export async function GET(request) {
     const spreadsheetId = process.env.GOOGLE_SHEET_ID;
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range, // ví dụ: "KPI!A4:AJ18"
+      range,
     });
 
     const values = res.data.values || [];
-    const parsed = parseKpi(values); // { lines, raw }
+    const parsed = parseKpi(values);
 
     return NextResponse.json({
       status: "success",
