@@ -1,52 +1,59 @@
-// lib/googleSheetsClient.js
-import { google } from "googleapis";
+// app/lib/googleSheetsClient.js
+import { google } from 'googleapis';
 
-/**
- * Đọc JSON service account từ biến môi trường GOOGLE_PRIVATE_KEY_BASE64
- * và trả về client Sheets + spreadsheetId
- */
-function getServiceAccountFromEnv() {
-  const base64 = process.env.GOOGLE_PRIVATE_KEY_BASE64;
-  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
-
-  if (!base64) {
-    throw new Error("ENV_MISSING: GOOGLE_PRIVATE_KEY_BASE64");
-  }
-  if (!spreadsheetId) {
-    throw new Error("ENV_MISSING: GOOGLE_SHEET_ID");
-  }
-
-  let keyJson;
-  try {
-    const jsonStr = Buffer.from(base64, "base64").toString("utf8");
-    keyJson = JSON.parse(jsonStr);
-  } catch (err) {
-    throw new Error(
-      "ENV_INVALID_BASE64: " + err.message
-    );
-  }
-
-  if (!keyJson.client_email || !keyJson.private_key) {
-    throw new Error(
-      "ENV_BAD_JSON: missing client_email or private_key"
-    );
-  }
-
-  return { keyJson, spreadsheetId };
-}
+let cachedClient = null;
 
 export async function getSheetsClient() {
-  const { keyJson, spreadsheetId } = getServiceAccountFromEnv();
+  if (cachedClient) return cachedClient;
 
-  // Dùng trực tiếp JWT thay vì GoogleAuth → không còn message "No key or keyFile set"
-  const auth = new google.auth.JWT(
-    keyJson.client_email,
-    undefined,
-    keyJson.private_key,
-    ["https://www.googleapis.com/auth/spreadsheets.readonly"]
-  );
+  const sheetId = process.env.GOOGLE_SHEET_ID;
+  const base64 = process.env.GOOGLE_PRIVATE_KEY_BASE64;
+  const emailEnv = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
 
-  const sheets = google.sheets({ version: "v4", auth });
+  if (!sheetId) {
+    throw new Error('Thiếu GOOGLE_SHEET_ID');
+  }
+  if (!base64) {
+    throw new Error('Thiếu GOOGLE_PRIVATE_KEY_BASE64');
+  }
 
-  return { sheets, spreadsheetId };
+  // ===== Giải mã base64 =====
+  const decoded = Buffer.from(base64, 'base64').toString('utf8');
+
+  let clientEmail = emailEnv || null;
+  let privateKey = null;
+
+  // 1) Thử coi nó có phải JSON của file service account không
+  try {
+    const maybeJson = JSON.parse(decoded);
+    if (maybeJson.private_key && maybeJson.client_email) {
+      privateKey = maybeJson.private_key;
+      clientEmail = maybeJson.client_email;
+    }
+  } catch {
+    // không phải JSON → bỏ qua, xử lý ở bước 2
+  }
+
+  // 2) Nếu vẫn chưa có privateKey thì coi như base64 là của riêng private_key
+  if (!privateKey) {
+    privateKey = decoded;
+  }
+
+  if (!clientEmail || !privateKey) {
+    throw new Error(
+      'GOOGLE_PRIVATE_KEY_BASE64 decode được nhưng không tìm thấy client_email/private_key. ' +
+        'Hãy kiểm tra lại biến môi trường hoặc copy thiếu chuỗi base64.'
+    );
+  }
+
+  const auth = new google.auth.JWT({
+    email: clientEmail,
+    key: privateKey,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+  });
+
+  const sheets = google.sheets({ version: 'v4', auth });
+
+  cachedClient = { sheets, sheetId };
+  return cachedClient;
 }
