@@ -1,37 +1,40 @@
-// app/api/check-kpi/route.js
-import { NextResponse } from 'next/server';
-import { getSheetsClient } from '../../lib/googleSheetsClient';
+import { NextResponse } from "next/server";
+import { readSheetRange } from "../../lib/googleSheetsClient";
 
-export async function GET(request) {
-  const { searchParams } = new URL(request.url);
-  const date = searchParams.get('date');
+const CONFIG_SHEET_NAME =
+  process.env.CONFIG_KPI_SHEET_NAME || "CONFIG_KPI";
 
-  if (!date) {
-    return NextResponse.json(
-      { status: 'error', message: 'Thiếu query ?date=dd/mm/yyyy' },
-      { status: 400 }
-    );
-  }
-
+export async function GET() {
   try {
-    const { sheets, spreadsheetId } = await getSheetsClient();
-    const KPI_SHEET_NAME = process.env.KPI_SHEET_NAME || 'KPI';
+    // Đọc A2:B1000 (DATE, RANGE)
+    const rows = await readSheetRange(`${CONFIG_SHEET_NAME}!A2:B1000`);
+    const configRows = (rows || []).filter((r) => r[0] && r[1]);
 
-    // Ở đây anh đang demo lấy full range; sau mình có thể lọc theo date
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range: `${KPI_SHEET_NAME}!A1:AJ200`,
-    });
+    if (!configRows.length) {
+      return NextResponse.json(
+        {
+          status: "error",
+          message: "Không có ngày nào trong CONFIG_KPI",
+        },
+        { status: 500 }
+      );
+    }
+
+    const dates = configRows.map((r) => r[0]);
 
     return NextResponse.json({
-      status: 'success',
-      date,
-      raw: res.data.values || [],
+      status: "success",
+      dates,
+      configRows, // [[date, range], ...]
     });
   } catch (err) {
-    console.error('CHECK-KPI ERROR:', err);
+    console.error("KPI-CONFIG ERROR:", err);
     return NextResponse.json(
-      { status: 'error', message: String(err?.message || err) },
+      {
+        status: "error",
+          // ép về string cho chắc
+        message: String(err?.message || err),
+      },
       { status: 500 }
     );
   }

@@ -1,32 +1,40 @@
-// app/api/kpi-config/route.js
-import { NextResponse } from 'next/server';
-import { getSheetsClient } from '../../lib/googleSheetsClient';
+import { NextResponse } from "next/server";
+import { readSheetRange } from "../../lib/googleSheetsClient";
+
+const CONFIG_SHEET_NAME =
+  process.env.CONFIG_KPI_SHEET_NAME || "CONFIG_KPI";
 
 export async function GET() {
   try {
-    const { sheets, spreadsheetId } = await getSheetsClient();
+    // Đọc A2:B1000 (DATE, RANGE)
+    const rows = await readSheetRange(`${CONFIG_SHEET_NAME}!A2:B1000`);
+    const configRows = (rows || []).filter((r) => r[0] && r[1]);
 
-    const CONFIG_SHEET_NAME =
-      process.env.CONFIG_KPI_SHEET_NAME || 'CONFIG_KPI';
+    if (!configRows.length) {
+      return NextResponse.json(
+        {
+          status: "error",
+          message: "Không có ngày nào trong CONFIG_KPI",
+        },
+        { status: 500 }
+      );
+    }
 
-    // Lấy DATE + RANGE
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range: `${CONFIG_SHEET_NAME}!A2:B`,
-    });
-
-    const rows = res.data.values || [];
-    const dates = rows.map(r => r[0]).filter(Boolean);
+    const dates = configRows.map((r) => r[0]);
 
     return NextResponse.json({
-      status: 'success',
+      status: "success",
       dates,
-      configRows: rows,
+      configRows, // [[date, range], ...]
     });
   } catch (err) {
-    console.error('KPI-CONFIG ERROR:', err);
+    console.error("KPI-CONFIG ERROR:", err);
     return NextResponse.json(
-      { status: 'error', message: String(err?.message || err) },
+      {
+        status: "error",
+          // ép về string cho chắc
+        message: String(err?.message || err),
+      },
       { status: 500 }
     );
   }
