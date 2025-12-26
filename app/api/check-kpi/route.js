@@ -2,80 +2,38 @@
 import { NextResponse } from 'next/server';
 import { getSheetsClient } from '@/app/lib/googleSheetsClient';
 
-export const dynamic = 'force-dynamic';
+export async function GET(request) {
+  const { searchParams } = new URL(request.url);
+  const date = searchParams.get('date'); // dd/mm/yyyy
 
-export async function GET(req) {
+  if (!date) {
+    return NextResponse.json(
+      { status: 'error', message: 'Thiếu query ?date=dd/mm/yyyy' },
+      { status: 400 },
+    );
+  }
+
   try {
-    const { searchParams } = new URL(req.url);
-    const date = searchParams.get('date');
-
-    if (!date) {
-      return NextResponse.json(
-        {
-          status: 'error',
-          message: 'Thiếu query ?date=dd/mm/yyyy',
-        },
-        { status: 400 }
-      );
-    }
-
     const { sheets, spreadsheetId } = await getSheetsClient();
 
-    const CONFIG_SHEET_NAME =
-      process.env.CONFIG_KPI_SHEET_NAME || 'CONFIG_KPI';
+    const KPI_SHEET_NAME = process.env.KPI_SHEET_NAME || 'KPI';
 
-    const configRange = `${CONFIG_SHEET_NAME}!A2:B1000`;
-
-    const configRes = await sheets.spreadsheets.values.get({
+    // Tạm thời đọc nguyên block KPI để kiểm tra đã auth được chưa
+    const res = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: configRange,
+      range: `${KPI_SHEET_NAME}!A1:AJ200`,
     });
 
-    const configRows = (configRes.data.values || []).filter(
-      (r) => r[0] && r[1]
-    );
-
-    const match = configRows.find(
-      (r) => (r[0] || '').trim() === date.trim()
-    );
-
-    if (!match) {
-      return NextResponse.json(
-        {
-          status: 'error',
-          message: `Không tìm thấy range cho ngày ${date} trong CONFIG_KPI`,
-        },
-        { status: 404 }
-      );
-    }
-
-    const range = match[1];
-
-    const kpiRes = await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range,
+    return NextResponse.json({
+      status: 'success',
+      date,
+      raw: res.data.values || [],
     });
-
-    const raw = kpiRes.data.values || [];
-
-    return NextResponse.json(
-      {
-        status: 'success',
-        date,
-        range,
-        raw,
-      },
-      { status: 200 }
-    );
   } catch (err) {
-    console.error('ERROR /api/check-kpi:', err);
+    console.error('CHECK-KPI ERROR:', err);
     return NextResponse.json(
-      {
-        status: 'error',
-        message:
-          'check-kpi: ' + String(err?.message || err),
-      },
-      { status: 500 }
+      { status: 'error', message: String(err?.message || err) },
+      { status: 500 },
     );
   }
 }

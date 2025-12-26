@@ -2,8 +2,6 @@
 import { NextResponse } from 'next/server';
 import { getSheetsClient } from '@/app/lib/googleSheetsClient';
 
-export const dynamic = 'force-dynamic';
-
 export async function GET() {
   try {
     const { sheets, spreadsheetId } = await getSheetsClient();
@@ -11,34 +9,28 @@ export async function GET() {
     const CONFIG_SHEET_NAME =
       process.env.CONFIG_KPI_SHEET_NAME || 'CONFIG_KPI';
 
-    const range = `${CONFIG_SHEET_NAME}!A2:B1000`;
-
+    // Đọc A2:B (DATE + RANGE như em đang setup)
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range,
+      range: `${CONFIG_SHEET_NAME}!A2:B`,
     });
 
     const rows = res.data.values || [];
-    const configRows = rows.filter((r) => r[0] && r[1]);
-    const dates = configRows.map((r) => r[0]);
+    const dates = rows.map(r => r[0]).filter(Boolean);
 
-    return NextResponse.json(
-      {
-        status: 'success',
-        dates,
-        configRows,
-      },
-      { status: 200 }
-    );
+    return NextResponse.json({
+      status: 'success',
+      dates,
+      configRows: rows,
+    });
   } catch (err) {
-    console.error('ERROR /api/kpi-config:', err);
+    console.error('KPI-CONFIG ERROR:', err);
     return NextResponse.json(
       {
         status: 'error',
-        message:
-          'kpi-config: ' + String(err?.message || err),
+        message: String(err?.message || err),
       },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
