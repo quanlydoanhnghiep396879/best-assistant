@@ -1,6 +1,6 @@
 // app/api/kpi-config/route.js
 import { NextResponse } from 'next/server';
-import { getSheetsClient } from '@/app/lib/googleSheetsClient';
+import { getSheetsClient } from '../../lib/googleSheetsClient';
 
 export async function GET() {
   try {
@@ -9,7 +9,7 @@ export async function GET() {
     const CONFIG_SHEET_NAME =
       process.env.CONFIG_KPI_SHEET_NAME || 'CONFIG_KPI';
 
-    // Đọc A2:B (DATE + RANGE như em đang setup)
+    // Lấy DATE + RANGE
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId,
       range: `${CONFIG_SHEET_NAME}!A2:B`,
@@ -26,11 +26,8 @@ export async function GET() {
   } catch (err) {
     console.error('KPI-CONFIG ERROR:', err);
     return NextResponse.json(
-      {
-        status: 'error',
-        message: String(err?.message || err),
-      },
-      { status: 500 },
+      { status: 'error', message: String(err?.message || err) },
+      { status: 500 }
     );
   }
 }
