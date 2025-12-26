@@ -1,92 +1,98 @@
+// app/kpi/KpiDashboardClient.js
 'use client';
 
 import { useEffect, useState } from 'react';
 
-const thStyle = {
-  border: '1px solid #ddd',
-  padding: '6px 10px',
-  textAlign: 'left',
-  background: '#f3f4f6',
-  fontWeight: 600,
-};
-
-const tdStyle = {
-  border: '1px solid #eee',
-  padding: '6px 10px',
-};
-
 export default function KpiDashboardClient() {
   const [dates, setDates] = useState([]);
   const [selectedDate, setSelectedDate] = useState('');
-  const [lines, setLines] = useState([]);
-  const [raw, setRaw] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [rows, setRows] = useState([]); // dữ liệu thô từ /api/check-kpi
 
-  async function fetchKpi(date) {
-    setLoading(true);
-    setError('');
-
-    try {
-      const url = date
-        ? `/api/check-kpi?date=${encodeURIComponent(date)}`
-        : '/api/check-kpi';
-
-      const res = await fetch(url);
-      const data = await res.json();
-
-      if (data.status !== 'success') {
-        setError(data.message || 'API error');
-        setLines([]);
-        setRaw([]);
-        setDates(data.dates || []);
-        return;
-      }
-
-      setDates(data.dates || []);
-      setSelectedDate(data.date || date || data.dates?.[0] || '');
-      setLines(data.lines || []);
-      setRaw(data.raw || []);
-    } catch (e) {
-      console.error(e);
-      setError(e.message || 'Lỗi không xác định');
-    } finally {
-      setLoading(false);
-    }
-  }
-
+  // 1. Lấy danh sách ngày từ CONFIG_KPI
   useEffect(() => {
-    fetchKpi();
+    async function loadConfig() {
+      try {
+        setError('');
+        const res = await fetch('/api/kpi-config');
+        const data = await res.json();
+
+        if (data.status !== 'success') {
+          setError(data.message || 'Không đọc được CONFIG_KPI');
+          return;
+        }
+
+        const ds = data.dates || [];
+        setDates(ds);
+
+        // mặc định chọn ngày cuối cùng trong list
+        if (ds.length > 0) {
+          const last = ds[ds.length - 1];
+          setSelectedDate(last);
+        }
+      } catch (err) {
+        setError(err.message || 'Lỗi khi đọc CONFIG_KPI');
+      }
+    }
+
+    loadConfig();
   }, []);
 
+  // 2. Mỗi khi selectedDate đổi thì gọi /api/check-kpi?date=...
+  useEffect(() => {
+    if (!selectedDate) return;
+
+    async function loadKpi() {
+      try {
+        setLoading(true);
+        setError('');
+        setRows([]);
+
+        const params = new URLSearchParams({ date: selectedDate });
+        const res = await fetch(`/api/check-kpi?${params.toString()}`);
+        const data = await res.json();
+
+        if (data.status !== 'success') {
+          setError(data.message || 'Không đọc được KPI');
+          return;
+        }
+
+        const raw = data.raw || [];
+        setRows(raw);
+      } catch (err) {
+        setError(err.message || 'Lỗi khi gọi API KPI');
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    loadKpi();
+  }, [selectedDate]);
+
   const handleDateChange = (e) => {
-    const d = e.target.value;
-    setSelectedDate(d);
-    fetchKpi(d);
+    setSelectedDate(e.target.value);
   };
 
-  return (
-    <main style={{ padding: '24px', fontFamily: 'system-ui, sans-serif' }}>
-      <h1
-        style={{
-          fontSize: '28px',
-          fontWeight: 700,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-        }}
-      >
-        <span style={{ fontSize: 32 }}>📊</span>
-        KPI Dashboard
-      </h1>
+  const hasData = rows && rows.length > 1; // có header + ít nhất 1 dòng
+  const header = hasData ? rows[0] : [];
+  const bodyRows = hasData ? rows.slice(1) : [];
 
-      <div style={{ marginTop: 16, marginBottom: 16 }}>
-        <label style={{ fontWeight: 600, marginRight: 8 }}>Ngày:</label>
+  return (
+    <section className="mt-6">
+      {/* Chọn ngày */}
+      <div className="mb-4 flex items-center gap-2">
+        <label htmlFor="kpi-date" className="font-medium">
+          Ngày:
+        </label>
         <select
+          id="kpi-date"
+          className="border px-2 py-1 rounded min-w-[160px]"
           value={selectedDate}
           onChange={handleDateChange}
           disabled={!dates.length}
         >
+          {!dates.length && <option>Đang tải ngày...</option>}
           {dates.map((d) => (
             <option key={d} value={d}>
               {d}
@@ -95,75 +101,48 @@ export default function KpiDashboardClient() {
         </select>
       </div>
 
-      {error && (
-        <p style={{ color: 'red', marginTop: 8 }}>
-          Lỗi: {error}
-        </p>
-      )}
+      {/* Trạng thái */}
+      {loading && <p>Đang tải dữ liệu chuyền...</p>}
+      {error && <p className="text-red-600">Lỗi: {error}</p>}
 
-      {loading && <p>Đang tải dữ liệu…</p>}
-
-      {!loading && !error && lines.length === 0 && (
+      {/* Không có dữ liệu */}
+      {!loading && !error && !hasData && selectedDate && (
         <p>Không có dữ liệu chuyền cho ngày này.</p>
       )}
 
-      {!loading && !error && lines.length > 0 && (
-        <>
-          <h2 style={{ marginTop: 24, marginBottom: 8 }}>
-            Tổng quan theo chuyền
-          </h2>
-
-          <table
-            style={{
-              borderCollapse: 'collapse',
-              width: '100%',
-              maxWidth: 1100,
-            }}
-          >
-            <thead>
+      {/* Bảng KPI */}
+      {!loading && !error && hasData && (
+        <div className="overflow-x-auto border rounded bg-white">
+          <table className="min-w-full border-collapse text-sm">
+            <thead className="bg-gray-100">
               <tr>
-                <th style={thStyle}>Chuyền</th>
-                <th style={thStyle}>Hiệu suất ngày (ước tính)</th>
-                <th style={thStyle}>Trạng thái</th>
-                <th style={thStyle}>Sản lượng (tham khảo)</th>
+                {header.map((col, idx) => (
+                  <th
+                    key={idx}
+                    className="border px-2 py-1 text-left whitespace-nowrap"
+                  >
+                    {col}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
-              {lines.map((line) => (
-                <tr key={line.line}>
-                  <td style={tdStyle}>{line.line}</td>
-                  <td style={tdStyle}>{line.effDay || '-'}</td>
-                  <td style={tdStyle}>{line.status || '-'}</td>
-                  <td style={tdStyle}>{line.prodToday || '-'}</td>
+              {bodyRows.map((row, rIdx) => (
+                <tr key={rIdx} className="hover:bg-gray-50">
+                  {row.map((cell, cIdx) => (
+                    <td
+                      key={cIdx}
+                      className="border px-2 py-1 whitespace-nowrap"
+                    >
+                      {cell}
+                    </td>
+                  ))}
                 </tr>
               ))}
             </tbody>
           </table>
-
-          <details style={{ marginTop: 24 }}>
-            <summary
-              style={{
-                cursor: 'pointer',
-                fontWeight: 600,
-              }}
-            >
-              Xem toàn bộ dữ liệu thô (raw từ Google Sheet)
-            </summary>
-            <pre
-              style={{
-                marginTop: 8,
-                maxHeight: 400,
-                overflow: 'auto',
-                fontSize: 12,
-                background: '#fafafa',
-                padding: 8,
-              }}
-            >
-              {JSON.stringify(raw, null, 2)}
-            </pre>
-          </details>
-        </>
+        </div>
       )}
-    </main>
+    </section>
   );
 }
