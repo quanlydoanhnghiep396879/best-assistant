@@ -1,202 +1,167 @@
-// app/api/check-kpi/route.js
-import { google } from "googleapis";
-import { NextResponse } from "next/server";
+import { NextResponse } from 'next/server';
+import { google } from 'googleapis';
 
-const SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"];
+const SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly'];
 
-/* ========= GOOGLE AUTH ========= */
-function getPrivateKey() {
-  const base64 = process.env.GOOGLE_PRIVATE_KEY_BASE64;
-  const plain = process.env.GOOGLE_PRIVATE_KEY;
+// Lấy auth Google từ biến môi trường
+function getGoogleAuth() {
+  const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+  const privateKeyBase64 = process.env.GOOGLE_PRIVATE_KEY_BASE64;
+  const sheetId = process.env.GOOGLE_SHEET_ID;
 
-  if (base64 && base64.trim()) {
-    const decoded = Buffer.from(base64, "base64").toString("utf8").trim();
-    if (!decoded) {
-      throw new Error("GOOGLE_PRIVATE_KEY_BASE64 decode empty");
-    }
-    return decoded;
+  if (!clientEmail || !privateKeyBase64 || !sheetId) {
+    throw new Error(
+      'Thiếu GOOGLE_SERVICE_ACCOUNT_EMAIL / GOOGLE_PRIVATE_KEY_BASE64 / GOOGLE_SHEET_ID'
+    );
   }
 
-  if (plain && plain.trim()) {
-    // nếu lưu dạng text có \n trong .env
-    return plain.replace(/\\n/g, "\n");
-  }
+  const privateKey = Buffer.from(privateKeyBase64, 'base64').toString('utf8');
 
-  throw new Error("Missing GOOGLE_PRIVATE_KEY_BASE64 or GOOGLE_PRIVATE_KEY env");
+  const auth = new google.auth.JWT(clientEmail, undefined, privateKey, SCOPES);
+  return { auth, sheetId };
 }
 
-function getJwtClient() {
-  const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-  if (!email) {
-    throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_EMAIL env");
-  }
-
-  const key = getPrivateKey();
-
-  // dùng cú pháp object để chắc chắn truyền key
-  return new google.auth.JWT({
-    email,
-    key,
-    scopes: SCOPES,
-  });
-}
-
-async function getSheetsClient() {
-  const auth = getJwtClient();
-  await auth.authorize();
-  return google.sheets({ version: "v4", auth });
-}
-
-/* ========= ĐỌC CONFIG_KPI ========= */
-async function getConfigRows(sheets) {
-  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
-  if (!spreadsheetId) {
-    throw new Error("Missing GOOGLE_SHEET_ID env");
-  }
-
-  const configSheet = process.env.CONFIG_KPI_SHEET_NAME || "CONFIG_KPI";
+// Đọc bảng CONFIG_KPI để lấy mapping ngày → range
+async function getConfigRows(sheets, sheetId) {
+  const configSheetName = process.env.CONFIG_KPI_SHEET_NAME || 'CONFIG_KPI';
 
   const res = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range: `${configSheet}!A2:B`,
+    spreadsheetId: sheetId,
+    range: `${configSheetName}!A2:B200`, // A: DATE, B: RANGE
   });
 
-  return res.data.values || [];
+  const rows = res.data.values || [];
+  const cleaned = rows.filter((r) => (r[0] || '').toString().trim() !== '');
+
+  return cleaned; // mỗi dòng: [date, range]
 }
 
-/* ========= PARSE BẢNG KPI 1 NGÀY ========= */
-function parseKpi(values) {
-  if (!values || !values.length) {
-    return { lines: [], raw: values };
+// Tìm cấu trúc 1 dòng chuyền trong block raw
+function parseLineRow(row) {
+  const lineName = (row[0] || '').toString().trim();
+
+  // Tìm ô có chữ "Đạt" / "Thiếu"… làm trạng thái
+  let status = '';
+  let statusIdx = -1;
+  for (let i = 0; i < row.length; i++) {
+    const v = row[i];
+    if (typeof v === 'string') {
+      const text = v.normalize('NFC'); // để xử lý dấu tiếng Việt
+      if (
+        text.includes('Đạt') ||
+        text.includes('đạt') ||
+        text.includes('Thiếu') ||
+        text.includes('thiếu')
+      ) {
+        status = text;
+        statusIdx = i;
+        break;
+      }
+    }
   }
 
-  const headerIndex = values.findIndex((row) =>
-    row?.some((cell) =>
-      String(cell).toUpperCase().includes("DM/NGAY")
-    )
-  );
-
-  if (headerIndex === -1) {
-    return { lines: [], raw: values };
+  // Tìm 1 ô phần trăm gần trước trạng thái, coi như "hiệu suất ngày"
+  let effDay = '';
+  if (statusIdx > 0) {
+    for (let i = statusIdx - 1; i >= 0; i--) {
+      const v = row[i];
+      if (typeof v === 'string' && v.includes('%')) {
+        effDay = v;
+        break;
+      }
+    }
   }
 
-  const headerRow = values[headerIndex];
+  // Lấy vài số cuối cùng làm thông tin sản lượng (chỉ để tham khảo)
+  const nums = row
+    .map((v) => (typeof v === 'string' ? v.replace(/,/g, '') : v))
+    .filter((v) => !isNaN(Number(v)))
+    .map((v) => Number(v));
+  const prodToday = nums.length ? nums[nums.length - 1] : '';
 
-  const colDmDay = headerRow.findIndex((c) =>
-    String(c).toUpperCase().includes("DM/NGAY")
-  );
-  const colDmHour = headerRow.findIndex((c) =>
-    String(c).toUpperCase().includes("DM/H")
-  );
-
-  const hourLabels = [
-    "9h",
-    "10h",
-    "11h",
-    "12h30",
-    "13h30",
-    "14h30",
-    "15h30",
-    "16h30",
-  ];
-
-  const hourCols = {};
-  hourLabels.forEach((label) => {
-    const idx = headerRow.findIndex(
-      (c) =>
-        String(c).replace(/\s/g, "").toLowerCase() ===
-        label.toLowerCase()
-    );
-    if (idx !== -1) hourCols[label] = idx;
-  });
-
-  const startRow = headerIndex + 2;
-  const lines = [];
-
-  for (let i = startRow; i < values.length; i++) {
-    const row = values[i] || [];
-    const chuyen = (row[0] || "").toString().trim();
-
-    if (!chuyen) continue;
-    if (/^(TỔNG|TONG|TOTAL)/i.test(chuyen)) continue;
-
-    const dmDay = Number((row[colDmDay] || "0").toString().replace(/,/g, ""));
-    const dmHour = Number((row[colDmHour] || "0").toString().replace(/,/g, ""));
-
-    const hours = hourLabels.map((label) => {
-      const col = hourCols[label];
-      const actual =
-        col !== undefined
-          ? Number(
-              (row[col] || "0")
-                .toString()
-                .replace(/,/g, "")
-            )
-          : 0;
-      return { label, actual };
-    });
-
-    lines.push({ chuyen, dmDay, dmHour, hours });
-  }
-
-  return { lines, raw: values };
+  return {
+    line: lineName,
+    effDay,
+    status,
+    prodToday,
+  };
 }
 
-/* ========= API GET /api/check-kpi ========= */
-export async function GET(request) {
-  console.log("✅ CHECK KPI API CALLED (GET)");
-
+export async function GET(req) {
   try {
-    const { searchParams } = new URL(request.url);
-    const dateParam = searchParams.get("date") || "";
+    const { searchParams } = new URL(req.url);
+    const dateParam = searchParams.get('date'); // dd/mm/yyyy
 
-    const sheets = await getSheetsClient();
-    const configRows = await getConfigRows(sheets);
+    const { auth, sheetId } = getGoogleAuth();
+    const sheets = google.sheets({ version: 'v4', auth });
 
-    if (!configRows.length) {
+    // 1) Đọc CONFIG_KPI
+    const configRows = await getConfigRows(sheets, sheetId);
+    const dates = configRows.map((r) => (r[0] || '').toString().trim());
+
+    if (!dates.length) {
       return NextResponse.json({
-        status: "error",
-        message: "Không có ngày nào trong CONFIG_KPI",
+        status: 'success',
+        date: null,
+        dates: [],
+        range: null,
+        lines: [],
+        raw: [],
+        configRows,
       });
     }
 
-    const dates = configRows.map((r) => r[0]).filter(Boolean);
+    // Nếu không truyền date → lấy ngày đầu tiên trong CONFIG_KPI
+    const date = (dateParam || dates[0]).toString().trim();
 
-    let date = dateParam && dates.includes(dateParam) ? dateParam : dates[0];
+    const matched = configRows.find(
+      (r) => (r[0] || '').toString().trim() === date
+    );
 
-    const rangeRow = configRows.find((r) => r[0] === date);
-    const range = rangeRow ? rangeRow[1] : null;
-
-    if (!range) {
-      return NextResponse.json({
-        status: "error",
-        message: `Không tìm thấy RANGE cho ngày ${date} trong CONFIG_KPI`,
-        dates,
-      });
+    if (!matched) {
+      return NextResponse.json(
+        {
+          status: 'error',
+          message: `Ngày ${date} không có trong CONFIG_KPI`,
+          dates,
+        },
+        { status: 400 }
+      );
     }
 
-    const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+    const range = (matched[1] || '').toString().trim();
+
+    // 2) Đọc block KPI tương ứng ngày đó
     const res = await sheets.spreadsheets.values.get({
-      spreadsheetId,
+      spreadsheetId: sheetId,
       range,
     });
 
-    const values = res.data.values || [];
-    const parsed = parseKpi(values);
+    const rows = res.data.values || [];
+
+    // 3) Lọc các dòng chuyền (C1, C2, C3, …)
+    const lineRows = rows.filter((row) => {
+      const name = (row[0] || '').toString().trim();
+      return /^C\d+/i.test(name); // chỉ lấy C1, C2, C3…
+    });
+
+    const lines = lineRows.map(parseLineRow);
 
     return NextResponse.json({
-      status: "success",
+      status: 'success',
       date,
       dates,
       range,
-      ...parsed,
+      lines,
+      raw: rows,      // để debug nếu cần
+      configRows,     // để xem lại mapping ngày → range
     });
   } catch (err) {
-    console.error("❌ KPI API ERROR (GET):", err);
+    console.error('KPI API ERROR:', err);
     return NextResponse.json(
       {
-        status: "error",
-        message: err?.message || "Unknown error",
+        status: 'error',
+        message: err.message || 'Unknown error',
       },
       { status: 500 }
     );

@@ -1,238 +1,169 @@
-// app/kpi/page.js
-"use client";
+import { NextResponse } from 'next/server';
+import { google } from 'googleapis';
 
-import { useEffect, useState } from "react";
+const SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly'];
 
-const HOUR_MULTIPLIERS = {
-  "9h": 1,
-  "10h": 2,
-  "11h": 3,
-  "12h30": 4,
-  "13h30": 5,
-  "14h30": 6,
-  "15h30": 7,
-  "16h30": 8,
-};
+// Lấy auth Google từ biến môi trường
+function getGoogleAuth() {
+  const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+  const privateKeyBase64 = process.env.GOOGLE_PRIVATE_KEY_BASE64;
+  const sheetId = process.env.GOOGLE_SHEET_ID;
 
-const thStyle = {
-  border: "1px solid #ccc",
-  padding: "6px 10px",
-  background: "#f3f3f3",
-  textAlign: "center",
-  fontWeight: 600,
-};
+  if (!clientEmail || !privateKeyBase64 || !sheetId) {
+    throw new Error(
+      'Thiếu GOOGLE_SERVICE_ACCOUNT_EMAIL / GOOGLE_PRIVATE_KEY_BASE64 / GOOGLE_SHEET_ID'
+    );
+  }
 
-const tdStyle = {
-  border: "1px solid #ddd",
-  padding: "6px 10px",
-  textAlign: "center",
-};
+  const privateKey = Buffer.from(privateKeyBase64, 'base64').toString('utf8');
 
-const tdNumStyle = {
-  ...tdStyle,
-  textAlign: "right",
-};
+  const auth = new google.auth.JWT(clientEmail, undefined, privateKey, SCOPES);
+  return { auth, sheetId };
+}
 
-export default function KpiDashboardPage() {
-  const [dates, setDates] = useState([]);
-  const [selectedDate, setSelectedDate] = useState("");
-  const [lines, setLines] = useState([]);
-  const [selectedLine, setSelectedLine] = useState("");
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
+// Đọc bảng CONFIG_KPI để lấy mapping ngày → range
+async function getConfigRows(sheets, sheetId) {
+  const configSheetName = process.env.CONFIG_KPI_SHEET_NAME || 'CONFIG_KPI';
 
-  async function fetchData(date) {
-    setLoading(true);
-    setError("");
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: sheetId,
+    range: `${configSheetName}!A2:B200`, // A: DATE, B: RANGE
+  });
 
-    try {
-      const url = date
-        ? `/api/check-kpi?date=${encodeURIComponent(date)}`
-        : "/api/check-kpi";
+  const rows = res.data.values || [];
+  const cleaned = rows.filter((r) => (r[0] || '').toString().trim() !== '');
 
-      const res = await fetch(url);
-      const json = await res.json();
+  return cleaned; // mỗi dòng: [date, range]
+}
 
-      if (json.status !== "success") {
-        setError(json.message || "API error");
-        setLines([]);
-        setDates(json.dates || []);
-        return;
+// Tìm cấu trúc 1 dòng chuyền trong block raw
+function parseLineRow(row) {
+  const lineName = (row[0] || '').toString().trim();
+
+  // Tìm ô có chữ "Đạt" / "Thiếu"… làm trạng thái
+  let status = '';
+  let statusIdx = -1;
+  for (let i = 0; i < row.length; i++) {
+    const v = row[i];
+    if (typeof v === 'string') {
+      const text = v.normalize('NFC'); // để xử lý dấu tiếng Việt
+      if (
+        text.includes('Đạt') ||
+        text.includes('đạt') ||
+        text.includes('Thiếu') ||
+        text.includes('thiếu')
+      ) {
+        status = text;
+        statusIdx = i;
+        break;
       }
-
-      setDates(json.dates || []);
-      setSelectedDate(json.date || "");
-      setLines(json.lines || []);
-
-      if (json.lines && json.lines.length) {
-        setSelectedLine(json.lines[0].chuyen);
-      } else {
-        setSelectedLine("");
-      }
-    } catch (err) {
-      setError(err.message || String(err));
-    } finally {
-      setLoading(false);
     }
   }
 
-  // load lần đầu
-  useEffect(() => {
-    fetchData("");
-  }, []);
+  // Tìm 1 ô phần trăm gần trước trạng thái, coi như "hiệu suất ngày"
+  let effDay = '';
+  if (statusIdx > 0) {
+    for (let i = statusIdx - 1; i >= 0; i--) {
+      const v = row[i];
+      if (typeof v === 'string' && v.includes('%')) {
+        effDay = v;
+        break;
+      }
+    }
+  }
 
-  const handleDateChange = (e) => {
-    const d = e.target.value;
-    setSelectedDate(d);
-    fetchData(d);
+  // Lấy vài số cuối cùng làm thông tin sản lượng (chỉ để tham khảo)
+  const nums = row
+    .map((v) => (typeof v === 'string' ? v.replace(/,/g, '') : v))
+    .filter((v) => !isNaN(Number(v)))
+    .map((v) => Number(v));
+  const prodToday = nums.length ? nums[nums.length - 1] : '';
+
+  return {
+    line: lineName,
+    effDay,
+    status,
+    prodToday,
   };
+}
 
-  const handleLineChange = (e) => {
-    setSelectedLine(e.target.value);
-  };
+export async function GET(req) {
+  try {
+    const { searchParams } = new URL(req.url);
+    const dateParam = searchParams.get('date'); // dd/mm/yyyy
 
-  const currentLine = lines.find((l) => l.chuyen === selectedLine);
+    const { auth, sheetId } = getGoogleAuth();
+    const sheets = google.sheets({ version: 'v4', auth });
 
-  const rows =
-    currentLine?.hours?.map((h) => {
-      const mult = HOUR_MULTIPLIERS[h.label] || 0;
-      const target = currentLine.dmHour * mult;
-      const actual = h.actual || 0;
-      const diff = actual - target;
+    // 1) Đọc CONFIG_KPI
+    const configRows = await getConfigRows(sheets, sheetId);
+    const dates = configRows.map((r) => (r[0] || '').toString().trim());
 
-      let status = "Đủ";
-      if (diff < 0) status = "Thiếu";
-      else if (diff > 0) status = "Dư";
+    if (!dates.length) {
+      return NextResponse.json({
+        status: 'success',
+        date: null,
+        dates: [],
+        range: null,
+        lines: [],
+        raw: [],
+        configRows,
+      });
+    }
 
-      return {
-        label: h.label,
-        target,
-        actual,
-        diff,
-        status,
-      };
-    }) || [];
+    // Nếu không truyền date → lấy ngày đầu tiên trong CONFIG_KPI
+    const date = (dateParam || dates[0]).toString().trim();
 
-  return (
-    <main
-      style={{
-        padding: "24px",
-        fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
-      }}
-    >
-      <h1 style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontSize: 28 }}>📊</span>
-        <span>KPI Dashboard</span>
-      </h1>
+    const matched = configRows.find(
+      (r) => (r[0] || '').toString().trim() === date
+    );
 
-      <div
-        style={{
-          marginTop: 16,
-          display: "flex",
-          gap: 24,
-          alignItems: "center",
-          flexWrap: "wrap",
-        }}
-      >
-        <label>
-          <strong>Ngày: </strong>
-          <select
-            value={selectedDate}
-            onChange={handleDateChange}
-            style={{ padding: "4px 8px" }}
-          >
-            {dates.map((d) => (
-              <option key={d} value={d}>
-                {d}
-              </option>
-            ))}
-          </select>
-        </label>
+    if (!matched) {
+      return NextResponse.json(
+        {
+          status: 'error',
+          message: `Ngày ${date} không có trong CONFIG_KPI`,
+          dates,
+        },
+        { status: 400 }
+      );
+    }
 
-        {lines.length > 0 && (
-          <label>
-            <strong>Chuyền: </strong>
-            <select
-              value={selectedLine}
-              onChange={handleLineChange}
-              style={{ padding: "4px 8px" }}
-            >
-              {lines.map((l) => (
-                <option key={l.chuyen} value={l.chuyen}>
-                  {l.chuyen}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
-      </div>
+    const range = (matched[1] || '').toString().trim();
 
-      {error && (
-        <p style={{ marginTop: 16, color: "red" }}>
-          <strong>Lỗi:</strong> {error}
-        </p>
-      )}
+    // 2) Đọc block KPI tương ứng ngày đó
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: sheetId,
+      range,
+    });
 
-      {loading && <p style={{ marginTop: 16 }}>Đang tải dữ liệu…</p>}
+    const rows = res.data.values || [];
 
-      {!loading && !error && currentLine && (
-        <section style={{ marginTop: 24 }}>
-          <h2>
-            Chuyền <strong>{currentLine.chuyen}</strong> – DM/H:{" "}
-            <strong>{currentLine.dmHour}</strong> – DM/Ngày:{" "}
-            <strong>{currentLine.dmDay}</strong>
-          </h2>
+    // 3) Lọc các dòng chuyền (C1, C2, C3, …)
+    const lineRows = rows.filter((row) => {
+      const name = (row[0] || '').toString().trim();
+      return /^C\d+/i.test(name); // chỉ lấy C1, C2, C3…
+    });
 
-          <table
-            style={{
-              marginTop: 12,
-              borderCollapse: "collapse",
-              minWidth: 620,
-              maxWidth: "100%",
-            }}
-          >
-            <thead>
-              <tr>
-                <th style={thStyle}>Giờ</th>
-                <th style={thStyle}>Kế hoạch lũy tiến</th>
-                <th style={thStyle}>Thực tế</th>
-                <th style={thStyle}>Chênh lệch</th>
-                <th style={thStyle}>Trạng thái</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr key={row.label}>
-                  <td style={tdStyle}>{row.label}</td>
-                  <td style={tdNumStyle}>{row.target}</td>
-                  <td style={tdNumStyle}>{row.actual}</td>
-                  <td style={tdNumStyle}>{row.diff}</td>
-                  <td
-                    style={{
-                      ...tdStyle,
-                      fontWeight: 600,
-                      color:
-                        row.status === "Thiếu"
-                          ? "red"
-                          : row.status === "Dư"
-                          ? "orange"
-                          : "green",
-                    }}
-                  >
-                    {row.status}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
-      )}
+    const lines = lineRows.map(parseLineRow);
 
-      {!loading && !error && !currentLine && (
-        <p style={{ marginTop: 16 }}>
-          Không có dữ liệu chuyền cho ngày này.
-        </p>
-      )}
-    </main>
-  );
+    return NextResponse.json({
+      status: 'success',
+      date,
+      dates,
+      range,
+      lines,
+      raw: rows,      // để debug nếu cần
+      configRows,     // để xem lại mapping ngày → range
+    });
+  } catch (err) {
+    console.error('KPI API ERROR:', err);
+    return NextResponse.json(
+      {
+        status: 'error',
+        message: err.message || 'Unknown error',
+      },
+      { status: 500 }
+    );
+  }
 }
