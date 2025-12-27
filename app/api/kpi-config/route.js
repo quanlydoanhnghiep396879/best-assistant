@@ -33,19 +33,16 @@ async function readRange(range) {
 export async function GET() {
   try {
     const configSheet = process.env.CONFIG_KPI_SHEET_NAME || "CONFIG_KPI";
-    const rows = await readRange(`${configSheet}!A2:B500`);
-
-    const configRows = (rows || [])
-      .filter((r) => r?.[0] && r?.[1])
-      .map((r) => ({
-        date: String(r[0]).trim(),
-        range: String(r[1]).trim(),
-      }));
-
-    const dates = configRows.map((r) => r.date);
+    const range = `${configSheet}!A1:B10`;
+    const rows = await readRange(range);
 
     return NextResponse.json(
-      { status: "success", dates, configRows },
+      {
+        status: "success",
+        configSheet,
+        range,
+        rows,
+      },
       { headers: { "Cache-Control": "no-store" } }
     );
   } catch (err) {
