@@ -1,17 +1,37 @@
 // app/lib/googleSheetsClient.js
 import { google } from "googleapis";
 
+/** Convert Google/Excel serial date -> dd/mm/yyyy */
+function serialToDMY(serial) {
+  // Google Sheets/Excel date serial base: 1899-12-30
+  const base = new Date(Date.UTC(1899, 11, 30));
+  const ms = Number(serial) * 24 * 60 * 60 * 1000;
+  const d = new Date(base.getTime() + ms);
+
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const yyyy = d.getUTCFullYear();
+  return `${dd}/${mm}/${yyyy}`;
+}
+
+function normalizeDateValue(v) {
+  if (v == null) return "";
+  // nếu là số kiểu 46014
+  if (typeof v === "number") return serialToDMY(v);
+
+  const s = String(v).trim();
+  // nếu là string số "46014"
+  if (/^\d{4,6}$/.test(s)) return serialToDMY(Number(s));
+  // nếu đã là dd/mm/yyyy thì giữ nguyên
+  return s;
+}
+
 function getServiceAccountKeyFile() {
   const base64 = process.env.GOOGLE_PRIVATE_KEY_BASE64;
   if (!base64) throw new Error("Thiếu env GOOGLE_PRIVATE_KEY_BASE64");
 
   const json = Buffer.from(base64, "base64").toString("utf8");
   const keyFile = JSON.parse(json);
-
-  // rất hay bị \n dạng string khi copy
-  if (keyFile.private_key && typeof keyFile.private_key === "string") {
-    keyFile.private_key = keyFile.private_key.replace(/\\n/g, "\n");
-  }
   return keyFile;
 }
 
@@ -30,68 +50,42 @@ function getSheetsClient() {
   return { sheets, spreadsheetId };
 }
 
-export async function readSheetRange(range) {
+/** Đọc 1 range bất kỳ trong Google Sheet */
+export async function readSheetRange(range, opts = {}) {
   const { sheets, spreadsheetId } = getSheetsClient();
 
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range,
-    valueRenderOption: "FORMATTED_VALUE",
-    dateTimeRenderOption: "FORMATTED_STRING",
+    valueRenderOption: opts.valueRenderOption || "FORMATTED_VALUE",
+    dateTimeRenderOption: opts.dateTimeRenderOption || "FORMATTED_STRING",
   });
 
   return res.data.values || [];
 }
 
-// convert serial date kiểu 46014 -> dd/mm/yyyy (Google date serial: 1899-12-30)
-function serialToDMY(serial) {
-  const base = Date.UTC(1899, 11, 30);
-  const ms = base + Number(serial) * 86400000;
-  const d = new Date(ms);
-  const dd = String(d.getUTCDate()).padStart(2, "0");
-  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const yyyy = String(d.getUTCFullYear());
-  return `${dd}/${mm}/${yyyy}`;
-}
-
-function normalizeDateStr(v) {
-  if (v === null || v === undefined) return "";
-  const s = String(v).trim();
-  if (!s) return "";
-
-  // nếu là serial date
-  if (/^\d{4,6}$/.test(s)) return serialToDMY(s);
-
-  // nếu dạng yyyy-mm-dd
-  const m1 = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
-  if (m1) {
-    const yyyy = m1[1];
-    const mm = m1[2].padStart(2, "0");
-    const dd = m1[3].padStart(2, "0");
-    return `${dd}/${mm}/${yyyy}`;
-  }
-
-  // nếu dạng dd/mm/yyyy hoặc d/m/yyyy
-  const m2 = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (m2) {
-    const dd = m2[1].padStart(2, "0");
-    const mm = m2[2].padStart(2, "0");
-    const yyyy = m2[3];
-    return `${dd}/${mm}/${yyyy}`;
-  }
-
-  return s;
-}
-
+/** Đọc cấu hình ngày / range trong sheet CONFIG_KPI */
 export async function readConfigRanges() {
   const configSheetName = process.env.CONFIG_KPI_SHEET_NAME || "CONFIG_KPI";
-  // A=DATE, B=RANGE
-  const rows = await readSheetRange(`${configSheetName}!A2:B200`);
 
-  return (rows || [])
+  // đọc rộng để lấy cả header
+  const rows = await readSheetRange(`${configSheetName}!A1:B500`, {
+    valueRenderOption: "FORMATTED_VALUE",
+  });
+
+  if (!rows.length) return [];
+
+  // detect header
+  const h0 = String(rows[0]?.[0] || "").trim().toUpperCase();
+  const h1 = String(rows[0]?.[1] || "").trim().toUpperCase();
+  const hasHeader = h0.includes("DATE") && h1.includes("RANGE");
+
+  const dataRows = hasHeader ? rows.slice(1) : rows;
+
+  return dataRows
     .filter((r) => r && r[0] && r[1])
     .map((r) => ({
-      date: normalizeDateStr(r[0]),
-      range: String(r[1]).trim(),
+      date: normalizeDateValue(r[0]), // "24/12/2025" hoặc "46014" -> normalize
+      range: String(r[1]).trim(),     // "KPI!A3:AJ18"
     }));
 }

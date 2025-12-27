@@ -1,8 +1,13 @@
+// app/kpi/page.js
 import KpiDashboardClient from "./KpiDashboardClient";
 
-export default function KPIPage() {
+export const dynamic = "force-dynamic";
+
+export default function KpiPage() {
   return (
-    <main className="p-4">
+    <main className="p-6">
+      <h1 className="text-3xl font-bold">KPI Dashboard</h1>
+      <p className="text-gray-600 mt-1">Chọn ngày để xem so sánh lũy tiến theo giờ và hiệu suất ngày.</p>
       <KpiDashboardClient />
     </main>
   );
