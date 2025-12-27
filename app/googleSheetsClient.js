@@ -1,32 +1,17 @@
 import "server-only";
 import { google } from "googleapis";
 
-// ✅ để kiểm tra Vercel đang dùng đúng file này hay chưa
-export const __MODULE_ID = "googleSheetsClient_v2025-12-27_A";
+export const __MODULE_ID = "googleSheetsClient_OK_2025_12_27";
 
-/** Lấy key JSON từ GOOGLE_PRIVATE_KEY_BASE64 (base64) */
 function getServiceAccountKeyFile() {
   const base64 = process.env.GOOGLE_PRIVATE_KEY_BASE64;
   if (!base64) throw new Error("Thiếu env GOOGLE_PRIVATE_KEY_BASE64");
 
-  let json;
-  try {
-    json = Buffer.from(base64, "base64").toString("utf8");
-  } catch {
-    throw new Error("GOOGLE_PRIVATE_KEY_BASE64 không phải chuỗi base64 hợp lệ");
-  }
-
-  let keyFile;
-  try {
-    keyFile = JSON.parse(json);
-  } catch {
-    throw new Error("GOOGLE_PRIVATE_KEY_BASE64 giải mã được nhưng không phải JSON");
-  }
-
+  const json = Buffer.from(base64, "base64").toString("utf8");
+  const keyFile = JSON.parse(json);
   return keyFile;
 }
 
-/** ✅ Export luôn (để debug thấy) */
 export function getSheetsClient() {
   const keyFile = getServiceAccountKeyFile();
   const spreadsheetId = process.env.GOOGLE_SHEET_ID;
@@ -42,14 +27,12 @@ export function getSheetsClient() {
   return { sheets, spreadsheetId };
 }
 
-/** ✅ PHẢI export */
 export async function readSheetRange(range) {
   const { sheets, spreadsheetId } = getSheetsClient();
   const res = await sheets.spreadsheets.values.get({ spreadsheetId, range });
   return res.data.values || [];
 }
 
-/** ✅ PHẢI export */
 export async function readConfigRanges() {
   const configSheetName = process.env.CONFIG_KPI_SHEET_NAME || "CONFIG_KPI";
   const rows = await readSheetRange(`${configSheetName}!A2:B200`);
@@ -62,5 +45,4 @@ export async function readConfigRanges() {
     }));
 }
 
-/** ✅ Export default (để route import chắc chắn) */
 export default { readSheetRange, readConfigRanges, getSheetsClient, __MODULE_ID };
