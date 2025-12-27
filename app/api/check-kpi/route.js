@@ -1,7 +1,27 @@
 import { NextResponse } from "next/server";
-import sheetsClient from "../../lib/googleSheetsClient.js";
 
 export const runtime = "nodejs";
+
+async function loadSheetsLib() {
+  const mod = await import("../../lib/googleSheetsClient.js");
+
+  const readConfigRanges =
+    mod.readConfigRanges ?? mod.default?.readConfigRanges;
+
+  const readSheetRange =
+    mod.readSheetRange ?? mod.default?.readSheetRange;
+
+  return {
+    readConfigRanges,
+    readSheetRange,
+    __debug: {
+      keys: Object.keys(mod),
+      defaultKeys: mod.default ? Object.keys(mod.default) : null,
+      typeof_readConfigRanges: typeof readConfigRanges,
+      typeof_readSheetRange: typeof readSheetRange,
+    },
+  };
+}
 
 function findRangeForDate(configRows, date) {
   const d = String(date || "").trim();
@@ -21,7 +41,20 @@ export async function GET(request) {
   }
 
   try {
-    const configRows = await sheetsClient.readConfigRanges();
+    const lib = await loadSheetsLib();
+
+    // Nếu import sai -> trả debug luôn để chốt lỗi
+    if (
+      typeof lib.readConfigRanges !== "function" ||
+      typeof lib.readSheetRange !== "function"
+    ) {
+      return NextResponse.json(
+        { status: "error", message: "Sheets lib missing", debug: lib.__debug },
+        { status: 500 }
+      );
+    }
+
+    const configRows = await lib.readConfigRanges();
     const range = findRangeForDate(configRows, date);
 
     if (!range) {
@@ -31,13 +64,13 @@ export async function GET(request) {
       );
     }
 
-    const values = await sheetsClient.readSheetRange(range);
+    const values = await lib.readSheetRange(range);
 
     return NextResponse.json({
       status: "success",
       date: String(date).trim(),
       range,
-      raw: values, // ✅ khớp KpiDashboardClient của bạn (data.raw)
+      raw: values, // khớp KpiDashboardClient (data.raw)
     });
   } catch (err) {
     console.error("CHECK-KPI ERROR:", err);
