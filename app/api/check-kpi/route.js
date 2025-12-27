@@ -1,12 +1,10 @@
 import { NextResponse } from "next/server";
-import { readSheetRange, readConfigRanges } from "@/app/lib/googleSheetsClient";
+import { readSheetRange, readConfigRanges } from "../../lib/googleSheetsClient";
 
-export const dynamic = "force-dynamic";
-export const revalidate = 0;
+export const runtime = "nodejs";
 
 function findRangeForDate(configRows, date) {
-  const key = String(date || "").trim();
-  const row = (configRows || []).find((r) => String(r.date || "").trim() === key);
+  const row = configRows.find((r) => r.date === date);
   return row?.range;
 }
 
@@ -27,7 +25,7 @@ export async function GET(request) {
 
     if (!range) {
       return NextResponse.json(
-        { status: "error", message: "Không tìm thấy RANGE trong CONFIG_KPI cho ngày này" },
+        { status: "error", message: "Không tìm thấy DATE trong CONFIG_KPI" },
         { status: 404 }
       );
     }
@@ -38,9 +36,8 @@ export async function GET(request) {
       status: "success",
       date,
       range,
-      raw: values,
-      headerPreview: values?.[0] || [],
-      rowsCount: values?.length || 0,
+      raw: values,     // QUAN TRỌNG: client của bạn đang đọc data.raw
+      values,
     });
   } catch (err) {
     console.error("CHECK-KPI ERROR:", err);

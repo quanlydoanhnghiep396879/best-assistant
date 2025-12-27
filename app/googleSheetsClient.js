@@ -4,19 +4,20 @@ function getServiceAccountKeyFile() {
   const base64 = process.env.GOOGLE_PRIVATE_KEY_BASE64;
   if (!base64) throw new Error("Thiếu env GOOGLE_PRIVATE_KEY_BASE64");
 
-  let json;
-  try {
-    json = Buffer.from(base64, "base64").toString("utf8");
-  } catch {
-    throw new Error("GOOGLE_PRIVATE_KEY_BASE64 không phải chuỗi base64 hợp lệ");
-  }
+  let jsonStr = Buffer.from(base64, "base64").toString("utf8");
 
   let keyFile;
   try {
-    keyFile = JSON.parse(json);
+    keyFile = JSON.parse(jsonStr);
   } catch {
     throw new Error("GOOGLE_PRIVATE_KEY_BASE64 giải mã được nhưng không phải JSON");
   }
+
+  // phòng trường hợp private_key bị \\n
+  if (typeof keyFile.private_key === "string") {
+    keyFile.private_key = keyFile.private_key.replace(/\\n/g, "\n");
+  }
+
   return keyFile;
 }
 
@@ -37,7 +38,13 @@ function getSheetsClient() {
 
 export async function readSheetRange(range) {
   const { sheets, spreadsheetId } = getSheetsClient();
-  const res = await sheets.spreadsheets.values.get({ spreadsheetId, range });
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range,
+    valueRenderOption: "UNFORMATTED_VALUE",
+  });
+
   return res.data.values || [];
 }
 
@@ -46,7 +53,7 @@ export async function readConfigRanges() {
   const rows = await readSheetRange(`${configSheetName}!A2:B200`);
 
   return (rows || [])
-    .filter((r) => r[0] && r[1])
+    .filter((r) => r?.[0] && r?.[1])
     .map((r) => ({
       date: String(r[0]).trim(),   // "24/12/2025"
       range: String(r[1]).trim(),  // "KPI!A3:AJ18"

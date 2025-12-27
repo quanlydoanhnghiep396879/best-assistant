@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
-import { readConfigRanges } from "@/app/lib/googleSheetsClient";
+import { readConfigRanges } from "../../lib/googleSheetsClient";
 
-export const dynamic = "force-dynamic";
-export const revalidate = 0;
+export const runtime = "nodejs";
 
 export async function GET() {
   try {
