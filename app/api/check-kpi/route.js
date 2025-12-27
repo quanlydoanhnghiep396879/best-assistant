@@ -1,39 +1,59 @@
 import { NextResponse } from "next/server";
-import { readSheetRange } from "../../lib/googleSheetsClient";
+import {
+  readSheetRange,
+  readConfigRanges,
+} from "../../lib/googleSheetsClient";
 
-const CONFIG_SHEET_NAME =
-  process.env.CONFIG_KPI_SHEET_NAME || "CONFIG_KPI";
+function findRangeForDate(configRows, date) {
+  const row = configRows.find((r) => r.date === date);
+  return row?.range;
+}
 
-export async function GET() {
-  try {
-    // Đọc A2:B1000 (DATE, RANGE)
-    const rows = await readSheetRange(`${CONFIG_SHEET_NAME}!A2:B1000`);
-    const configRows = (rows || []).filter((r) => r[0] && r[1]);
+export async function GET(request) {
+  const { searchParams } = new URL(request.url);
+  const date = searchParams.get("date");
 
-    if (!configRows.length) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message: "Không có ngày nào trong CONFIG_KPI",
-        },
-        { status: 500 }
-      );
-    }
-
-    const dates = configRows.map((r) => r[0]);
-
-    return NextResponse.json({
-      status: "success",
-      dates,
-      configRows, // [[date, range], ...]
-    });
-  } catch (err) {
-    console.error("KPI-CONFIG ERROR:", err);
+  if (!date) {
     return NextResponse.json(
       {
         status: "error",
-          // ép về string cho chắc
-        message: String(err?.message || err),
+        message: "Thiếu query ?date=dd/mm/yyyy",
+      },
+      { status: 400 }
+    );
+  }
+
+  try {
+    // Lấy danh sách ngày + range từ CONFIG_KPI
+    const configRows = await readConfigRanges();
+    const range = findRangeForDate(configRows, date);
+
+    if (!range) {
+      return NextResponse.json(
+        {
+          status: "error",
+          message:
+            "Range đang đọc: (không tìm thấy trong CONFIG_KPI)",
+        },
+        { status: 404 }
+      );
+    }
+
+    // Đọc dữ liệu KPI theo range tìm được
+    const values = await readSheetRange(range);
+
+    return NextResponse.json({
+      status: "success",
+      date,
+      range,
+      values,
+    });
+  } catch (err) {
+    console.error("CHECK-KPI ERROR:", err);
+    return NextResponse.json(
+      {
+        status: "error",
+        message: err?.message || "Unknown error",
       },
       { status: 500 }
     );
