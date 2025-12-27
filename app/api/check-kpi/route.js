@@ -1,6 +1,6 @@
 // app/api/check-kpi/route.js
 import { NextResponse } from "next/server";
-import { readSheetRange, readConfigRanges } from "../../lib/googleSheetsClient";
+import { readSheetRange, readConfigRanges } from "../lib/googleSheetsClient";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -8,7 +8,6 @@ export const dynamic = "force-dynamic";
 const WORK_HOURS = 8;
 const DEFAULT_DAY_TARGET = 0.9;
 
-// 8 mốc chuẩn
 const MARKS = [
   { key: "->9h", h: 1 },
   { key: "->10h", h: 2 },
@@ -26,11 +25,10 @@ function stripAccents(s) {
     .replace(/[\u0300-\u036f]/g, "")
     .toUpperCase();
 }
-
 function normToken(s) {
   return stripAccents(s)
     .replace(/\s+/g, "")
-    .replace(/[^\w>→\/]/g, ""); // giữ chữ, số, _, >, →, /
+    .replace(/[^\w>→\/]/g, "");
 }
 
 function parseNumber(v) {
@@ -41,12 +39,8 @@ function parseNumber(v) {
 
   s = s.replace("%", "").trim();
 
-  // "1,08" -> 1.08 ; "2,755" -> 2.755
-  if (s.includes(".") && s.includes(",")) {
-    s = s.replace(/,/g, "");
-  } else if (s.includes(",") && !s.includes(".")) {
-    s = s.replace(",", ".");
-  }
+  if (s.includes(".") && s.includes(",")) s = s.replace(/,/g, "");
+  else if (s.includes(",") && !s.includes(".")) s = s.replace(",", ".");
 
   const n = Number(s);
   return Number.isFinite(n) ? n : 0;
@@ -61,7 +55,6 @@ function parsePercent(v) {
 
   const n = parseNumber(s);
   if (!Number.isFinite(n)) return null;
-  // nếu user nhập 95.87 => coi là %
   if (n > 1.5) return n / 100;
   return n;
 }
@@ -73,147 +66,108 @@ function findRangeForDate(configRows, date) {
   return row?.range || "";
 }
 
-function getMaxCols(values, fromRow, toRow) {
-  let max = 0;
-  for (let i = fromRow; i <= toRow; i++) {
-    const r = values[i] || [];
-    max = Math.max(max, r.length);
-  }
-  return max;
-}
-
-/** Ghép header nhiều dòng (để bắt chữ ở ô merge) */
-function buildCompositeHeader(values, baseIndex) {
-  const from = Math.max(0, baseIndex - 2);
-  const to = Math.min(values.length - 1, baseIndex + 2);
-  const maxCols = getMaxCols(values, from, to);
-
-  const header = Array.from({ length: maxCols }, (_, c) => {
-    const parts = [];
-    for (let r = from; r <= to; r++) {
-      const cell = (values[r] || [])[c];
-      const txt = String(cell || "").trim();
-      if (txt) parts.push(txt);
-    }
-    return parts.join(" ").trim();
-  });
-
-  return header;
-}
-
-function headerHas(header, keywords) {
-  const H = header.map(normToken);
-  return H.some((cell) => keywords.every((k) => cell.includes(k)));
-}
-
-function scoreHeader(header) {
-  const H = header.map(normToken);
-
-  const hasMark = H.some((c) => c.includes(normToken("->9h")) || c.includes(normToken("→9h")));
-  const hasDMH = H.some((c) => c.includes("DM/H") || (c.includes("DM") && c.includes("H")));
-  const hasDMDay = H.some((c) => c.includes("DM/NG") || (c.includes("DM") && c.includes("NGAY")));
-  const hasAch = H.some((c) => c.includes("SUAT") && c.includes("DAT") && c.includes("TRONG"));
-  const hasTarget = H.some((c) => c.includes("DINH") && c.includes("MUC") && c.includes("TRONG"));
-
-  let score = 0;
-  if (hasMark) score += 4;
-  if (hasDMH) score += 3;
-  if (hasDMDay) score += 2;
-  if (hasAch) score += 1;
-  if (hasTarget) score += 1;
-  return score;
-}
-
-/** Tìm index dòng header tốt nhất trong block đầu */
-function findBestHeaderRow(values) {
-  const limit = Math.min(values.length, 25);
-  let bestIdx = 0;
-  let bestScore = -1;
-
-  for (let i = 0; i < limit; i++) {
-    const header = buildCompositeHeader(values, i);
-    const sc = scoreHeader(header);
-    if (sc > bestScore) {
-      bestScore = sc;
-      bestIdx = i;
-    }
-  }
-  return bestIdx;
-}
-
-function findColIndex(header, patterns) {
-  // patterns: [ ["DM","NGAY"], ["DM/NG"] ... ]
-  const H = header.map(normToken);
-  for (let i = 0; i < H.length; i++) {
-    const cell = H[i];
-    for (const p of patterns) {
-      if (p.every((kw) => cell.includes(kw))) return i;
-    }
-  }
-  return -1;
-}
-
-function findMarkCols(header) {
-  const H = header.map(normToken);
-  return MARKS.map((m) => {
-    const key1 = normToken(m.key);
-    const key2 = key1.replace("->", "→"); // phòng trường hợp sheet dùng → thay ->
-    const col = H.findIndex((c) => c.includes(key1) || c.includes(key2));
-    return { ...m, col };
-  });
-}
-
 function isLikelyDataRow(row0) {
   const t = stripAccents(row0).trim();
   if (!t) return false;
-  // loại các dòng tổng / tiêu đề
   if (t.includes("TOTAL") || t.includes("TONG")) return false;
   if (t.includes("LOAI")) return false;
   return true;
 }
 
+function findFirstMarkCol(values, limitRows = 25) {
+  const maxR = Math.min(values.length, limitRows);
+
+  // tìm cột có chứa ->9h ở bất kỳ dòng header nào
+  const k1 = normToken("->9h");
+  const k2 = k1.replace("->", "→");
+
+  for (let r = 0; r < maxR; r++) {
+    const row = values[r] || [];
+    for (let c = 0; c < row.length; c++) {
+      const cell = normToken(row[c] || "");
+      if (cell.includes(k1) || cell.includes(k2)) {
+        return c;
+      }
+    }
+  }
+  return -1;
+}
+
+function findColByKeywords(values, keywords, limitRows = 25) {
+  const maxR = Math.min(values.length, limitRows);
+  for (let r = 0; r < maxR; r++) {
+    const row = values[r] || [];
+    for (let c = 0; c < row.length; c++) {
+      const cell = normToken(row[c] || "");
+      if (keywords.every((k) => cell.includes(k))) return c;
+    }
+  }
+  return -1;
+}
+
+function findMarkCols(values, limitRows = 25) {
+  const maxR = Math.min(values.length, limitRows);
+
+  const cols = MARKS.map(() => -1);
+
+  for (let r = 0; r < maxR; r++) {
+    const row = values[r] || [];
+    for (let c = 0; c < row.length; c++) {
+      const cell = normToken(row[c] || "");
+      MARKS.forEach((m, idx) => {
+        const k1 = normToken(m.key);
+        const k2 = k1.replace("->", "→");
+        if (cols[idx] === -1 && (cell.includes(k1) || cell.includes(k2))) {
+          cols[idx] = c;
+        }
+      });
+    }
+  }
+
+  return MARKS.map((m, i) => ({ ...m, col: cols[i] }));
+}
+
 function parseKpi(values) {
-  if (!values || values.length === 0) return { marks: MARKS.map((m) => m.key), lines: [] };
+  if (!values?.length) return { latestMark: "->16h30", lines: [] };
 
-  const headerRowIndex = findBestHeaderRow(values);
-  const header = buildCompositeHeader(values, headerRowIndex);
+  const markCols = findMarkCols(values);
+  const firstMarkCol = markCols
+    .map((x) => x.col)
+    .filter((c) => c >= 0)
+    .sort((a, b) => a - b)[0] ?? findFirstMarkCol(values);
 
-  // tìm cột
-  const colDMDay = findColIndex(header, [
-    ["DM/NG"],          // DM/NGÀY
-    ["DM", "NGAY"],     // DM NGÀY (không có dấu /)
-    ["DMNGAY"],
-  ]);
+  // daily columns (tìm theo keyword trong mọi header)
+  const colDayAch = findColByKeywords(values, ["SUAT", "DAT", "TRONG"]);
+  const colDayTarget = findColByKeywords(values, ["DINH", "MUC", "TRONG"]);
 
-  const colDMH = findColIndex(header, [
-    ["DM/H"],       // DM/H
-    ["DM", "H"],    // DM H
-    ["DMH"],
-  ]);
+  // DM cols: ưu tiên tìm bằng chữ, nếu fail thì suy ra theo firstMarkCol
+  let colDMH = findColByKeywords(values, ["DM/H"]);
+  if (colDMH < 0) colDMH = findColByKeywords(values, ["DM", "H"]);
+  let colDMDay = findColByKeywords(values, ["DM/NG"]);
+  if (colDMDay < 0) colDMDay = findColByKeywords(values, ["DM", "NGAY"]);
 
-  const colDayAch = findColIndex(header, [
-    ["SUAT", "DAT", "TRONG"], // SUẤT ĐẠT TRONG ...
-  ]);
+  if (firstMarkCol >= 0) {
+    if (colDMH < 0) colDMH = firstMarkCol - 1;      // I
+    if (colDMDay < 0) colDMDay = firstMarkCol - 2;  // H
+  }
 
-  const colDayTarget = findColIndex(header, [
-    ["DINH", "MUC", "TRONG"], // ĐỊNH MỨC TRONG ...
-  ]);
+  // tìm dòng bắt đầu data: dòng đầu tiên có C1/C2... (cột A)
+  let startRow = 0;
+  for (let r = 0; r < Math.min(values.length, 30); r++) {
+    const a = String((values[r] || [])[0] || "").trim();
+    if (/^C\d+$/i.test(a) || a.toUpperCase() === "CẮT" || a.toUpperCase() === "KCS") {
+      startRow = r;
+      break;
+    }
+  }
 
-  const markCols = findMarkCols(header);
-  const latestMark = "->16h30";
-
-  // data rows: bắt đầu sau headerRowIndex, nhưng bỏ qua các dòng không phải data
   const lines = [];
-  for (let r = headerRowIndex + 1; r < values.length; r++) {
+
+  for (let r = startRow; r < values.length; r++) {
     const row = values[r] || [];
     const lineName = String(row[0] || "").trim();
-
     if (!lineName) continue;
     if (!isLikelyDataRow(lineName)) continue;
-
-    // nếu gặp dòng trống kéo dài hoặc hết block data thì break theo thực tế sheet
-    // (nếu bạn muốn chặt hơn thì đổi logic break)
-    // Ở đây: nếu lineName là số/nhãn lạ vẫn parse được.
 
     const dmDay = colDMDay >= 0 ? parseNumber(row[colDMDay]) : 0;
 
@@ -264,7 +218,7 @@ function parseKpi(values) {
     });
   }
 
-  return { marks: markCols.map((m) => m.key), latestMark, lines };
+  return { latestMark: "->16h30", lines };
 }
 
 export async function GET(request) {
