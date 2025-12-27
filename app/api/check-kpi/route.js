@@ -119,7 +119,7 @@ async function sendEmail(subject, text) {
   await getMailer().sendMail({ from, to, subject, text });
 }
 
-// ===== LOG =====
+// ===== LOG (MAIL_LOG: timestamp | date | key | type | detail) =====
 async function logSent(key, type, detail) {
   await appendRow(`${LOG_SHEET}!A:E`, [
     new Date().toISOString(),
@@ -208,7 +208,6 @@ export async function POST(request) {
     const header = values[0];
     const body = values.slice(1);
 
-    // index map
     const idx = {};
     header.forEach((h, i) => (idx[norm(h)] = i));
 
@@ -221,16 +220,14 @@ export async function POST(request) {
     const iDMH = idx[norm("DM/H")] ?? idx[norm("ĐM/H")];
     const iDMD = idx[norm("DM/NGAY")] ?? idx[norm("ĐM/NGÀY")];
 
-    // checkpoint -> col
     const cpCol = {};
     header.forEach((h, i) => {
       const k = String(h || "").trim();
       if (CHECKPOINT_HOURS[k]) cpCol[k] = i;
     });
 
-    // gom mail
-    const hourlyMails = [];
-    const dailyMails = [];
+    const hourlyLines = [];
+    const dailyLines = [];
 
     for (const ch of changes) {
       const checkpoint = String(ch.checkpoint || "").trim();
@@ -253,7 +250,6 @@ export async function POST(request) {
       const actual = toNum(row[col]);
       const target = dmPerHour * hours;
 
-      // ===== OPTION 2+ status change / update =====
       const baseKey = `${date}|HOURLY|${checkpoint}|${lineName}`;
       const statusNow =
         target > 0 && actual < target * HOURLY_TOLERANCE ? "FAIL" : "OK";
@@ -289,20 +285,16 @@ export async function POST(request) {
         const thieu = Math.round(target - actual);
 
         if (mailType === "ALERT") {
-          hourlyMails.push(
-            `[ALERT] ${checkpoint} | ${lineName}: ${actual}/${Math.round(
-              target
-            )} (thiếu ${thieu})`
+          hourlyLines.push(
+            `[ALERT] ${checkpoint} | ${lineName}: ${actual}/${Math.round(target)} (thiếu ${thieu})`
           );
         } else if (mailType === "RECOVER") {
-          hourlyMails.push(
+          hourlyLines.push(
             `[OK] ${checkpoint} | ${lineName}: ${actual}/${Math.round(target)}`
           );
         } else {
-          hourlyMails.push(
-            `[UPDATE] ${checkpoint} | ${lineName}: ${actual}/${Math.round(
-              target
-            )} (vẫn thiếu ${thieu})`
+          hourlyLines.push(
+            `[UPDATE] ${checkpoint} | ${lineName}: ${actual}/${Math.round(target)} (vẫn thiếu ${thieu})`
           );
         }
 
@@ -313,42 +305,37 @@ export async function POST(request) {
         );
       }
 
-      // ===== DAILY khi sửa ->16h30 =====
+      // Daily: khi sửa ->16h30
       if (checkpoint === "->16h30" && dmD > 0) {
         const eff = actual / dmD;
         const ok = eff >= DAILY_TARGET;
 
-        const keyDaily = `${date}|DAILY|${lineName}|${ok ? "OK" : "FAIL"}`;
-        // daily: luôn log 1 lần theo trạng thái cuối ngày
         await logSent(
-          keyDaily,
+          `${date}|DAILY|${lineName}|${ok ? "OK" : "FAIL"}`,
           "DAILY",
           JSON.stringify({ actual, dmD, eff: Number((eff * 100).toFixed(2)) })
         );
 
-        dailyMails.push(
-          `${lineName}: ${actual}/${dmD} = ${(eff * 100).toFixed(2)}% => ${
-            ok ? "ĐẠT" : "KHÔNG ĐẠT"
-          }`
+        dailyLines.push(
+          `${lineName}: ${actual}/${dmD} = ${(eff * 100).toFixed(2)}% => ${ok ? "ĐẠT" : "KHÔNG ĐẠT"}`
         );
       }
     }
 
-    // gửi mail gộp
-    if (hourlyMails.length) {
+    if (hourlyLines.length) {
       await sendEmail(
-        `[KPI GIỜ] ${date} - cập nhật ${hourlyMails.length} dòng`,
-        hourlyMails.join("\n")
+        `[KPI GIỜ] ${date} - cập nhật ${hourlyLines.length} dòng`,
+        hourlyLines.join("\n")
       );
     }
-    if (dailyMails.length) {
-      await sendEmail(`[KPI CUỐI NGÀY] ${date}`, dailyMails.join("\n"));
+    if (dailyLines.length) {
+      await sendEmail(`[KPI CUỐI NGÀY] ${date}`, dailyLines.join("\n"));
     }
 
     return NextResponse.json({
       status: "success",
-      hourly: hourlyMails.length,
-      daily: dailyMails.length,
+      hourly: hourlyLines.length,
+      daily: dailyLines.length,
     });
   } catch (err) {
     return NextResponse.json(
