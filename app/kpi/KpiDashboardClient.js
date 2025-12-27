@@ -24,11 +24,12 @@ const CHECKPOINT_HOURS = {
   "->16h30": 8,
 };
 
-// giảm giật: poll chậm lại
-const POLL_MS = 8000; // bạn có thể đổi 6000 / 10000 tùy thích
+// UI/logic (khớp server)
+const HOURLY_TOLERANCE = 0.95; // đạt >= 95% target
+const DAILY_TARGET = 0.9; // đạt >= 90% DM/NGÀY
 
-const HOURLY_TOLERANCE = 0.95; // giống server: đạt >= 95% mục tiêu giờ
-const DAILY_TARGET = 0.9;      // cuối ngày đạt >= 90% DM/NGAY
+// chống giật: poll chậm hơn + chỉ setState khi data đổi
+const POLL_MS = 8000;
 
 const norm = (s) =>
   String(s || "")
@@ -43,52 +44,51 @@ function toNum(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
-// tìm checkpoint “hiện tại” dựa theo dữ liệu đã được nhập (cột ngoài cùng có số)
+// nhận biết checkpoint “mới nhất đã có số” để show trạng thái nhanh ngoài danh sách
 function detectCurrentCheckpoint(header, bodyRows) {
-  const cpCols = [];
+  const colIndex = {};
   header.forEach((h, i) => {
     const k = String(h || "").trim();
-    if (CHECKPOINT_HOURS[k]) cpCols.push({ k, i });
+    if (CHECKPOINT_HOURS[k]) colIndex[k] = i;
   });
 
-  // duyệt từ cuối về đầu: cột nào có ít nhất 1 dòng >0 thì chọn làm checkpoint hiện tại
   for (let t = CHECKPOINTS_ORDER.length - 1; t >= 0; t--) {
     const cp = CHECKPOINTS_ORDER[t];
-    const col = cpCols.find((x) => x.k === cp)?.i;
-    if (col == null) continue;
-    const hasAny = bodyRows.some((r) => toNum(r?.[col]) > 0);
+    const c = colIndex[cp];
+    if (c == null) continue;
+    const hasAny = bodyRows.some((r) => toNum(r?.[c]) > 0);
     if (hasAny) return cp;
   }
-
-  // nếu chưa có số liệu giờ nào, default ->9h
   return "->9h";
 }
 
 export default function KpiDashboardClient() {
   const [dates, setDates] = useState([]);
-  const [selectedDate, setSelectedDate] = useState("");
-  const [error, setError] = useState("");
+  const [selectedDate, setSelectedDate] = useState(""); // dropdown chọn
+  const [loadedDate, setLoadedDate] = useState(""); // bấm nút mới load
   const [rows, setRows] = useState([]);
+  const [error, setError] = useState("");
   const [isFetching, setIsFetching] = useState(false);
-  const [showAll, setShowAll] = useState(false);
 
+  const [search, setSearch] = useState("");
+  const [selectedLine, setSelectedLine] = useState("");
+
+  // mail/changes detection (giữ như cơ chế cũ)
   const firstLoadRef = useRef(true);
   const prevRawRef = useRef(null);
   const lastHashRef = useRef("");
 
-  // 1) Load danh sách ngày
+  // 1) load config ngày
   useEffect(() => {
     async function loadConfig() {
       try {
         setError("");
         const res = await fetch("/api/kpi-config", { cache: "no-store" });
         const data = await res.json();
-
         if (data.status !== "success") {
           setError(data.message || "Không đọc được CONFIG_KPI");
           return;
         }
-
         const ds = data.dates || [];
         setDates(ds);
         if (ds.length > 0) setSelectedDate(ds[ds.length - 1]);
@@ -99,9 +99,9 @@ export default function KpiDashboardClient() {
     loadConfig();
   }, []);
 
-  // 2) Poll KPI: cập nhật hiển thị + phát hiện thay đổi để gọi POST gửi mail
+  // 2) Poll KPI theo loadedDate
   useEffect(() => {
-    if (!selectedDate) return;
+    if (!loadedDate) return;
 
     let stopped = false;
 
@@ -110,7 +110,7 @@ export default function KpiDashboardClient() {
         setIsFetching(true);
         setError("");
 
-        const params = new URLSearchParams({ date: selectedDate });
+        const params = new URLSearchParams({ date: loadedDate });
         const res = await fetch(`/api/check-kpi?${params.toString()}`, {
           cache: "no-store",
         });
@@ -123,21 +123,21 @@ export default function KpiDashboardClient() {
 
         const newRaw = data.raw || [];
 
-        // chỉ setState nếu dữ liệu thật sự đổi (giảm giật)
+        // chống giật: chỉ setRows khi data đổi
         const newHash = JSON.stringify(newRaw);
         if (newHash !== lastHashRef.current) {
           lastHashRef.current = newHash;
           setRows(newRaw);
         }
 
-        // lần đầu mở: không gửi mail
+        // lần đầu load: không gửi mail
         if (firstLoadRef.current) {
           firstLoadRef.current = false;
           prevRawRef.current = newRaw;
           return;
         }
 
-        // detect changes để gọi POST (mail)
+        // detect changes để gọi POST (server sẽ so + gửi mail + log)
         const oldRaw = prevRawRef.current;
         prevRawRef.current = newRaw;
 
@@ -147,7 +147,7 @@ export default function KpiDashboardClient() {
         const oldHeader = oldRaw[0] || [];
         if (JSON.stringify(header) !== JSON.stringify(oldHeader)) return;
 
-        // tìm cột tên chuyền
+        // tìm cột chuyền
         const headerNorm = header.map((h) => norm(h));
         const lineCol =
           headerNorm.indexOf("chuyen") !== -1
@@ -158,7 +158,7 @@ export default function KpiDashboardClient() {
             ? headerNorm.indexOf("line")
             : 0;
 
-        // checkpoint cols
+        // cột checkpoint
         const cpCols = [];
         header.forEach((h, i) => {
           const k = String(h || "").trim();
@@ -167,7 +167,6 @@ export default function KpiDashboardClient() {
 
         const changes = [];
         const n = Math.min(oldRaw.length, newRaw.length);
-
         for (let r = 1; r < n; r++) {
           const lineName = String(newRaw[r]?.[lineCol] || "").trim();
           if (!lineName) continue;
@@ -175,18 +174,16 @@ export default function KpiDashboardClient() {
           for (const c of cpCols) {
             const a = String(oldRaw[r]?.[c] ?? "");
             const b = String(newRaw[r]?.[c] ?? "");
-            if (a !== b) {
+            if (a !== b)
               changes.push({ checkpoint: String(header[c]).trim(), lineName });
-            }
           }
         }
 
         if (changes.length && !stopped) {
-          // gọi POST để server so sánh + gửi mail + log
           await fetch("/api/check-kpi", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ date: selectedDate, changes }),
+            body: JSON.stringify({ date: loadedDate, changes }),
           });
         }
       } catch (err) {
@@ -198,26 +195,34 @@ export default function KpiDashboardClient() {
 
     tick();
     const id = setInterval(tick, POLL_MS);
-
     return () => {
       stopped = true;
       clearInterval(id);
     };
-  }, [selectedDate]);
+  }, [loadedDate]);
 
-  const handleDateChange = (e) => {
+  // bấm nút “Xem dữ liệu”
+  const handleLoad = () => {
+    setRows([]);
+    setSelectedLine("");
+    setLoadedDate(selectedDate);
+
+    // reset logic mail
     firstLoadRef.current = true;
     prevRawRef.current = null;
     lastHashRef.current = "";
-    setRows([]);
-    setSelectedDate(e.target.value);
   };
 
-  // ====== TÍNH “TRẠNG THÁI” ĐỂ HIỂN THỊ GỌN ======
-  const view = useMemo(() => {
+  const handleDateChange = (e) => {
+    setSelectedDate(e.target.value);
+    // không tự load khi đổi ngày (đúng yêu cầu “có nút bấm”)
+  };
+
+  // ===== parse dữ liệu KPI => lines + per-hour table =====
+  const parsed = useMemo(() => {
     if (!rows || rows.length < 2) return null;
 
-    const header = rows[0];
+    const header = rows[0] || [];
     const body = rows.slice(1);
 
     const idx = {};
@@ -229,9 +234,13 @@ export default function KpiDashboardClient() {
     const iDMH = idx[norm("dm/h")] ?? idx[norm("đm/h")];
     const iDMD = idx[norm("dm/ngay")] ?? idx[norm("đm/ngày")];
 
+    const cpCols = {};
+    header.forEach((h, i) => {
+      const k = String(h || "").trim();
+      if (CHECKPOINT_HOURS[k]) cpCols[k] = i;
+    });
+
     const currentCheckpoint = detectCurrentCheckpoint(header, body);
-    const cpCol = header.findIndex((h) => String(h || "").trim() === currentCheckpoint);
-    const hours = CHECKPOINT_HOURS[currentCheckpoint] || 1;
 
     const lines = body
       .map((r) => {
@@ -242,28 +251,45 @@ export default function KpiDashboardClient() {
         const dmD = iDMD != null ? toNum(r[iDMD]) : 0;
         const dmPerHour = dmH > 0 ? dmH : dmD > 0 ? dmD / 8 : 0;
 
-        const actual = cpCol >= 0 ? toNum(r[cpCol]) : 0;
-        const target = dmPerHour * hours;
+        // per hour table
+        const hoursTable = CHECKPOINTS_ORDER.map((cp) => {
+          const col = cpCols[cp];
+          const actual = col != null ? toNum(r[col]) : 0;
+          const hours = CHECKPOINT_HOURS[cp];
+          const target = dmPerHour * hours;
+          const diff = Math.round(actual - target); // + là vượt, - là thiếu
+          const ok = target > 0 ? actual >= target * HOURLY_TOLERANCE : true;
+          return {
+            checkpoint: cp,
+            hours,
+            actual,
+            target: Math.round(target),
+            diff,
+            ok,
+            deficit: Math.round(Math.max(0, target - actual)),
+          };
+        });
 
-        const ok = target > 0 ? actual >= target * HOURLY_TOLERANCE : true;
-        const deficit = Math.round(Math.max(0, target - actual));
-        const ratio = target > 0 ? actual / target : 1;
+        // current status
+        const cur = hoursTable.find((x) => x.checkpoint === currentCheckpoint);
+        const currentOk = cur ? cur.ok : true;
 
-        // daily (nếu có dữ liệu cuối ngày)
-        const col1630 = header.findIndex((h) => String(h || "").trim() === "->16h30");
-        const actualDay = col1630 >= 0 ? toNum(r[col1630]) : 0;
+        // daily
+        const dayCol = cpCols["->16h30"];
+        const actualDay = dayCol != null ? toNum(r[dayCol]) : 0;
         const effDay = dmD > 0 ? actualDay / dmD : null;
         const okDay = effDay == null ? null : effDay >= DAILY_TARGET;
 
         return {
           lineName,
-          actual,
-          target: Math.round(target),
-          deficit,
-          ok,
-          ratio,
           dmPerHour: Math.round(dmPerHour),
           dmDay: Math.round(dmD),
+          currentCheckpoint,
+          currentOk,
+          currentActual: cur?.actual ?? 0,
+          currentTarget: cur?.target ?? 0,
+          currentDiff: cur?.diff ?? 0,
+          hoursTable,
           actualDay,
           effDay,
           okDay,
@@ -271,33 +297,37 @@ export default function KpiDashboardClient() {
       })
       .filter(Boolean);
 
-    const fail = lines.filter((x) => !x.ok).sort((a, b) => b.deficit - a.deficit);
-    const okCount = lines.length - fail.length;
-
-    return {
-      header,
-      currentCheckpoint,
-      lines,
-      fail,
-      okCount,
-      failCount: fail.length,
-      total: lines.length,
-    };
+    return { header, lines, currentCheckpoint };
   }, [rows]);
 
-  const nowStr = useMemo(() => {
-    const d = new Date();
-    return d.toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
-  }, [isFetching]); // đổi nhẹ theo fetch
+  const filteredLines = useMemo(() => {
+    if (!parsed) return [];
+    const q = norm(search);
+    const arr = q
+      ? parsed.lines.filter((x) => norm(x.lineName).includes(q))
+      : parsed.lines;
+
+    // sort: FAIL trước, thiếu nhiều trước
+    return [...arr].sort((a, b) => {
+      const aFail = a.currentOk ? 0 : 1;
+      const bFail = b.currentOk ? 0 : 1;
+      if (aFail !== bFail) return bFail - aFail;
+      return Math.abs(b.currentDiff) - Math.abs(a.currentDiff);
+    });
+  }, [parsed, search]);
+
+  const lineDetail = useMemo(() => {
+    if (!parsed || !selectedLine) return null;
+    return parsed.lines.find((x) => x.lineName === selectedLine) || null;
+  }, [parsed, selectedLine]);
 
   return (
     <section className="mt-6">
-      {/* chọn ngày + trạng thái fetch */}
-      <div className="mb-4 flex flex-wrap items-center gap-3">
+      {/* Top controls */}
+      <div className="flex flex-wrap items-center gap-3 mb-4">
         <div className="flex items-center gap-2">
-          <label htmlFor="kpi-date" className="font-medium">Ngày:</label>
+          <label className="font-medium">Ngày:</label>
           <select
-            id="kpi-date"
             className="border px-2 py-1 rounded min-w-[160px]"
             value={selectedDate}
             onChange={handleDateChange}
@@ -305,114 +335,247 @@ export default function KpiDashboardClient() {
           >
             {!dates.length && <option>Đang tải ngày...</option>}
             {dates.map((d) => (
-              <option key={d} value={d}>{d}</option>
+              <option key={d} value={d}>
+                {d}
+              </option>
             ))}
           </select>
         </div>
 
+        <button
+          onClick={handleLoad}
+          className="border rounded px-3 py-1 text-sm bg-white hover:bg-gray-50"
+          disabled={!selectedDate}
+          title="Bấm để tải danh sách chuyền và số liệu theo giờ"
+        >
+          Xem dữ liệu
+        </button>
+
         <div className="text-sm text-gray-600">
-          {view?.currentCheckpoint ? (
+          {loadedDate ? (
             <>
-              Mốc đang theo dõi: <b>{view.currentCheckpoint}</b>{" "}
+              Đang xem: <b>{loadedDate}</b>{" "}
+              {parsed?.currentCheckpoint ? (
+                <>
+                  <span className="mx-2">•</span>
+                  Mốc mới nhất: <b>{parsed.currentCheckpoint}</b>
+                </>
+              ) : null}
               <span className="mx-2">•</span>
               {isFetching ? "Đang cập nhật..." : "Đã cập nhật"}
-              <span className="mx-2">•</span>
-              {nowStr}
             </>
           ) : (
-            isFetching ? "Đang tải..." : ""
+            <span className="text-gray-500">
+              Chọn ngày rồi bấm “Xem dữ liệu”.
+            </span>
           )}
         </div>
-
-        <button
-          className="ml-auto border rounded px-3 py-1 text-sm hover:bg-gray-50"
-          onClick={() => setShowAll((v) => !v)}
-          disabled={!view}
-        >
-          {showAll ? "Chỉ hiện chuyền KHÔNG ĐẠT" : "Hiện tất cả chuyền"}
-        </button>
       </div>
 
       {error && <p className="text-red-600">Lỗi: {error}</p>}
 
-      {!error && !view && (
+      {!error && loadedDate && !parsed && (
         <p className="text-gray-600">Chưa có dữ liệu cho ngày này.</p>
       )}
 
-      {!error && view && (
-        <>
-          {/* summary cards */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
-            <div className="border rounded p-3 bg-white">
-              <div className="text-sm text-gray-600">Tổng số chuyền</div>
-              <div className="text-2xl font-bold">{view.total}</div>
+      {!error && parsed && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          {/* LEFT: list lines */}
+          <div className="lg:col-span-1 border rounded bg-white">
+            <div className="p-3 border-b flex items-center gap-2">
+              <input
+                className="border rounded px-2 py-1 w-full text-sm"
+                placeholder="Tìm chuyền..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
             </div>
-            <div className="border rounded p-3 bg-white">
-              <div className="text-sm text-gray-600">ĐẠT (mốc {view.currentCheckpoint})</div>
-              <div className="text-2xl font-bold text-green-700">{view.okCount}</div>
-            </div>
-            <div className="border rounded p-3 bg-white">
-              <div className="text-sm text-gray-600">KHÔNG ĐẠT (mốc {view.currentCheckpoint})</div>
-              <div className="text-2xl font-bold text-red-700">{view.failCount}</div>
-            </div>
-          </div>
 
-          {/* bảng gọn */}
-          <div className="overflow-x-auto border rounded bg-white">
-            <table className="min-w-full border-collapse text-sm">
-              <thead className="bg-gray-100">
-                <tr>
-                  <th className="border px-2 py-2 text-left">Chuyền</th>
-                  <th className="border px-2 py-2 text-right">DM/H</th>
-                  <th className="border px-2 py-2 text-right">Thực tế</th>
-                  <th className="border px-2 py-2 text-right">Mục tiêu</th>
-                  <th className="border px-2 py-2 text-right">Thiếu</th>
-                  <th className="border px-2 py-2 text-left">Trạng thái</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(showAll ? view.lines : view.fail).map((x) => (
-                  <tr key={x.lineName} className="hover:bg-gray-50">
-                    <td className="border px-2 py-2 whitespace-nowrap font-medium">
-                      {x.lineName}
-                    </td>
-                    <td className="border px-2 py-2 text-right">{x.dmPerHour}</td>
-                    <td className="border px-2 py-2 text-right">{x.actual}</td>
-                    <td className="border px-2 py-2 text-right">{x.target}</td>
-                    <td className="border px-2 py-2 text-right">
-                      {x.deficit > 0 ? <span className="text-red-700 font-semibold">{x.deficit}</span> : 0}
-                    </td>
-                    <td className="border px-2 py-2">
-                      {x.ok ? (
-                        <span className="inline-flex items-center gap-2">
-                          <span className="w-2 h-2 rounded-full bg-green-600" />
+            <div className="max-h-[520px] overflow-auto">
+              {filteredLines.map((x) => {
+                const isActive = x.lineName === selectedLine;
+                const ok = x.currentOk;
+                const diff = x.currentDiff;
+
+                return (
+                  <button
+                    key={x.lineName}
+                    onClick={() => setSelectedLine(x.lineName)}
+                    className={`w-full text-left px-3 py-2 border-b hover:bg-gray-50 ${
+                      isActive ? "bg-gray-50" : ""
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="font-medium whitespace-nowrap">
+                        {x.lineName}
+                      </div>
+                      <div className="text-xs whitespace-nowrap">
+                        {ok ? (
+                          <span className="inline-flex items-center gap-2">
+                            <span className="w-2 h-2 rounded-full bg-green-600" />
+                            <b className="text-green-700">ĐẠT</b>
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-2">
+                            <span className="w-2 h-2 rounded-full bg-red-600" />
+                            <b className="text-red-700">THIẾU</b>
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="text-xs text-gray-600 mt-1 flex flex-wrap gap-x-3 gap-y-1">
+                      <span>
+                        {x.currentCheckpoint}: {x.currentActual}/{x.currentTarget}
+                      </span>
+                      <span>
+                        Chênh:{" "}
+                        {diff >= 0 ? (
+                          <b className="text-green-700">+{diff}</b>
+                        ) : (
+                          <b className="text-red-700">{diff}</b>
+                        )}
+                      </span>
+
+                      <span>
+                        Ngày:{" "}
+                        {x.okDay == null ? (
+                          <span className="text-gray-500">chưa có</span>
+                        ) : x.okDay ? (
                           <b className="text-green-700">ĐẠT</b>
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-2">
-                          <span className="w-2 h-2 rounded-full bg-red-600" />
+                        ) : (
                           <b className="text-red-700">KHÔNG ĐẠT</b>
-                        </span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-                {!showAll && view.fail.length === 0 && (
-                  <tr>
-                    <td className="px-3 py-4 text-green-700 font-semibold" colSpan={6}>
-                      Tất cả chuyền đều ĐẠT ở mốc {view.currentCheckpoint}.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+                        )}
+                      </span>
+                    </div>
+                  </button>
+                );
+              })}
+
+              {!filteredLines.length && (
+                <div className="p-3 text-sm text-gray-600">
+                  Không tìm thấy chuyền.
+                </div>
+              )}
+            </div>
           </div>
 
-          {/* ghi chú nhỏ */}
-          <p className="mt-3 text-xs text-gray-600">
-            * Mốc theo dõi tự nhận biết dựa vào cột giờ ngoài cùng đã có số liệu. “ĐẠT” khi Thực tế ≥ {Math.round(HOURLY_TOLERANCE * 100)}% mục tiêu mốc giờ.
-          </p>
-        </>
+          {/* RIGHT: detail */}
+          <div className="lg:col-span-2 border rounded bg-white">
+            {!lineDetail ? (
+              <div className="p-4 text-gray-600">
+                Chọn 1 chuyền bên trái để xem chi tiết từng giờ.
+              </div>
+            ) : (
+              <div className="p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+                  <div>
+                    <div className="text-lg font-bold">{lineDetail.lineName}</div>
+                    <div className="text-sm text-gray-600">
+                      DM/H: <b>{lineDetail.dmPerHour}</b>{" "}
+                      <span className="mx-2">•</span>
+                      DM/NGÀY: <b>{lineDetail.dmDay}</b>
+                    </div>
+                  </div>
+
+                  <div className="text-sm">
+                    {lineDetail.okDay == null ? (
+                      <span className="text-gray-600">
+                        Hiệu suất ngày: <b>chưa có</b>
+                      </span>
+                    ) : (
+                      <span>
+                        Hiệu suất ngày:{" "}
+                        <b
+                          className={
+                            lineDetail.okDay ? "text-green-700" : "text-red-700"
+                          }
+                        >
+                          {(lineDetail.effDay * 100).toFixed(2)}% (
+                          {lineDetail.okDay ? "ĐẠT" : "KHÔNG ĐẠT"})
+                        </b>
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Hour table */}
+                <div className="overflow-x-auto border rounded">
+                  <table className="min-w-full border-collapse text-sm">
+                    <thead className="bg-gray-100">
+                      <tr>
+                        <th className="border px-2 py-2 text-left">Mốc</th>
+                        <th className="border px-2 py-2 text-right">Thực tế</th>
+                        <th className="border px-2 py-2 text-right">Mục tiêu</th>
+                        <th className="border px-2 py-2 text-right">Chênh</th>
+                        <th className="border px-2 py-2 text-left">Trạng thái</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {lineDetail.hoursTable.map((h) => {
+                        const isCur = h.checkpoint === parsed.currentCheckpoint;
+                        return (
+                          <tr
+                            key={h.checkpoint}
+                            className={
+                              isCur ? "bg-yellow-50" : "hover:bg-gray-50"
+                            }
+                          >
+                            <td className="border px-2 py-2 whitespace-nowrap font-medium">
+                              {h.checkpoint}{" "}
+                              {isCur ? (
+                                <span className="text-xs text-gray-600">
+                                  (mới nhất)
+                                </span>
+                              ) : null}
+                            </td>
+                            <td className="border px-2 py-2 text-right">
+                              {h.actual}
+                            </td>
+                            <td className="border px-2 py-2 text-right">
+                              {h.target}
+                            </td>
+                            <td className="border px-2 py-2 text-right">
+                              {h.diff >= 0 ? (
+                                <b className="text-green-700">+{h.diff}</b>
+                              ) : (
+                                <b className="text-red-700">{h.diff}</b>
+                              )}
+                            </td>
+                            <td className="border px-2 py-2">
+                              {h.ok ? (
+                                <span className="inline-flex items-center gap-2">
+                                  <span className="w-2 h-2 rounded-full bg-green-600" />
+                                  <b className="text-green-700">ĐẠT</b>
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-2">
+                                  <span className="w-2 h-2 rounded-full bg-red-600" />
+                                  <b className="text-red-700">THIẾU</b>
+                                  <span className="text-gray-600 text-xs">
+                                    (thiếu {h.deficit})
+                                  </span>
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* NOTE: sửa đúng JSX ở đây */}
+                <p className="mt-3 text-xs text-gray-600">
+                  * Quy tắc: “ĐẠT” khi Thực tế ≥{" "}
+                  {Math.round(HOURLY_TOLERANCE * 100)}% mục tiêu mốc giờ. Hiệu
+                  suất ngày tính tại mốc <strong>{"->16h30"}</strong> so với{" "}
+                  <strong>DM/NGÀY</strong>.
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
       )}
     </section>
   );
