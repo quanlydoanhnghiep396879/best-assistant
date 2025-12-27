@@ -3,79 +3,93 @@
 import { useEffect, useMemo, useState } from 'react';
 
 const MILESTONES = [
-  { key: '->9h', label: '->9h', hours: 1 },
-  { key: '->10h', label: '->10h', hours: 2 },
-  { key: '->11h', label: '->11h', hours: 3 },
-  { key: '->12h30', label: '->12h30', hours: 4 },
-  { key: '->13h30', label: '->13h30', hours: 5 },
-  { key: '->14h30', label: '->14h30', hours: 6 },
-  { key: '->15h30', label: '->15h30', hours: 7 },
-  { key: '->16h30', label: '->16h30', hours: 8 },
+  { label: '->9h', hours: 1 },
+  { label: '->10h', hours: 2 },
+  { label: '->11h', hours: 3 },
+  { label: '->12h30', hours: 4 },
+  { label: '->13h30', hours: 5 },
+  { label: '->14h30', hours: 6 },
+  { label: '->15h30', hours: 7 },
+  { label: '->16h30', hours: 8 },
 ];
 
 const OTHER_LINES = new Set(['CẮT', 'CAT', 'KCS', 'HOÀN TẤT', 'HOAN TAT', 'NM']);
 
 function toNumber(v) {
   if (v === null || v === undefined || v === '') return null;
-  const n = Number(v);
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+
+  // xử lý "1,199" / "2,755" kiểu bạn có trong sheet
+  const s = String(v).trim().replaceAll(',', '');
+  const n = Number(s);
   return Number.isFinite(n) ? n : null;
 }
 
 function toPercent(v) {
   const n = toNumber(v);
   if (n === null) return null;
-  // UNFORMATTED_VALUE của % thường trả 0.9587 => 95.87
+  // % UNFORMATTED thường là 0.9587
   if (n <= 1.5) return n * 100;
   return n;
 }
 
 function normalizeLineName(x) {
-  const s = String(x ?? '').trim();
-  return s;
+  return String(x ?? '').trim();
 }
 
 function isValidLineName(name) {
-  const s = name.toUpperCase();
-  if (/^C\d+$/i.test(s)) return true;
+  const s = String(name || '').trim().toUpperCase();
+  if (/^C\d+$/.test(s)) return true;
   if (OTHER_LINES.has(s)) return true;
   return false;
 }
 
+function findHeaderRowIndex(raw) {
+  // tìm dòng có chứa "->9h" (hoặc chỉ cần có "9h")
+  for (let i = 0; i < Math.min(raw.length, 5); i++) {
+    const row = raw[i] || [];
+    const idx = row.findIndex((c) => String(c || '').includes('9h'));
+    if (idx >= 0) return i;
+  }
+  return 0;
+}
+
+function findLtStartIndex(headerRow) {
+  // ưu tiên tìm đúng "->9h", fallback tìm '9h'
+  let idx = headerRow.findIndex((c) => String(c || '').includes('->9h'));
+  if (idx >= 0) return idx;
+  idx = headerRow.findIndex((c) => String(c || '').includes('9h'));
+  return idx >= 0 ? idx : 9; // fallback
+}
+
 /**
- * Parse raw table từ KPI!A3:AJ18 (hoặc A4:AJ18)
- * Cố định cột theo layout:
- *  A: line
- *  H: DM/NGÀY
- *  I: DM/H
- *  J..Q: 8 mốc lũy tiến
- *  S: HS đạt
- *  T: HS định mức
+ * Parse raw table theo cách "tự dò cột" dựa trên ->9h
  */
 function parseKpiRaw(raw) {
-  if (!Array.isArray(raw) || raw.length === 0) return { lines: [], meta: {} };
+  if (!Array.isArray(raw) || raw.length === 0) return { lines: [] };
 
-  // Nếu range bắt đầu ở A3 thì row[0] là header; nếu A4 thì row[0] là data luôn.
-  const firstA = normalizeLineName(raw?.[0]?.[0] ?? '');
-  const hasHeader = !isValidLineName(firstA); // nếu A không phải "C1/C2..." thì coi là header
+  const headerRowIdx = findHeaderRowIndex(raw);
+  const header = raw[headerRowIdx] || [];
+  const ltStart = findLtStartIndex(header);
 
-  const dataRows = hasHeader ? raw.slice(1) : raw;
+  // suy ra các cột theo cấu trúc bảng
+  const IDX_LINE = 0;                 // A (tên chuyền)
+  const IDX_DM_DAY = ltStart - 2;     // trước ->9h 2 cột
+  const IDX_DM_HOUR = ltStart - 1;    // trước ->9h 1 cột
+  const IDX_LT_START = ltStart;       // ->9h
+  const IDX_LT_END = ltStart + 8;     // 8 mốc
+  const IDX_TG = ltStart + 8;         // TG SX
+  const IDX_HS_ACT = ltStart + 9;     // SUẤT ĐẠT...
+  const IDX_HS_TARGET = ltStart + 10; // ĐỊNH MỨC...
 
-  // index theo range bắt đầu từ cột A
-  const IDX_LINE = 0;        // A
-  const IDX_DM_DAY = 7;      // H
-  const IDX_DM_HOUR = 8;     // I
-  const IDX_LT_START = 9;    // J
-  const IDX_LT_END = 17;     // Q (slice end)
-  const IDX_HS_ACT = 18;     // S
-  const IDX_HS_TARGET = 19;  // T
+  // data start: lấy sau headerRowIdx (bỏ luôn mấy dòng tiêu đề)
+  const dataRows = raw.slice(headerRowIdx + 1);
 
-  const map = new Map(); // dedupe theo line (nếu có NM 2 dòng thì lấy dòng sau)
+  const map = new Map();
 
   for (const r of dataRows) {
     const line = normalizeLineName(r?.[IDX_LINE] ?? '');
     if (!line) continue;
-
-    // bỏ các dòng tổng / tiêu đề
     if (String(line).toUpperCase().includes('TOTAL')) continue;
     if (!isValidLineName(line)) continue;
 
@@ -84,21 +98,27 @@ function parseKpiRaw(raw) {
     const dmHour = dmHourRaw ?? (dmDay !== null ? dmDay / 8 : null);
 
     const lt = (r || []).slice(IDX_LT_START, IDX_LT_END).map(toNumber); // 8 mốc
-    const hsAct = toPercent(r?.[IDX_HS_ACT]);
-    const hsTarget = toPercent(r?.[IDX_HS_TARGET]) ?? 90; // default 90% nếu thiếu
 
+    const hsAct = toPercent(r?.[IDX_HS_ACT]);
+    const hsTarget = toPercent(r?.[IDX_HS_TARGET]) ?? 90;
+
+    // dedupe: nếu trùng tên (NM 2 dòng) thì lấy dòng sau
     map.set(line, {
       line,
       dmDay: dmDay ?? 0,
       dmHour: dmHour ?? 0,
-      lt,        // [m1..m8]
-      hsAct,     // %
-      hsTarget,  // %
+      lt,
+      hsAct,
+      hsTarget,
+      _debug: {
+        ltStart,
+        dmDayCell: r?.[IDX_DM_DAY],
+        dmHourCell: r?.[IDX_DM_HOUR],
+      },
     });
   }
 
   const lines = Array.from(map.values()).sort((a, b) => {
-    // sort C1..C10 trước, rồi các nhóm khác
     const ax = a.line.toUpperCase();
     const bx = b.line.toUpperCase();
     const am = ax.match(/^C(\d+)$/);
@@ -109,12 +129,11 @@ function parseKpiRaw(raw) {
     return ax.localeCompare(bx);
   });
 
-  return { lines, meta: { hasHeader } };
+  return { lines };
 }
 
 function statusHour(actual, target) {
   if (actual === null) return 'CHƯA CÓ';
-  if (target === null) return 'N/A';
   return actual >= target ? 'ĐỦ/VƯỢT' : 'THIẾU';
 }
 
@@ -134,7 +153,6 @@ export default function KpiDashboardClient() {
   const [lines, setLines] = useState([]);
   const [selectedLine, setSelectedLine] = useState('');
 
-  // load danh sách ngày
   useEffect(() => {
     async function loadConfig() {
       try {
@@ -142,22 +160,19 @@ export default function KpiDashboardClient() {
         setError('');
         const res = await fetch('/api/kpi-config', { cache: 'no-store' });
         const data = await res.json();
-
         if (data.status !== 'success') {
           setError(data.message || 'Không đọc được CONFIG_KPI');
           return;
         }
-
         const ds = data.dates || [];
         setDates(ds);
-        if (ds.length) setSelectedDate(ds[ds.length - 1]); // default ngày mới nhất
+        if (ds.length) setSelectedDate(ds[ds.length - 1]);
       } catch (e) {
         setError(e?.message || 'Lỗi load CONFIG_KPI');
       } finally {
         setLoadingConfig(false);
       }
     }
-
     loadConfig();
   }, []);
 
@@ -184,7 +199,7 @@ export default function KpiDashboardClient() {
 
       const parsed = parseKpiRaw(raw2d);
       setLines(parsed.lines);
-
+      
       if (parsed.lines.length) setSelectedLine(parsed.lines[0].line);
     } catch (e) {
       setError(e?.message || 'Lỗi gọi API KPI');
@@ -255,7 +270,7 @@ export default function KpiDashboardClient() {
 
       {!!lines.length && (
         <div className="grid grid-cols-12 gap-4">
-          {/* LEFT: Bảng HS ngày */}
+          {/* LEFT */}
           <div className="col-span-12 lg:col-span-5 border rounded p-3 bg-white">
             <div className="font-semibold mb-2">So sánh hiệu suất ngày</div>
             <div className="overflow-auto">
@@ -269,27 +284,24 @@ export default function KpiDashboardClient() {
                   </tr>
                 </thead>
                 <tbody>
-                  {lines.map((x) => {
-                    const st = statusDay(x.hsAct, x.hsTarget);
-                    return (
-                      <tr key={x.line} className="hover:bg-gray-50">
-                        <td className="border px-2 py-1">{x.line}</td>
-                        <td className="border px-2 py-1 text-right">
-                          {x.hsAct === null ? '—' : `${x.hsAct.toFixed(2)}%`}
-                        </td>
-                        <td className="border px-2 py-1 text-right">
-                          {`${x.hsTarget.toFixed(2)}%`}
-                        </td>
-                        <td className="border px-2 py-1">{st}</td>
-                      </tr>
-                    );
-                  })}
+                  {lines.map((x) => (
+                    <tr key={x.line} className="hover:bg-gray-50">
+                      <td className="border px-2 py-1">{x.line}</td>
+                      <td className="border px-2 py-1 text-right">
+                        {x.hsAct === null ? '—' : `${x.hsAct.toFixed(2)}%`}
+                      </td>
+                      <td className="border px-2 py-1 text-right">
+                        {`${x.hsTarget.toFixed(2)}%`}
+                      </td>
+                      <td className="border px-2 py-1">{statusDay(x.hsAct, x.hsTarget)}</td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
           </div>
 
-          {/* RIGHT: chọn chuyền + bảng lũy tiến */}
+          {/* RIGHT */}
           <div className="col-span-12 lg:col-span-7 border rounded p-3 bg-white">
             <div className="flex items-center gap-2 mb-2">
               <div className="font-semibold">So sánh định mức lũy tiến theo giờ</div>
@@ -347,10 +359,10 @@ export default function KpiDashboardClient() {
         </div>
       )}
 
-      {/* debug nhỏ nếu cần */}
+      {/* nếu parse fail */}
       {!lines.length && raw?.length > 0 && (
-        <div className="mt-3 text-sm">
-          Đã đọc sheet nhưng không parse được chuyền. Kiểm tra lại RANGE (nên bao gồm cột A..T).
+        <div className="mt-3 text-sm text-red-600">
+          Đã đọc sheet nhưng không parse được chuyền. Hãy đảm bảo RANGE có chứa dòng tiêu đề có “->9h”.
         </div>
       )}
     </div>
