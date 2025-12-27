@@ -1,18 +1,26 @@
-import "server-only";
 import { google } from "googleapis";
-
-export const __MODULE_ID = "googleSheetsClient_OK_2025_12_27";
 
 function getServiceAccountKeyFile() {
   const base64 = process.env.GOOGLE_PRIVATE_KEY_BASE64;
   if (!base64) throw new Error("Thiếu env GOOGLE_PRIVATE_KEY_BASE64");
 
-  const json = Buffer.from(base64, "base64").toString("utf8");
-  const keyFile = JSON.parse(json);
+  let json;
+  try {
+    json = Buffer.from(base64, "base64").toString("utf8");
+  } catch {
+    throw new Error("GOOGLE_PRIVATE_KEY_BASE64 không phải chuỗi base64 hợp lệ");
+  }
+
+  let keyFile;
+  try {
+    keyFile = JSON.parse(json);
+  } catch {
+    throw new Error("GOOGLE_PRIVATE_KEY_BASE64 giải mã được nhưng không phải JSON");
+  }
   return keyFile;
 }
 
-export function getSheetsClient() {
+function getSheetsClient() {
   const keyFile = getServiceAccountKeyFile();
   const spreadsheetId = process.env.GOOGLE_SHEET_ID;
   if (!spreadsheetId) throw new Error("Thiếu env GOOGLE_SHEET_ID");
@@ -38,11 +46,9 @@ export async function readConfigRanges() {
   const rows = await readSheetRange(`${configSheetName}!A2:B200`);
 
   return (rows || [])
-    .filter((r) => r?.[0] && r?.[1])
+    .filter((r) => r[0] && r[1])
     .map((r) => ({
-      date: String(r[0]).trim(),
-      range: String(r[1]).trim(),
+      date: String(r[0]).trim(),   // "24/12/2025"
+      range: String(r[1]).trim(),  // "KPI!A3:AJ18"
     }));
 }
-
-export default { readSheetRange, readConfigRanges, getSheetsClient, __MODULE_ID };
