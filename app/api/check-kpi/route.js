@@ -1,6 +1,6 @@
 // app/api/check-kpi/route.js
 import { NextResponse } from "next/server";
-import { readSheetRange, readConfigRanges } from "../_lib/googleSheetsClient";
+import { readSheetRange, readConfigRanges } from "../lib/googleSheetsClient";
 
 function findRangeForDate(configRows, date) {
   const row = configRows.find((r) => String(r.date).trim() === String(date).trim());
