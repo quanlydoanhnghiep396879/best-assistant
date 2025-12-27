@@ -20,8 +20,6 @@ export async function GET() {
           debug: {
             keys: Object.keys(Sheets),
             defaultKeys: Sheets.default ? Object.keys(Sheets.default) : null,
-            typeof_readConfigRanges: typeof Sheets.readConfigRanges,
-            typeof_default_readConfigRanges: typeof Sheets.default?.readConfigRanges,
           },
         },
         { status: 500 }
@@ -31,7 +29,11 @@ export async function GET() {
     const configRows = await readConfigRanges();
     const dates = configRows.map((r) => r.date);
 
-    return NextResponse.json({ status: "success", dates, configRows });
+    return NextResponse.json({
+      status: "success",
+      dates,
+      configRows,
+    });
   } catch (err) {
     console.error("KPI-CONFIG ERROR:", err);
     return NextResponse.json(

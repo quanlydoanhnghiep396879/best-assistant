@@ -36,10 +36,6 @@ export async function GET(request) {
           debug: {
             keys: Object.keys(Sheets),
             defaultKeys: Sheets.default ? Object.keys(Sheets.default) : null,
-            typeof_readConfigRanges: typeof Sheets.readConfigRanges,
-            typeof_readSheetRange: typeof Sheets.readSheetRange,
-            typeof_default_readConfigRanges: typeof Sheets.default?.readConfigRanges,
-            typeof_default_readSheetRange: typeof Sheets.default?.readSheetRange,
           },
         },
         { status: 500 }
@@ -51,7 +47,7 @@ export async function GET(request) {
 
     if (!range) {
       return NextResponse.json(
-        { status: "error", message: "Không tìm thấy DATE trong CONFIG_KPI" },
+        { status: "error", message: `Không tìm thấy DATE=${date} trong CONFIG_KPI` },
         { status: 404 }
       );
     }
@@ -62,8 +58,7 @@ export async function GET(request) {
       status: "success",
       date,
       range,
-      raw: values,
-      values,
+      raw: values, // ✅ client bạn đang đọc data.raw
     });
   } catch (err) {
     console.error("CHECK-KPI ERROR:", err);
