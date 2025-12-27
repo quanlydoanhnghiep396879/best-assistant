@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 
 const MILESTONES = [
   { label: '->9h', hours: 1 },
@@ -15,12 +15,34 @@ const MILESTONES = [
 
 const OTHER_LINES = new Set(['CẮT', 'CAT', 'KCS', 'HOÀN TẤT', 'HOAN TAT', 'NM']);
 
+function cleanNumString(s) {
+  // bỏ mọi ký tự lạ, giữ số, dấu . , -
+  // rồi xử lý dấu phẩy ngăn cách nghìn
+  let t = String(s ?? '').trim();
+
+  // đổi NBSP về space thường
+  t = t.replace(/\u00A0/g, ' ');
+
+  // nếu có %, bỏ %
+  t = t.replace('%', '');
+
+  // bỏ dấu phẩy ngăn cách nghìn: 2,755 -> 2755
+  // (nếu bạn dùng dấu phẩy làm thập phân thì báo mình để chỉnh)
+  t = t.replace(/,/g, '');
+
+  // cuối cùng bỏ ký tự không liên quan
+  t = t.replace(/[^\d.\-]/g, '');
+
+  return t;
+}
+
 function toNumber(v) {
   if (v === null || v === undefined || v === '') return null;
   if (typeof v === 'number') return Number.isFinite(v) ? v : null;
 
-  // xử lý "1,199" / "2,755" kiểu bạn có trong sheet
-  const s = String(v).trim().replaceAll(',', '');
+  const s = cleanNumString(v);
+  if (!s) return null;
+
   const n = Number(s);
   return Number.isFinite(n) ? n : null;
 }
@@ -28,13 +50,10 @@ function toNumber(v) {
 function toPercent(v) {
   const n = toNumber(v);
   if (n === null) return null;
-  // % UNFORMATTED thường là 0.9587
+
+  // nếu dạng 0.9587 -> 95.87
   if (n <= 1.5) return n * 100;
   return n;
-}
-
-function normalizeLineName(x) {
-  return String(x ?? '').trim();
 }
 
 function isValidLineName(name) {
@@ -45,78 +64,85 @@ function isValidLineName(name) {
 }
 
 function findHeaderRowIndex(raw) {
-  // tìm dòng có chứa "->9h" (hoặc chỉ cần có "9h")
-  for (let i = 0; i < Math.min(raw.length, 5); i++) {
+  for (let i = 0; i < Math.min(raw.length, 6); i++) {
     const row = raw[i] || [];
-    const idx = row.findIndex((c) => String(c || '').includes('9h'));
-    if (idx >= 0) return i;
+    if (row.some((c) => String(c || '').includes('->9h'))) return i;
+    if (row.some((c) => String(c || '').includes('9h'))) return i;
   }
   return 0;
 }
 
-function findLtStartIndex(headerRow) {
-  // ưu tiên tìm đúng "->9h", fallback tìm '9h'
-  let idx = headerRow.findIndex((c) => String(c || '').includes('->9h'));
+function findLtStartIndex(row) {
+  let idx = row.findIndex((c) => String(c || '').includes('->9h'));
   if (idx >= 0) return idx;
-  idx = headerRow.findIndex((c) => String(c || '').includes('9h'));
-  return idx >= 0 ? idx : 9; // fallback
+  idx = row.findIndex((c) => String(c || '').includes('9h'));
+  return idx >= 0 ? idx : 9;
 }
 
-/**
- * Parse raw table theo cách "tự dò cột" dựa trên ->9h
- */
+// QUAN TRỌNG: quét ngược gần ->9h để bắt DM/H và DM/NGÀY
+function pickNearestNumber(row, startIdx, maxBack = 6) {
+  for (let k = 0; k <= maxBack; k++) {
+    const idx = startIdx - k;
+    if (idx < 0) break;
+    const n = toNumber(row?.[idx]);
+    if (n !== null) return { n, idx };
+  }
+  return { n: null, idx: -1 };
+}
+
 function parseKpiRaw(raw) {
-  if (!Array.isArray(raw) || raw.length === 0) return { lines: [] };
+  if (!Array.isArray(raw) || raw.length === 0) return { lines: [], meta: null };
 
   const headerRowIdx = findHeaderRowIndex(raw);
   const header = raw[headerRowIdx] || [];
   const ltStart = findLtStartIndex(header);
 
-  // suy ra các cột theo cấu trúc bảng
-  const IDX_LINE = 0;                 // A (tên chuyền)
-  const IDX_DM_DAY = ltStart - 2;     // trước ->9h 2 cột
-  const IDX_DM_HOUR = ltStart - 1;    // trước ->9h 1 cột
-  const IDX_LT_START = ltStart;       // ->9h
-  const IDX_LT_END = ltStart + 8;     // 8 mốc
-  const IDX_TG = ltStart + 8;         // TG SX
-  const IDX_HS_ACT = ltStart + 9;     // SUẤT ĐẠT...
-  const IDX_HS_TARGET = ltStart + 10; // ĐỊNH MỨC...
-
-  // data start: lấy sau headerRowIdx (bỏ luôn mấy dòng tiêu đề)
   const dataRows = raw.slice(headerRowIdx + 1);
 
   const map = new Map();
 
   for (const r of dataRows) {
-    const line = normalizeLineName(r?.[IDX_LINE] ?? '');
+    const line = String(r?.[0] ?? '').trim();
     if (!line) continue;
     if (String(line).toUpperCase().includes('TOTAL')) continue;
     if (!isValidLineName(line)) continue;
 
-    const dmDay = toNumber(r?.[IDX_DM_DAY]);
-    const dmHourRaw = toNumber(r?.[IDX_DM_HOUR]);
-    const dmHour = dmHourRaw ?? (dmDay !== null ? dmDay / 8 : null);
+    // lũy tiến 8 mốc
+    const lt = (r || []).slice(ltStart, ltStart + 8).map(toNumber);
 
-    const lt = (r || []).slice(IDX_LT_START, IDX_LT_END).map(toNumber); // 8 mốc
+    // DM/H: thường nằm ngay trước ->9h (ltStart-1) nhưng có thể lệch => quét ngược
+    const dmHourPick = pickNearestNumber(r, ltStart - 1, 6);
+    const dmHour = dmHourPick.n;
 
-    const hsAct = toPercent(r?.[IDX_HS_ACT]);
-    const hsTarget = toPercent(r?.[IDX_HS_TARGET]) ?? 90;
+    // DM/NGÀY: thường trước DM/H 1 cột => ưu tiên ltStart-2, nếu null thì quét tiếp
+    const dmDayPick = pickNearestNumber(r, ltStart - 2, 8);
+    const dmDay = dmDayPick.n;
 
-    // dedupe: nếu trùng tên (NM 2 dòng) thì lấy dòng sau
+    const dmHourFinal = dmHour ?? (dmDay !== null ? dmDay / 8 : null);
+
+    // HS nằm sau 8 mốc: TG SX, HS đạt, HS định mức (thường)
+    const hsAct = toPercent(r?.[ltStart + 9]);      // cột sau TG SX
+    const hsTarget = toPercent(r?.[ltStart + 10]) ?? 90;
+
     map.set(line, {
       line,
-      dmDay: dmDay ?? 0,
-      dmHour: dmHour ?? 0,
+      ltStart,
+      dmDay: dmDayFinal(dmDay),
+      dmHour: dmHourFinalFinal(dmHourFinal),
       lt,
       hsAct,
       hsTarget,
-      _debug: {
-        ltStart,
-        dmDayCell: r?.[IDX_DM_DAY],
-        dmHourCell: r?.[IDX_DM_HOUR],
-      },
+      _dbg: {
+        dmHourIdx: dmHourPick.idx,
+        dmDayIdx: dmDayPick.idx,
+        dmHourCell: r?.[dmHourPick.idx],
+        dmDayCell: r?.[dmDayPick.idx],
+      }
     });
   }
+
+  function dmDayFinal(x){ return x ?? 0; }
+  function dmHourFinalFinal(x){ return x ?? 0; }
 
   const lines = Array.from(map.values()).sort((a, b) => {
     const ax = a.line.toUpperCase();
@@ -129,7 +155,10 @@ function parseKpiRaw(raw) {
     return ax.localeCompare(bx);
   });
 
-  return { lines };
+  return {
+    lines,
+    meta: { headerRowIdx, ltStart, headerSample: header },
+  };
 }
 
 function statusHour(actual, target) {
@@ -149,6 +178,7 @@ export default function KpiDashboardClient() {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+
   const [raw, setRaw] = useState([]);
   const [lines, setLines] = useState([]);
   const [selectedLine, setSelectedLine] = useState('');
@@ -199,8 +229,11 @@ export default function KpiDashboardClient() {
 
       const parsed = parseKpiRaw(raw2d);
       setLines(parsed.lines);
-      
       if (parsed.lines.length) setSelectedLine(parsed.lines[0].line);
+
+      // Nếu bạn vẫn bị DM=0, mở console để xem _dbg.dmHourCell / dmDayCell
+      // console.log(parsed.meta, parsed.lines?.[0]?._dbg);
+
     } catch (e) {
       setError(e?.message || 'Lỗi gọi API KPI');
     } finally {
@@ -232,11 +265,12 @@ export default function KpiDashboardClient() {
   }, [current]);
 
   return (
-    <div className="p-4">
+    <div className="p-3">
       <h1 className="text-2xl font-bold mb-3">KPI Dashboard</h1>
 
       <div className="flex items-center gap-2 mb-3">
         <label className="font-medium">Ngày</label>
+
         <select
           className="border px-2 py-1 rounded"
           value={selectedDate}
@@ -270,7 +304,7 @@ export default function KpiDashboardClient() {
 
       {!!lines.length && (
         <div className="grid grid-cols-12 gap-4">
-          {/* LEFT */}
+          {/* LEFT: HS ngày */}
           <div className="col-span-12 lg:col-span-5 border rounded p-3 bg-white">
             <div className="font-semibold mb-2">So sánh hiệu suất ngày</div>
             <div className="overflow-auto">
@@ -301,10 +335,11 @@ export default function KpiDashboardClient() {
             </div>
           </div>
 
-          {/* RIGHT */}
+          {/* RIGHT: Lũy tiến vs DM */}
           <div className="col-span-12 lg:col-span-7 border rounded p-3 bg-white">
             <div className="flex items-center gap-2 mb-2">
               <div className="font-semibold">So sánh định mức lũy tiến theo giờ</div>
+
               <div className="ml-auto flex items-center gap-2">
                 <span className="text-sm">Chuyền:</span>
                 <select
@@ -359,10 +394,9 @@ export default function KpiDashboardClient() {
         </div>
       )}
 
-      {/* nếu parse fail */}
       {!lines.length && raw?.length > 0 && (
         <div className="mt-3 text-sm text-red-600">
-          Đã đọc sheet nhưng không parse được chuyền. Hãy đảm bảo RANGE có chứa dòng tiêu đề có “->9h”.
+          Đã đọc sheet nhưng không parse được. Hãy đảm bảo RANGE có chứa dòng tiêu đề có “->9h”.
         </div>
       )}
     </div>

@@ -1,16 +1,15 @@
 import { NextResponse } from "next/server";
-import * as Sheets from "../_lib/googleSheetsClient";
+import { readSheetRange, readConfigRanges } from "@/app/lib/googleSheetsClient";
+// nếu không có alias @ thì dùng: "../../lib/googleSheetsClient"
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
-function pickFn(name) {
-  return Sheets[name] || Sheets.default?.[name];
+function norm(v) {
+  return String(v || "").trim();
 }
 
 function findRangeForDate(configRows, date) {
-  const row = configRows.find((r) => r.date === date);
-  return row?.range;
+  const d = norm(date);
+  const hit = (configRows || []).find((r) => norm(r.date) === d);
+  return hit?.range || "";
 }
 
 export async function GET(request) {
@@ -25,43 +24,29 @@ export async function GET(request) {
   }
 
   try {
-    const readConfigRanges = pickFn("readConfigRanges");
-    const readSheetRange = pickFn("readSheetRange");
-
-    if (typeof readConfigRanges !== "function" || typeof readSheetRange !== "function") {
-      return NextResponse.json(
-        {
-          status: "error",
-          message: "Sheets functions missing (import/export mismatch)",
-          debug: {
-            keys: Object.keys(Sheets),
-            defaultKeys: Sheets.default ? Object.keys(Sheets.default) : null,
-          },
-        },
-        { status: 500 }
-      );
-    }
-
     const configRows = await readConfigRanges();
     const range = findRangeForDate(configRows, date);
 
     if (!range) {
       return NextResponse.json(
-        { status: "error", message: `Không tìm thấy DATE=${date} trong CONFIG_KPI` },
+        { status: "error", message: "Không tìm thấy DATE trong CONFIG_KPI" },
         { status: 404 }
       );
     }
 
-    const values = await readSheetRange(range);
+    const raw = await readSheetRange(range);
 
     return NextResponse.json({
       status: "success",
       date,
       range,
-      raw: values, // ✅ client bạn đang đọc data.raw
+      raw,
+      debug: {
+        firstRow: raw?.[0] || null,
+        secondRow: raw?.[1] || null,
+      },
     });
   } catch (err) {
-    console.error("CHECK-KPI ERROR:", err);
     return NextResponse.json(
       { status: "error", message: err?.message || "Unknown error" },
       { status: 500 }
