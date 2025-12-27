@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
-import { readSheetRange, readConfigRanges } from "../../lib/googleSheetsClient";
+import * as Sheets from "../../lib/googleSheetsClient";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+function pickFn(name) {
+  return Sheets[name] || Sheets.default?.[name];
+}
 
 function findRangeForDate(configRows, date) {
   const row = configRows.find((r) => r.date === date);
@@ -20,6 +25,27 @@ export async function GET(request) {
   }
 
   try {
+    const readConfigRanges = pickFn("readConfigRanges");
+    const readSheetRange = pickFn("readSheetRange");
+
+    if (typeof readConfigRanges !== "function" || typeof readSheetRange !== "function") {
+      return NextResponse.json(
+        {
+          status: "error",
+          message: "Sheets functions missing (import/export mismatch)",
+          debug: {
+            keys: Object.keys(Sheets),
+            defaultKeys: Sheets.default ? Object.keys(Sheets.default) : null,
+            typeof_readConfigRanges: typeof Sheets.readConfigRanges,
+            typeof_readSheetRange: typeof Sheets.readSheetRange,
+            typeof_default_readConfigRanges: typeof Sheets.default?.readConfigRanges,
+            typeof_default_readSheetRange: typeof Sheets.default?.readSheetRange,
+          },
+        },
+        { status: 500 }
+      );
+    }
+
     const configRows = await readConfigRanges();
     const range = findRangeForDate(configRows, date);
 
@@ -36,7 +62,7 @@ export async function GET(request) {
       status: "success",
       date,
       range,
-      raw: values,     // QUAN TRỌNG: client của bạn đang đọc data.raw
+      raw: values,   // client bạn đang dùng data.raw
       values,
     });
   } catch (err) {
