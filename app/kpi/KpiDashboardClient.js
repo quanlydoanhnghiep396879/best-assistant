@@ -11,7 +11,7 @@ export default function KpiDashboardClient() {
   const [loadingData, setLoadingData] = useState(false);
   const [error, setError] = useState("");
 
-  const [data, setData] = useState(null); // {date, range, latestMark, lines}
+  const [data, setData] = useState(null);
   const [selectedLine, setSelectedLine] = useState("");
   const [searchLine, setSearchLine] = useState("");
 
@@ -20,9 +20,9 @@ export default function KpiDashboardClient() {
 
   const inflightRef = useRef(false);
   const lastUpdatedRef = useRef(null);
-  const [, forceTick] = useState(0); // để render lastUpdated
+  const [, forceTick] = useState(0);
 
-  // Load config dates
+  // Load config
   useEffect(() => {
     async function loadConfig() {
       try {
@@ -61,9 +61,7 @@ export default function KpiDashboardClient() {
       setError("");
 
       const params = new URLSearchParams({ date: selectedDate });
-      const res = await fetch(`/api/check-kpi?${params.toString()}`, {
-        cache: "no-store",
-      });
+      const res = await fetch(`/api/check-kpi?${params.toString()}`, { cache: "no-store" });
       const json = await res.json();
 
       if (json.status !== "success") {
@@ -73,11 +71,9 @@ export default function KpiDashboardClient() {
 
       setData(json);
 
-      // auto chọn chuyền đầu tiên nếu chưa chọn
       const lines = json.lines || [];
       if (lines.length) {
         if (!selectedLine) setSelectedLine(lines[0].line);
-        // nếu chuyền đang chọn không tồn tại nữa -> chọn lại
         if (selectedLine && !lines.some((x) => x.line === selectedLine)) {
           setSelectedLine(lines[0].line);
         }
@@ -93,22 +89,17 @@ export default function KpiDashboardClient() {
     }
   }
 
-  // đổi ngày -> load 1 lần
   useEffect(() => {
     if (!selectedDate) return;
     loadKpiOnce();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedDate]);
 
-  // auto refresh 60s
   useEffect(() => {
     if (!autoRefresh) return;
     if (!selectedDate) return;
 
-    const id = setInterval(() => {
-      loadKpiOnce();
-    }, AUTO_REFRESH_MS);
-
+    const id = setInterval(() => loadKpiOnce(), AUTO_REFRESH_MS);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoRefresh, selectedDate]);
@@ -128,7 +119,7 @@ export default function KpiDashboardClient() {
   const lastUpdatedText = useMemo(() => {
     const d = lastUpdatedRef.current;
     return d ? d.toLocaleString("vi-VN") : "";
-  }, [data]); // data đổi thì re-render
+  }, [data]);
 
   return (
     <section className="mt-5">
@@ -185,11 +176,12 @@ export default function KpiDashboardClient() {
       )}
 
       {data && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {/* LEFT: Day efficiency table */}
+        // md trở lên: 2 cột để “kề nhau”
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
+          {/* LEFT: Day efficiency */}
           <div className="border rounded bg-white p-3">
             <div className="flex items-center justify-between mb-2">
-              <div className="font-semibold">Hiệu suất ngày (tất cả chuyền)</div>
+              <div className="font-semibold">So sánh hiệu suất ngày</div>
               <div className="text-xs text-gray-600">
                 Mốc cuối: <b>{data.latestMark}</b>
               </div>
@@ -220,7 +212,7 @@ export default function KpiDashboardClient() {
 
                     return (
                       <tr
-                        key={l.line}
+                        key={`${l.line}-${tar}`}
                         className={`hover:bg-gray-50 cursor-pointer ${
                           selectedLine === l.line ? "bg-gray-50" : ""
                         }`}
@@ -239,6 +231,7 @@ export default function KpiDashboardClient() {
                       </tr>
                     );
                   })}
+
                   {!filteredLines.length && (
                     <tr>
                       <td className="border px-2 py-2 text-gray-600" colSpan={4}>
@@ -251,11 +244,11 @@ export default function KpiDashboardClient() {
             </div>
           </div>
 
-          {/* RIGHT: Cumulative compare for selected line */}
+          {/* RIGHT: Hour cumulative compare */}
           <div className="border rounded bg-white p-3">
             <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
               <div className="font-semibold">
-                Lũy tiến theo giờ (chuyền: <b>{selectedLine || "—"}</b>)
+                So sánh lũy tiến theo giờ (chuyền: <b>{selectedLine || "—"}</b>)
               </div>
               <input
                 className="border rounded px-2 py-1 text-sm"
@@ -265,9 +258,9 @@ export default function KpiDashboardClient() {
               />
             </div>
 
-            {/* quick line chips */}
+            {/* chips */}
             <div className="flex flex-wrap gap-2 mb-3">
-              {filteredLines.slice(0, 16).map((l) => (
+              {filteredLines.slice(0, 20).map((l) => (
                 <button
                   key={l.line}
                   type="button"
@@ -301,9 +294,11 @@ export default function KpiDashboardClient() {
                     </thead>
                     <tbody>
                       {currentLine.marks.map((m) => {
-                        const st =
-                          m.status === "ĐỦ/VƯỢT"
+                        const stClass =
+                          m.status === "VƯỢT"
                             ? "text-green-700 font-semibold"
+                            : m.status === "ĐỦ"
+                            ? "text-blue-700 font-semibold"
                             : m.status === "THIẾU"
                             ? "text-red-700 font-semibold"
                             : "text-gray-600";
@@ -320,7 +315,7 @@ export default function KpiDashboardClient() {
                             <td className="border px-2 py-1 text-right">
                               {m.delta == null ? "—" : m.delta.toFixed(0)}
                             </td>
-                            <td className={`border px-2 py-1 text-center ${st}`}>
+                            <td className={`border px-2 py-1 text-center ${stClass}`}>
                               {m.status}
                             </td>
                           </tr>
