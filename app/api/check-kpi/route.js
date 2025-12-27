@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
-import { readSheetRange, readConfigRanges } from "../../lib/googleSheetsClient.js";
+import sheetsClient from "../../lib/googleSheetsClient.js";
 
-export const runtime = "nodejs"; // bắt buộc để chạy googleapis
+export const runtime = "nodejs";
 
 function findRangeForDate(configRows, date) {
   const d = String(date || "").trim();
@@ -10,51 +10,39 @@ function findRangeForDate(configRows, date) {
 }
 
 export async function GET(request) {
+  const { searchParams } = new URL(request.url);
+  const date = searchParams.get("date");
+
+  if (!date) {
+    return NextResponse.json(
+      { status: "error", message: "Thiếu query ?date=dd/mm/yyyy" },
+      { status: 400 }
+    );
+  }
+
   try {
-    const { searchParams } = new URL(request.url);
-    const date = searchParams.get("date");
-
-    if (!date) {
-      return NextResponse.json(
-        {
-          status: "error",
-          message: "Thiếu query ?date=dd/mm/yyyy",
-        },
-        { status: 400 }
-      );
-    }
-
-    // 1) Đọc CONFIG_KPI để lấy range theo ngày
-    const configRows = await readConfigRanges();
+    const configRows = await sheetsClient.readConfigRanges();
     const range = findRangeForDate(configRows, date);
 
     if (!range) {
       return NextResponse.json(
-        {
-          status: "error",
-          message: "Không tìm thấy ngày trong CONFIG_KPI",
-          date: String(date).trim(),
-        },
+        { status: "error", message: "Không tìm thấy ngày trong CONFIG_KPI", date: String(date).trim() },
         { status: 404 }
       );
     }
 
-    // 2) Đọc dữ liệu KPI theo range
-    const values = await readSheetRange(range);
+    const values = await sheetsClient.readSheetRange(range);
 
     return NextResponse.json({
       status: "success",
       date: String(date).trim(),
       range,
-      raw: values, // ✅ khớp với KpiDashboardClient (data.raw)
+      raw: values, // ✅ khớp KpiDashboardClient của bạn (data.raw)
     });
   } catch (err) {
     console.error("CHECK-KPI ERROR:", err);
     return NextResponse.json(
-      {
-        status: "error",
-        message: err?.message || "Unknown error",
-      },
+      { status: "error", message: err?.message || "Unknown error" },
       { status: 500 }
     );
   }
