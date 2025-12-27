@@ -1,7 +1,10 @@
 import "server-only";
 import { google } from "googleapis";
 
-/** Lấy key JSON từ biến GOOGLE_PRIVATE_KEY_BASE64 (đã encode bằng base64) */
+// ✅ để kiểm tra Vercel đang dùng đúng file này hay chưa
+export const __MODULE_ID = "googleSheetsClient_v2025-12-27_A";
+
+/** Lấy key JSON từ GOOGLE_PRIVATE_KEY_BASE64 (base64) */
 function getServiceAccountKeyFile() {
   const base64 = process.env.GOOGLE_PRIVATE_KEY_BASE64;
   if (!base64) throw new Error("Thiếu env GOOGLE_PRIVATE_KEY_BASE64");
@@ -23,8 +26,8 @@ function getServiceAccountKeyFile() {
   return keyFile;
 }
 
-/** Tạo client Google Sheets dùng service account */
-function getSheetsClient() {
+/** ✅ Export luôn (để debug thấy) */
+export function getSheetsClient() {
   const keyFile = getServiceAccountKeyFile();
   const spreadsheetId = process.env.GOOGLE_SHEET_ID;
   if (!spreadsheetId) throw new Error("Thiếu env GOOGLE_SHEET_ID");
@@ -39,14 +42,14 @@ function getSheetsClient() {
   return { sheets, spreadsheetId };
 }
 
-/** Đọc 1 range bất kỳ trong Google Sheet */
+/** ✅ PHẢI export */
 export async function readSheetRange(range) {
   const { sheets, spreadsheetId } = getSheetsClient();
   const res = await sheets.spreadsheets.values.get({ spreadsheetId, range });
   return res.data.values || [];
 }
 
-/** Đọc cấu hình ngày / range trong sheet CONFIG_KPI */
+/** ✅ PHẢI export */
 export async function readConfigRanges() {
   const configSheetName = process.env.CONFIG_KPI_SHEET_NAME || "CONFIG_KPI";
   const rows = await readSheetRange(`${configSheetName}!A2:B200`);
@@ -59,6 +62,5 @@ export async function readConfigRanges() {
     }));
 }
 
-/** ✅ Export default để route import chắc chắn */
-const sheetsClient = { readSheetRange, readConfigRanges };
-export default sheetsClient;
+/** ✅ Export default (để route import chắc chắn) */
+export default { readSheetRange, readConfigRanges, getSheetsClient, __MODULE_ID };

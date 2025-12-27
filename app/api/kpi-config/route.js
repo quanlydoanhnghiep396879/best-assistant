@@ -2,40 +2,43 @@ import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
-async function loadSheetsLib() {
+async function loadLib() {
   const mod = await import("../../lib/googleSheetsClient.js");
-
-  const readConfigRanges =
-    mod.readConfigRanges ?? mod.default?.readConfigRanges;
-
-  return {
-    readConfigRanges,
-    __debug: {
-      keys: Object.keys(mod),
-      defaultKeys: mod.default ? Object.keys(mod.default) : null,
-      typeof_readConfigRanges: typeof readConfigRanges,
-    },
-  };
+  const lib = mod.default ?? mod;
+  return { mod, lib };
 }
 
 export async function GET() {
   try {
-    const lib = await loadSheetsLib();
+    const { mod, lib } = await loadLib();
 
-    // Nếu import sai -> trả debug luôn để chốt lỗi
+    // ✅ nếu vẫn sai sẽ thấy ngay
     if (typeof lib.readConfigRanges !== "function") {
       return NextResponse.json(
-        { status: "error", message: "readConfigRanges missing", debug: lib.__debug },
+        {
+          status: "error",
+          message: "readConfigRanges missing",
+          debug: {
+            keys: Object.keys(mod),
+            defaultKeys: mod.default ? Object.keys(mod.default) : null,
+            moduleId: lib.__MODULE_ID ?? null,
+            typeof_readConfigRanges: typeof lib.readConfigRanges,
+          },
+        },
         { status: 500 }
       );
     }
 
     const configRows = await lib.readConfigRanges();
-    const dates = configRows.map((r) => String(r.date).trim());
+    const dates = configRows.map((r) => r.date);
 
-    return NextResponse.json({ status: "success", dates, configRows });
+    return NextResponse.json({
+      status: "success",
+      moduleId: lib.__MODULE_ID,
+      dates,
+      configRows,
+    });
   } catch (err) {
-    console.error("KPI-CONFIG ERROR:", err);
     return NextResponse.json(
       { status: "error", message: err?.message || "Unknown error" },
       { status: 500 }
