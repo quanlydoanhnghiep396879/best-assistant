@@ -1,299 +1,205 @@
-// app/kpi/KpiDashboardClient.js
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+
+function pct(x) {
+  if (x === null || x === undefined) return "—";
+  return (x * 100).toFixed(2) + "%";
+}
 
 export default function KpiDashboardClient() {
   const [dates, setDates] = useState([]);
-  const [selectedDate, setSelectedDate] = useState("");
-  const [error, setError] = useState("");
-
+  const [date, setDate] = useState("");
   const [data, setData] = useState(null);
   const [selectedLine, setSelectedLine] = useState("");
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [auto, setAuto] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState("");
 
-  const [loadingConfig, setLoadingConfig] = useState(false);
-  const [loadingData, setLoadingData] = useState(false);
+  async function loadDates() {
+    setErr("");
+    const r = await fetch("/api/kpi-config", { cache: "no-store" });
+    const j = await r.json();
+    if (j.status !== "success") throw new Error(j.message || "kpi-config error");
+    setDates(j.dates || []);
+    if (!date && j.dates?.length) setDate(j.dates[j.dates.length - 1]);
+  }
 
-  const [autoRefresh, setAutoRefresh] = useState(true);
-  const AUTO_REFRESH_MS = 60 * 1000;
-
-  const inflightRef = useRef(false);
-  const lastUpdatedRef = useRef(null);
-  const [, forceTick] = useState(0);
-
-  // load dates
-  useEffect(() => {
-    (async () => {
-      try {
-        setLoadingConfig(true);
-        setError("");
-        const res = await fetch("/api/kpi-config", { cache: "no-store" });
-        const json = await res.json();
-        if (json.status !== "success") throw new Error(json.message || "kpi-config error");
-
-        setDates(json.dates || []);
-        if ((json.dates || []).length) setSelectedDate(json.dates[json.dates.length - 1]);
-      } catch (e) {
-        setError(e?.message || "Không đọc được CONFIG_KPI");
-      } finally {
-        setLoadingConfig(false);
-      }
-    })();
-  }, []);
-
-  async function loadKpiOnce() {
-    if (!selectedDate) return;
-    if (inflightRef.current) return;
-
+  async function loadData(d) {
+    if (!d) return;
+    setLoading(true);
+    setErr("");
     try {
-      inflightRef.current = true;
-      setLoadingData(true);
-      setError("");
+      const r = await fetch(`/api/check-kpi?date=${encodeURIComponent(d)}`, { cache: "no-store" });
+      const j = await r.json();
+      if (j.status !== "success") throw new Error(j.message || "check-kpi error");
 
-      const res = await fetch(`/api/check-kpi?date=${encodeURIComponent(selectedDate)}`, {
-        cache: "no-store",
-      });
-      const json = await res.json();
-      if (json.status !== "success") throw new Error(json.message || "check-kpi error");
-
-      setData(json);
-
-      const lines = json.lines || [];
-      if (lines.length) {
-        if (!selectedLine) setSelectedLine(lines[0].line);
-        if (selectedLine && !lines.some((x) => x.line === selectedLine)) {
-          setSelectedLine(lines[0].line);
-        }
-      }
-
-      lastUpdatedRef.current = new Date();
-      forceTick((x) => x + 1);
+      setData(j);
+      setLastUpdated(new Date().toLocaleString("vi-VN"));
+      // auto chọn chuyền đầu tiên nếu chưa chọn
+      if (!selectedLine && j.lines?.length) setSelectedLine(j.lines[0].line);
     } catch (e) {
-      setError(e?.message || "Lỗi khi gọi check-kpi");
+      setErr(e.message || "Error");
+      setData(null);
     } finally {
-      inflightRef.current = false;
-      setLoadingData(false);
+      setLoading(false);
     }
   }
 
   useEffect(() => {
-    if (!selectedDate) return;
-    loadKpiOnce();
+    loadDates().catch((e) => setErr(e.message));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedDate]);
+  }, []);
 
   useEffect(() => {
-    if (!autoRefresh) return;
-    if (!selectedDate) return;
-    const id = setInterval(() => loadKpiOnce(), AUTO_REFRESH_MS);
+    if (!date) return;
+    loadData(date);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [date]);
+
+  useEffect(() => {
+    if (!auto || !date) return;
+    const id = setInterval(() => loadData(date), 60_000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoRefresh, selectedDate]);
+  }, [auto, date]);
 
-  const lines = data?.lines || [];
-  const currentLine = useMemo(
-    () => lines.find((l) => l.line === selectedLine) || null,
-    [lines, selectedLine]
-  );
-
-  const lastUpdatedText = useMemo(() => {
-    const d = lastUpdatedRef.current;
-    return d ? d.toLocaleString("vi-VN") : "";
-  }, [data]);
-
-  const styles = {
-    row: { display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 10 },
-    select: { padding: "6px 8px", border: "1px solid #ccc", borderRadius: 6, minWidth: 180 },
-    btn: {
-      padding: "7px 12px",
-      border: "1px solid #111",
-      background: "#111",
-      color: "#fff",
-      borderRadius: 6,
-      cursor: "pointer",
-    },
-    btnOff: { opacity: 0.6, cursor: "not-allowed" },
-    wrap: {
-      display: "flex",
-      gap: 12,
-      alignItems: "flex-start",
-      flexWrap: "nowrap",
-    },
-    panel: {
-      border: "1px solid #ddd",
-      borderRadius: 10,
-      padding: 12,
-      background: "#fff",
-      width: "50%",
-      minWidth: 0,
-      maxHeight: "calc(100vh - 220px)",
-      overflow: "auto",
-    },
-    table: { width: "100%", borderCollapse: "collapse", fontSize: 14 },
-    th: { border: "1px solid #ddd", padding: "6px 8px", background: "#f6f6f6", textAlign: "left" },
-    td: { border: "1px solid #ddd", padding: "6px 8px" },
-    tdR: { border: "1px solid #ddd", padding: "6px 8px", textAlign: "right" },
-    tdC: { border: "1px solid #ddd", padding: "6px 8px", textAlign: "center" },
-    chipRow: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 },
-    chip: { border: "1px solid #bbb", borderRadius: 8, padding: "4px 8px", background: "#fff" },
-    chipOn: { background: "#111", color: "#fff", borderColor: "#111" },
-  };
+  const lineObj = useMemo(() => {
+    if (!data?.lines?.length) return null;
+    return data.lines.find((x) => x.line === selectedLine) || null;
+  }, [data, selectedLine]);
 
   return (
-    <div style={{ marginTop: 14 }}>
-      <div style={styles.row}>
+    <div style={{ padding: 16, fontFamily: "system-ui, Arial" }}>
+      <h1 style={{ margin: 0 }}>KPI Dashboard</h1>
+      <div style={{ marginTop: 8, marginBottom: 12, color: "#444" }}>
+        Chọn ngày để xem so sánh lũy tiến theo giờ và hiệu suất ngày.
+      </div>
+
+      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
         <div>
           <b>Ngày:</b>{" "}
-          <select
-            style={styles.select}
-            value={selectedDate}
-            onChange={(e) => setSelectedDate(e.target.value)}
-            disabled={loadingConfig || !dates.length}
-          >
-            {loadingConfig && <option>Đang tải ngày...</option>}
-            {!loadingConfig && !dates.length && <option>Không có ngày</option>}
-            {!loadingConfig &&
-              dates.map((d) => (
-                <option key={d} value={d}>
-                  {d}
-                </option>
-              ))}
+          <select value={date} onChange={(e) => setDate(e.target.value)} disabled={!dates.length}>
+            {dates.map((d) => (
+              <option key={d} value={d}>
+                {d}
+              </option>
+            ))}
           </select>
         </div>
 
-        <button
-          style={{ ...styles.btn, ...(loadingData ? styles.btnOff : {}) }}
-          disabled={!selectedDate || loadingData}
-          onClick={loadKpiOnce}
-        >
-          {loadingData ? "Đang tải..." : "Xem dữ liệu"}
+        <button onClick={() => loadData(date)} disabled={!date || loading}>
+          {loading ? "Đang tải..." : "Xem dữ liệu"}
         </button>
 
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
-          <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} />
+        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
           Tự cập nhật (1 phút)
         </label>
 
-        {lastUpdatedText && (
-          <span style={{ fontSize: 13, color: "#555" }}>
-            Cập nhật: <b>{lastUpdatedText}</b>
-          </span>
-        )}
+        <div style={{ color: "#666" }}>{lastUpdated ? `Cập nhật: ${lastUpdated}` : ""}</div>
       </div>
 
-      {error && <div style={{ color: "red", marginBottom: 10 }}>Lỗi: {error}</div>}
-      {!data && !error && <div style={{ color: "#666" }}>Chọn ngày rồi bấm “Xem dữ liệu”.</div>}
+      {err ? <div style={{ marginTop: 10, color: "crimson" }}>Lỗi: {err}</div> : null}
 
-      {data && (
-        <div style={styles.wrap}>
-          {/* LEFT = bảng hiệu suất ngày */}
-          <div style={styles.panel}>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-              <b>So sánh hiệu suất ngày</b>
-              <span style={{ fontSize: 12, color: "#666" }}>
-                Mốc cuối: <b>{data.latestMark}</b>
-              </span>
-            </div>
-
-            <table style={styles.table}>
-              <thead>
-                <tr>
-                  <th style={styles.th}>Chuyền</th>
-                  <th style={{ ...styles.th, textAlign: "right" }}>HS đạt</th>
-                  <th style={{ ...styles.th, textAlign: "right" }}>HS định mức</th>
-                  <th style={{ ...styles.th, textAlign: "center" }}>Trạng thái</th>
-                </tr>
-              </thead>
-              <tbody>
-                {lines.map((l) => {
-                  const ach = l.dayAch == null ? null : l.dayAch * 100;
-                  const tar = (l.dayTarget ?? 0) * 100;
-
-                  const st = l.dayStatus;
-                  const stStyle =
-                    st === "ĐẠT"
-                      ? { color: "green", fontWeight: 700 }
-                      : st === "KHÔNG ĐẠT"
-                      ? { color: "red", fontWeight: 700 }
-                      : { color: "#555" };
-
-                  return (
-                    <tr
-                      key={l.line}
-                      onClick={() => setSelectedLine(l.line)}
-                      style={{ cursor: "pointer", background: selectedLine === l.line ? "#f9f9f9" : "transparent" }}
-                    >
-                      <td style={styles.td}><b>{l.line}</b></td>
-                      <td style={styles.tdR}>{ach == null ? "—" : `${ach.toFixed(2)}%`}</td>
-                      <td style={styles.tdR}>{`${tar.toFixed(2)}%`}</td>
-                      <td style={{ ...styles.tdC, ...stStyle }}>{st}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-
-          {/* RIGHT = bảng lũy tiến theo giờ */}
-          <div style={styles.panel}>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-              <b>So sánh lũy tiến theo giờ (chuyền: {selectedLine || "—"})</b>
-            </div>
-
-            <div style={styles.chipRow}>
-              {lines.map((l) => (
-                <button
-                  key={l.line}
-                  onClick={() => setSelectedLine(l.line)}
-                  style={{ ...styles.chip, ...(selectedLine === l.line ? styles.chipOn : {}) }}
-                >
-                  {l.line}
-                </button>
-              ))}
-            </div>
-
-            {currentLine ? (
-              <>
-                <div style={{ fontSize: 13, color: "#444", marginBottom: 10 }}>
-                  DM/H: <b>{currentLine.dmH ? currentLine.dmH.toFixed(2) : 0}</b> • DM/NGÀY:{" "}
-                  <b>{currentLine.dmDay ? currentLine.dmDay.toFixed(2) : 0}</b>
-                </div>
-
-                <table style={styles.table}>
-                  <thead>
-                    <tr>
-                      <th style={styles.th}>Mốc</th>
-                      <th style={{ ...styles.th, textAlign: "right" }}>Lũy tiến</th>
-                      <th style={{ ...styles.th, textAlign: "right" }}>DM lũy tiến</th>
-                      <th style={{ ...styles.th, textAlign: "right" }}>Chênh</th>
-                      <th style={{ ...styles.th, textAlign: "center" }}>Trạng thái</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {currentLine.marks.map((m) => {
-                      let stStyle = { color: "#666" };
-                      if (m.status === "THIẾU") stStyle = { color: "red", fontWeight: 700 };
-                      if (m.status === "ĐỦ") stStyle = { color: "#0b5", fontWeight: 700 };
-                      if (m.status === "VƯỢT") stStyle = { color: "green", fontWeight: 700 };
-
-                      return (
-                        <tr key={m.mark}>
-                          <td style={styles.td}>{m.mark}</td>
-                          <td style={styles.tdR}>{m.actual == null ? "—" : m.actual}</td>
-                          <td style={styles.tdR}>{m.expected ? m.expected.toFixed(0) : 0}</td>
-                          <td style={styles.tdR}>{m.delta == null ? "—" : m.delta.toFixed(0)}</td>
-                          <td style={{ ...styles.tdC, ...stStyle }}>{m.status}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </>
-            ) : (
-              <div style={{ color: "#666" }}>Chưa chọn chuyền.</div>
-            )}
-          </div>
+      {!data?.lines?.length ? (
+        <div style={{ marginTop: 16, color: "#666" }}>
+          {data ? "Không parse được dòng nào. Hãy chắc RANGE có dòng tiêu đề chứa '->9h' và 'DM/H'." : ""}
         </div>
+      ) : (
+        <>
+          {/* chọn chuyền */}
+          <div style={{ marginTop: 14, display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {data.lines.map((x) => (
+              <button
+                key={x.line}
+                onClick={() => setSelectedLine(x.line)}
+                style={{
+                  padding: "6px 10px",
+                  border: "1px solid #ccc",
+                  background: x.line === selectedLine ? "#111" : "#fff",
+                  color: x.line === selectedLine ? "#fff" : "#111",
+                  borderRadius: 8,
+                  cursor: "pointer",
+                }}
+              >
+                {x.line}
+              </button>
+            ))}
+          </div>
+
+          {/* 2 bảng song song */}
+          <div style={{ marginTop: 14, display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 14 }}>
+            {/* LEFT: hiệu suất ngày */}
+            <div style={{ border: "1px solid #ddd", borderRadius: 10, padding: 12 }}>
+              <div style={{ fontWeight: 700, marginBottom: 8 }}>So sánh hiệu suất ngày</div>
+
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    {["Chuyền", "HS đạt", "HS định mức", "Trạng thái"].map((h) => (
+                      <th key={h} style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "6px 4px" }}>
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.lines.map((x) => (
+                    <tr key={x.line} style={{ background: x.line === selectedLine ? "#f6f6f6" : "transparent" }}>
+                      <td style={{ padding: "6px 4px" }}>{x.line}</td>
+                      <td style={{ padding: "6px 4px" }}>{pct(x.hsDat)}</td>
+                      <td style={{ padding: "6px 4px" }}>{pct(x.hsTarget)}</td>
+                      <td style={{ padding: "6px 4px" }}>{x.hsStatus}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* RIGHT: lũy tiến theo giờ */}
+            <div style={{ border: "1px solid #ddd", borderRadius: 10, padding: 12 }}>
+              <div style={{ fontWeight: 700, marginBottom: 8 }}>
+                So sánh lũy tiến theo giờ (chuyền: {selectedLine || "—"})
+              </div>
+
+              {!lineObj ? (
+                <div style={{ color: "#666" }}>Chưa chọn chuyền.</div>
+              ) : (
+                <>
+                  <div style={{ marginBottom: 10, color: "#444" }}>
+                    DM/H: <b>{lineObj.baseDmH?.toFixed(2)}</b>{" "}
+                    <span style={{ color: "#888" }}>(nếu thiếu DM/H sẽ dùng DM/NGÀY/8)</span>
+                  </div>
+
+                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                    <thead>
+                      <tr>
+                        {["Mốc", "Lũy tiến", "DM lũy tiến", "Chênh", "Trạng thái"].map((h) => (
+                          <th key={h} style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "6px 4px" }}>
+                            {h}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {Object.keys(lineObj.actual).map((m) => (
+                        <tr key={m}>
+                          <td style={{ padding: "6px 4px" }}>{m}</td>
+                          <td style={{ padding: "6px 4px" }}>{lineObj.actual[m]}</td>
+                          <td style={{ padding: "6px 4px" }}>{lineObj.target[m]}</td>
+                          <td style={{ padding: "6px 4px" }}>{lineObj.diff[m]}</td>
+                          <td style={{ padding: "6px 4px" }}>{lineObj.status[m]}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </>
+              )}
+            </div>
+          </div>
+        </>
       )}
     </div>
   );
