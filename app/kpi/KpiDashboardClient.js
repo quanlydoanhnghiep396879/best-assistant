@@ -395,10 +395,10 @@ export default function KpiDashboardClient() {
       )}
 
       {!lines.length && raw?.length > 0 && (
-        <div className="mt-3 text-sm text-red-600">
-          Đã đọc sheet nhưng không parse được. Hãy đảm bảo RANGE có chứa dòng tiêu đề có “->9h”.
-        </div>
-      )}
+  <div className="mt-3 text-sm text-red-600">
+    Đã đọc sheet nhưng không parse được. Hãy đảm bảo RANGE có chứa dòng tiêu đề mốc 9h.
+  </div>
+)}
     </div>
   );
 }
