@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import * as Sheets from "../../lib/googleSheetsClient";
+import * as Sheets from "../_lib/googleSheetsClient";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -31,11 +31,7 @@ export async function GET() {
     const configRows = await readConfigRanges();
     const dates = configRows.map((r) => r.date);
 
-    return NextResponse.json({
-      status: "success",
-      dates,
-      configRows,
-    });
+    return NextResponse.json({ status: "success", dates, configRows });
   } catch (err) {
     console.error("KPI-CONFIG ERROR:", err);
     return NextResponse.json(

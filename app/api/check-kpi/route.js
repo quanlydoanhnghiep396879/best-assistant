@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import * as Sheets from "../../lib/googleSheetsClient";
+import * as Sheets from "../_lib/googleSheetsClient";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -62,7 +62,7 @@ export async function GET(request) {
       status: "success",
       date,
       range,
-      raw: values,   // client bạn đang dùng data.raw
+      raw: values,
       values,
     });
   } catch (err) {
