@@ -31,5 +31,5 @@ export function getSheetsClient() {
 }
 
 export function getSpreadsheetId() {
-  return mustEnv("SPREADSHEET_ID");
+  return mustEnv("GOOGLE_SHEET_ID");
 }
