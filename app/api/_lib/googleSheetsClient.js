@@ -1,3 +1,4 @@
+// app/api/_lib/googleSheetsClient.js
 import { google } from "googleapis";
 
 function mustEnv(name) {
@@ -6,31 +7,35 @@ function mustEnv(name) {
   return v;
 }
 
-function getSpreadsheetId() {
-  return process.env.GOOGLE_SHEET_ID || process.env.SPREADSHEET_ID || mustEnv("GOOGLE_SHEET_ID");
+function loadServiceAccount() {
+  const b64 =
+    process.env.GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 ||
+    process.env.GOOGLE_SERVICE_ACCOUNT_BASE64;
+
+  if (!b64) throw new Error("Missing env GOOGLE_SERVICE_ACCOUNT_JSON_BASE64");
+
+  const jsonText = Buffer.from(b64, "base64").toString("utf8");
+  return JSON.parse(jsonText);
 }
 
-function decodeServiceAccount() {
-  const b64 = mustEnv("GOOGLE_SERVICE_ACCOUNT_BASE64");
-  const jsonStr = Buffer.from(b64, "base64").toString("utf8");
-  try {
-    return JSON.parse(jsonStr);
-  } catch {
-    throw new Error("Service account base64 is not valid JSON");
-  }
-}
+let cached = null;
 
 export async function getSheetsClient() {
-  const sa = decodeServiceAccount();
+  if (cached) return cached;
 
-  const auth = new google.auth.JWT({
+  const sa = loadServiceAccount();
+  const jwt = new google.auth.JWT({
     email: sa.client_email,
     key: sa.private_key,
     scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
   });
 
-  const sheets = google.sheets({ version: "v4", auth });
-  const spreadsheetId = getSpreadsheetId();
+  await jwt.authorize();
+  cached = google.sheets({ version: "v4", auth: jwt });
+  return cached;
+}
 
-  return { sheets, spreadsheetId, serviceAccountEmail: sa.client_email };
+export function getSpreadsheetId() {
+  // Đây mới là Google Sheet ID (không phải base64)
+  return mustEnv("SPREADSHEET_ID");
 }

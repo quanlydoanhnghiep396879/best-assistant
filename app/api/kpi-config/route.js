@@ -1,11 +1,11 @@
-
+// app/api/kpi-config/route.js
 import { NextResponse } from "next/server";
-import { getSheetsClient } from "../_lib/googleSheetsClient";
+import { getSheetsClient, getSpreadsheetId } from "../_lib/googleSheetsClient";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-const CONFIG_SHEET = "CONFIG_KPI";
-const CONFIG_RANGE = `${CONFIG_SHEET}!A:B`; // A=DATE, B=RANGE
+const CONFIG_SHEET = "CONFIG_KPI"; // đúng tên tab
 
 function normDate(s) {
   return String(s || "").trim();
@@ -13,45 +13,49 @@ function normDate(s) {
 
 export async function GET(req) {
   try {
-    const { sheets, spreadsheetId } = await getSheetsClient();
     const { searchParams } = new URL(req.url);
-    const date = normDate(searchParams.get("date"));
     const list = searchParams.get("list");
+    const date = searchParams.get("date");
+
+    const sheets = await getSheetsClient();
+    const spreadsheetId = getSpreadsheetId();
 
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: CONFIG_RANGE,
-      valueRenderOption: "FORMATTED_VALUE",
+      range: `${CONFIG_SHEET}!A2:B`,
     });
 
     const rows = res.data.values || [];
-    const body = rows.slice(1) // bỏ header
-      .map(r => ({ date: normDate(r?.[0]), range: normDate(r?.[1]) }))
-      .filter(x => x.date && x.range);
-
-    const dates = body.map(x => x.date);
+    const map = {};
+    for (const r of rows) {
+      const d = normDate(r?.[0]);
+      const range = String(r?.[1] || "").trim();
+      if (d && range) map[d] = range;
+    }
 
     if (list === "1") {
-      return NextResponse.json({ ok: true, dates });
-    }
-
-    if (!date) {
-      return NextResponse.json({ ok: true, dates, hint: "Pass ?date=dd/MM/yyyy" });
-    }
-
-    const found = body.find(x => x.date === date);
-    if (!found) {
       return NextResponse.json(
-        { ok: false, error: `No RANGE found for date: ${date}, dates`},
-        { status: 404 }
+        { ok: true, dates: Object.keys(map) },
+        { headers: { "Cache-Control": "no-store" } }
       );
     }
 
-    return NextResponse.json({ ok: true, date, range: found.range, dates });
-  } catch (e) {
+    if (date) {
+      const range = map[date];
+      return NextResponse.json(
+        { ok: !!range, date, range: range || null },
+        { headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
     return NextResponse.json(
-      { ok: false, error: e?.message || String(e) },
-      { status: 500 }
+      { ok: true, map },
+      { headers: { "Cache-Control": "no-store" } }
+    );
+  } catch (err) {
+    return NextResponse.json(
+      { ok: false, error: String(err?.message || err) },
+      { status: 500, headers: { "Cache-Control": "no-store" } }
     );
   }
 }

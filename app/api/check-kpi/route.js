@@ -1,176 +1,204 @@
+// app/api/check-kpi/route.js
 import { NextResponse } from "next/server";
-import { getSheetsClient } from "../_lib/googleSheetsClient";
+import { getSheetsClient, getSpreadsheetId } from "../_lib/googleSheetsClient";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+const CONFIG_SHEET = "CONFIG_KPI";
+const TARGET_PERCENT = 100; // đạt nếu >= 100%
 
 function stripDiacritics(s) {
-  try {
-    return s.normalize("NFD").replace(/\p{Diacritic}/gu, "");
-  } catch {
-    return s;
-  }
+  return String(s || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
 }
-function normHeader(s) {
-  return stripDiacritics(String(s || ""))
+
+function norm(s) {
+  return stripDiacritics(s)
     .toLowerCase()
-    .replace(/\s+/g, "")
-    .replace(/[^a-z0-9\-\/>]/g, "");
+    .replace(/\s+/g, " ")
+    .replace(/[“”"]/g, "")
+    .trim();
 }
-function toNum(v) {
+
+function toNumber(v) {
   if (v === null || v === undefined) return 0;
-  const t = String(v).trim();
-  if (!t || t === "—" || t === "-" || t.toLowerCase() === "na") return 0;
-  const n = Number(t.replace(/,/g, ""));
+  const s = String(v).trim();
+  if (!s) return 0;
+  const n = Number(s.replace(/,/g, ""));
   return Number.isFinite(n) ? n : 0;
 }
 
-const HS_DINH_MUC = 90; // %
-
-const MOC_HOURS = {
-  "->9h": 1,
-  "->10h": 2,
-  "->11h": 3,
-  "->12h30": 4.5,
-  "->13h30": 5.5,
-  "->14h30": 6.5,
-  "->15h30": 7.5,
-  "->16h30": 8,
-};
-
-function pickHeaderRow(rows) {
-  // tìm dòng có "chuyền"
-  for (let i = 0; i < Math.min(rows.length, 8); i++) {
-    if ((rows[i] || []).some(c => normHeader(c).includes("chuyen"))) return i;
+function findCol(headers, candidates) {
+  const H = headers.map(norm);
+  for (const cand of candidates) {
+    const c = norm(cand);
+    const idx = H.findIndex((h) => h === c || h.includes(c));
+    if (idx >= 0) return idx;
   }
-  return 0;
+  return -1;
+}
+
+const TIME_MARKS = [
+  { key: "->9h", h: 1 },
+  { key: "->10h", h: 2 },
+  { key: "->11h", h: 3 },
+  { key: "->12h30", h: 4.5 },
+  { key: "->13h30", h: 5.5 },
+  { key: "->14h30", h: 6.5 },
+  { key: "->15h30", h: 7.5 },
+  { key: "->16h30", h: 8 },
+];
+
+async function loadConfigMap() {
+  const sheets = await getSheetsClient();
+  const spreadsheetId = getSpreadsheetId();
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${CONFIG_SHEET}!A2:B`,
+  });
+
+  const rows = res.data.values || [];
+  const map = {};
+  for (const r of rows) {
+    const d = String(r?.[0] || "").trim();
+    const range = String(r?.[1] || "").trim();
+    if (d && range) map[d] = range;
+  }
+  return map;
 }
 
 export async function GET(req) {
   try {
-    const { sheets, spreadsheetId } = await getSheetsClient();
     const { searchParams } = new URL(req.url);
-    const date = String(searchParams.get("date") || "").trim();
+    const date = searchParams.get("date");
+    const lineFilter = (searchParams.get("line") || "").trim();
 
     if (!date) {
-      return NextResponse.json({ ok: false, error: "Missing ?date=dd/MM/yyyy" }, { status: 400 });
-    }
-
-    // lấy range theo ngày
-    const cfg = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL || ""}/api/kpi-config?date=${encodeURIComponent(date)}`, {
-      cache: "no-store",
-    }).catch(() => null);
-
-    // fallback: đọc trực tiếp config bằng sheets (ổn định hơn)
-    const cfgRes = await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range: "CONFIG_KPI!A:B",
-      valueRenderOption: "FORMATTED_VALUE",
-    });
-    const cfgRows = cfgRes.data.values || [];
-    const cfgBody = cfgRows.slice(1)
-      .map(r => ({ d: String(r?.[0] || "").trim(), range: String(r?.[1] || "").trim() }))
-      .filter(x => x.d && x.range);
-
-    const found = cfgBody.find(x => x.d === date);
-    if (!found) {
       return NextResponse.json(
-        { ok: false, error: `CONFIG_KPI không có dòng DATE=${date}, availableDates: ${cfgBody.map(x => x.d)}` },
-        { status: 404 }
+        { ok: false, error: "Missing ?date=dd/mm/yyyy" },
+        { status: 400, headers: { "Cache-Control": "no-store" } }
       );
     }
 
-    const range = found.range;
+    const config = await loadConfigMap();
+    const range = config[date];
+    if (!range) {
+      return NextResponse.json(
+        { ok: false, error: `No RANGE configured for date ${date}` },
+        { status: 400, headers: { "Cache-Control": "no-store" } }
+      );
+    }
 
-    // đọc KPI range
+    const sheets = await getSheetsClient();
+    const spreadsheetId = getSpreadsheetId();
+
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId,
       range,
-      valueRenderOption: "FORMATTED_VALUE",
+      valueRenderOption: "UNFORMATTED_VALUE",
     });
 
-    const rows = res.data.values || [];
-    if (!rows.length) {
-      return NextResponse.json({ ok: false, error: `Range rỗng: ${range}` }, { status: 404 });
+    const values = res.data.values || [];
+    if (values.length < 3) {
+      return NextResponse.json(
+        { ok: true, date, range, lines: [], meta: { reason: "too-few-rows" } },
+        { headers: { "Cache-Control": "no-store" } }
+      );
     }
 
-    const headerRowIdx = pickHeaderRow(rows);
-    const headerTop = rows[headerRowIdx - 1] || [];
-    const header = rows[headerRowIdx] || [];
-    const combinedHeaders = header.map((h, i) => {
-      const top = String(headerTop[i] || "").trim();
-      const sub = String(h || "").trim();
-      return (top && top !== sub) ? `${top} ${sub}` : sub;
-    });
+    // Header 2 hàng (giống sheet của bạn)
+    const top = values[0] || [];
+    const sub = values[1] || [];
+    const colCount = Math.max(top.length, sub.length);
 
-    const H = combinedHeaders.map(normHeader);
+    const headers = [];
+    for (let c = 0; c < colCount; c++) {
+      const a = String(top[c] ?? "").trim();
+      const b = String(sub[c] ?? "").trim();
 
-    const idxChuyen = H.findIndex(x => x.includes("chuyen"));
-    const idxMaHang = H.findIndex(x => x === "mh" || x.includes("mahang") || x.includes("mãhang"));
-    const idxDmNgay = H.findIndex(x => x.includes("dm/ngay") || x.includes("dmngay") || x === "dm");
-    const idxDmH = H.findIndex(x => x.includes("dm/h") || x.includes("dmh") || x === "h");
+      // nếu có sub thì ưu tiên sub, nhưng ghép thêm top để tránh trùng
+      let h = "";
+      if (b && a && norm(b) !== norm(a)) h = `${a} ${b}`;
+      else h = b || a || "";
+      headers.push(h);
+    }
 
-    // các mốc
-    const mocCols = combinedHeaders
-      .map((name, i) => ({ name: String(name || "").trim(), i }))
-      .filter(x => String(x.name).trim().startsWith("->"));
+    // Cột cần dùng
+    const idxMH = findCol(headers, ["MÃ HÀNG MH", "MA HANG MH", "MH", "MA HANG"]);
+    const idxDMNgay = findCol(headers, ["DM/NGÀY DM", "DM/NGAY DM", "DM/NGAY", "DM/NGÀY"]);
+    const idxDMH = findCol(headers, ["ĐM/H H", "DM/H H", "DM/H", "ĐM/H"]);
 
-    const dataRows = rows.slice(headerRowIdx + 1);
+    // Time cols
+    const timeIdx = {};
+    for (const t of TIME_MARKS) {
+      const i = findCol(headers, [t.key]);
+      if (i >= 0) timeIdx[t.key] = i;
+    }
 
     const lines = [];
-    const perLine = {};
+    for (let r = 2; r < values.length; r++) {
+      const row = values[r] || [];
+      const line = String(row[0] || "").trim(); // cột A = chuyền
+      if (!line) continue;
 
-    for (const r of dataRows) {
-      const chuyen = String(r?.[idxChuyen] || "").trim();
-      if (!chuyen) continue;
+      if (lineFilter && norm(line) !== norm(lineFilter)) continue;
 
-      const maHang = idxMaHang >= 0 ? String(r?.[idxMaHang] || "").trim() : "";
-      const dmNgay = idxDmNgay >= 0 ? toNum(r?.[idxDmNgay]) : 0;
-      const dmH = idxDmH >= 0 ? toNum(r?.[idxDmH]) : (dmNgay ? dmNgay / 8 : 0);
+      const mh = idxMH >= 0 ? String(row[idxMH] || "").trim() : "";
 
-      // lấy lũy tiến theo mốc
-      const mocs = mocCols.map(m => {
-        const moc = m.name;
-        const luyTien = toNum(r?.[m.i]);
-        const hours = MOC_HOURS[moc] ?? 0;
-        const dmLuyTien = dmH * hours;
-        const chenh = luyTien - dmLuyTien;
-        const trangThai = hours === 0 ? "N/A" : (chenh >= 0 ? "VƯỢT/ĐẠT" : "THIẾU");
-        return { moc, luyTien, dmLuyTien: Number(dmLuyTien.toFixed(2)), chenh: Number(chenh.toFixed(2)), trangThai };
+      const dmNgay = idxDMNgay >= 0 ? toNumber(row[idxDMNgay]) : 0;
+      const dmH = idxDMH >= 0 ? toNumber(row[idxDMH]) : 0;
+
+      const luy = {};
+      for (const t of TIME_MARKS) {
+        const i = timeIdx[t.key];
+        luy[t.key] = i >= 0 ? toNumber(row[i]) : 0;
+      }
+
+      const endVal = luy["->16h30"] || 0;
+      const hs = dmNgay > 0 ? (endVal / dmNgay) * 100 : 0;
+      const statusDay =
+        dmNgay <= 0 ? "CHƯA CÓ" : hs >= TARGET_PERCENT ? "ĐẠT" : "KHÔNG ĐẠT";
+
+      // per-hour for right panel
+      const perHour = TIME_MARKS.map((t) => {
+        const actual = luy[t.key] || 0;
+        const expected = dmH > 0 ? dmH * t.h : 0;
+        const diff = actual - expected;
+        let st = "N/A";
+        if (dmH > 0) st = actual >= expected ? "ĐẠT" : "CHƯA ĐẠT";
+        return {
+          moc: t.key,
+          luy: actual,
+          dmLuy: dmH > 0 ? Math.round(expected) : null,
+          chenh: dmH > 0 ? Math.round(diff) : null,
+          status: st,
+        };
       });
 
-      // HS ngày: dùng mốc cuối ->16h30 nếu có
-      const end = mocs.find(x => x.moc === "->16h30") || mocs[mocs.length - 1];
-      const tongNgay = end ? end.luyTien : 0;
-
-      const hsDat = dmNgay > 0 ? (tongNgay / dmNgay) * 100 : 0;
-      let trangThaiNgay = "CHƯA CÓ";
-      if (tongNgay > 0 && dmNgay > 0) trangThaiNgay = hsDat >= 100 ? "ĐẠT" : "KHÔNG ĐẠT";
-      else if (tongNgay > 0 && dmNgay === 0) trangThaiNgay = "THIẾU DM";
-
-      const lineObj = {
-        chuyen,
-        maHang: maHang || "—",
-        hsDat: Number(hsDat.toFixed(2)),
-        hsDinhMuc: HS_DINH_MUC,
-        trangThaiNgay,
-      };
-
-      lines.push(lineObj);
-      perLine[chuyen] = { chuyen, maHang: maHang || "—", dmNgay, dmH, mocs };
+      lines.push({
+        line,
+        mh,
+        dmH: dmH || null,
+        dmNgay: dmNgay || null,
+        endVal,
+        hs: dmNgay > 0 ? Number(hs.toFixed(2)) : null,
+        hsTarget: TARGET_PERCENT,
+        statusDay,
+        perHour,
+      });
     }
 
-    return NextResponse.json({
-      ok: true,
-      date,
-      range,
-      lines,
-      perLine,
-      meta: { headers: combinedHeaders },
-    });
-  } catch (e) {
     return NextResponse.json(
-      { ok: false, error: e?.message || String(e) },
-      { status: 500 }
+      { ok: true, date, range, lines, meta: { headers } },
+      { headers: { "Cache-Control": "no-store" } }
+    );
+  } catch (err) {
+    return NextResponse.json(
+      { ok: false, error: String(err?.message || err) },
+      { status: 500, headers: { "Cache-Control": "no-store" } }
     );
   }
 }
