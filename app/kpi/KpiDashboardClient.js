@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
-import s from "./kpi.module.css";
+import s from "./kpi.css";
 
 function fmtPercent(frac) {
   if (frac === null || frac === undefined) return "—";
