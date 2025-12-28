@@ -100,8 +100,7 @@ export async function GET(req) {
     const dataStart = headerRow + 1;
 
     // column indices
-    let idxLine = findColIndex(headers, ["CHUYEN", "CHUYỀN"]);
-    if (idxLine < 0) idxLine = 0;
+    const idxLine = findColIndex(headers, ["CHUYEN", "CHUYỀN"]);
     const idxMaHang = findColIndex(headers, ["MÃ HÀNG", "MA HANG", "MH"]);
     const idxDmNgay = findColIndex(headers, ["DM/NGÀY", "DM/NGAY", "DM NGAY"]);
     const idxDmH = findColIndex(headers, ["DM/H", "DMH", "DM H"]);
