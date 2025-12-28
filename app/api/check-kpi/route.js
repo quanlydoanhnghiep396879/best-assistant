@@ -1,177 +1,176 @@
-import { getSheetsClient, getSpreadsheetId } from "../_lib/googleSheetsClient";
+import { NextResponse } from "next/server";
+import { getSheetsClient } from "../_lib/googleSheetsClient";
 
 export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
 
+function stripDiacritics(s) {
+  try {
+    return s.normalize("NFD").replace(/\p{Diacritic}/gu, "");
+  } catch {
+    return s;
+  }
+}
+function normHeader(s) {
+  return stripDiacritics(String(s || ""))
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[^a-z0-9\-\/>]/g, "");
+}
 function toNum(v) {
   if (v === null || v === undefined) return 0;
-  const s = String(v).trim();
-  if (!s) return 0;
-  const n = Number(s.replace(/,/g, ""));
+  const t = String(v).trim();
+  if (!t || t === "—" || t === "-" || t.toLowerCase() === "na") return 0;
+  const n = Number(t.replace(/,/g, ""));
   return Number.isFinite(n) ? n : 0;
 }
 
-function normKey(s) {
-  return String(s || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/\s+/g, "")
-    .replace(/[^\w->/]/g, "");
-}
+const HS_DINH_MUC = 90; // %
 
-function findHeaderRow(rows) {
-  // tìm dòng có cả "chuyền" và "mã hàng"
-  for (let i = 0; i < Math.min(rows.length, 15); i++) {
-    const line = (rows[i] || []).map(normKey);
-    const hasChuyen = line.some((x) => x.includes("chuyen"));
-    const hasMaHang = line.some((x) => x.includes("mahang"));
-    if (hasChuyen && hasMaHang) return i;
+const MOC_HOURS = {
+  "->9h": 1,
+  "->10h": 2,
+  "->11h": 3,
+  "->12h30": 4.5,
+  "->13h30": 5.5,
+  "->14h30": 6.5,
+  "->15h30": 7.5,
+  "->16h30": 8,
+};
+
+function pickHeaderRow(rows) {
+  // tìm dòng có "chuyền"
+  for (let i = 0; i < Math.min(rows.length, 8); i++) {
+    if ((rows[i] || []).some(c => normHeader(c).includes("chuyen"))) return i;
   }
-  return -1;
-}
-
-function parseMilestoneLabelToHours(label) {
-  // label dạng "->9h", "->12h30"
-  const s = String(label || "").replace("->", "").trim().toLowerCase();
-  const m = s.match(/^(\d{1,2})h(\d{1,2})?$/);
-  if (!m) return null;
-  const hh = Number(m[1]);
-  const mm = m[2] ? Number(m[2]) : 0;
-  // giả định bắt đầu 8:00 như sheet của bạn (->9h = 1 giờ)
-  const hoursFrom8 = (hh + mm / 60) - 8;
-  return hoursFrom8 > 0 ? hoursFrom8 : 0;
-}
-
-async function getConfigMap() {
-  const sheets = getSheetsClient();
-  const spreadsheetId = getSpreadsheetId();
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range: "CONFIG_KPI!A:B",
-  });
-  const rows = res.data.values || [];
-  if (rows.length < 2) return {};
-
-  const header = rows[0].map((x) => String(x || "").trim().toUpperCase());
-  const idxDate = header.indexOf("DATE");
-  const idxRange = header.indexOf("RANGE");
-  if (idxDate === -1 || idxRange === -1) return {};
-
-  const map = {};
-  for (let i = 1; i < rows.length; i++) {
-    const d = String(rows[i][idxDate] || "").trim();
-    const r = String(rows[i][idxRange] || "").trim();
-    if (d && r) map[d] = r;
-  }
-  return map;
+  return 0;
 }
 
 export async function GET(req) {
   try {
+    const { sheets, spreadsheetId } = await getSheetsClient();
     const { searchParams } = new URL(req.url);
-    const date = searchParams.get("date"); // "24/12/2025"
+    const date = String(searchParams.get("date") || "").trim();
 
     if (!date) {
-      return Response.json({ ok: false, error: "Missing ?date=dd/mm/yyyy" }, { status: 400 });
+      return NextResponse.json({ ok: false, error: "Missing ?date=dd/MM/yyyy" }, { status: 400 });
     }
 
-    const map = await getConfigMap();
-    const range = map[date];
+    // lấy range theo ngày
+    const cfg = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL || ""}/api/kpi-config?date=${encodeURIComponent(date)}`, {
+      cache: "no-store",
+    }).catch(() => null);
 
-    if (!range) {
-      return Response.json(
-        { ok: false, error: `Không có RANGE cho ngày ${date} trong CONFIG_KPI`},
+    // fallback: đọc trực tiếp config bằng sheets (ổn định hơn)
+    const cfgRes = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: "CONFIG_KPI!A:B",
+      valueRenderOption: "FORMATTED_VALUE",
+    });
+    const cfgRows = cfgRes.data.values || [];
+    const cfgBody = cfgRows.slice(1)
+      .map(r => ({ d: String(r?.[0] || "").trim(), range: String(r?.[1] || "").trim() }))
+      .filter(x => x.d && x.range);
+
+    const found = cfgBody.find(x => x.d === date);
+    if (!found) {
+      return NextResponse.json(
+        { ok: false, error: `CONFIG_KPI không có dòng DATE=${date}, availableDates: ${cfgBody.map(x => x.d)}` },
         { status: 404 }
       );
     }
 
-    const sheets = getSheetsClient();
-    const spreadsheetId = getSpreadsheetId();
+    const range = found.range;
 
-    const res = await sheets.spreadsheets.values.get({ spreadsheetId, range });
+    // đọc KPI range
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range,
+      valueRenderOption: "FORMATTED_VALUE",
+    });
+
     const rows = res.data.values || [];
-    if (!rows.length) return Response.json({ ok: true, date, lines: [], meta: {} });
-
-    const headerRowIdx = findHeaderRow(rows);
-    if (headerRowIdx === -1) {
-      return Response.json(
-        { ok: false, error: "Không tìm thấy dòng header chứa 'Chuyền' và 'Mã hàng' trong range KPI" },
-        { status: 400 }
-      );
+    if (!rows.length) {
+      return NextResponse.json({ ok: false, error: `Range rỗng: ${range}` }, { status: 404 });
     }
 
-    const headers = rows[headerRowIdx].map((h) => String(h || "").trim());
-    const hNorm = headers.map(normKey);
+    const headerRowIdx = pickHeaderRow(rows);
+    const headerTop = rows[headerRowIdx - 1] || [];
+    const header = rows[headerRowIdx] || [];
+    const combinedHeaders = header.map((h, i) => {
+      const top = String(headerTop[i] || "").trim();
+      const sub = String(h || "").trim();
+      return (top && top !== sub) ? `${top} ${sub}` : sub;
+    });
 
-    const colChuyen = hNorm.findIndex((x) => x.includes("chuyen"));
-    const colMaHang = hNorm.findIndex((x) => x.includes("mahang")); // lấy mã hàng cho sếp
-    const colDmNgay = hNorm.findIndex((x) => x.includes("dm/ngay") || x.includes("dmngay"));
-    const colDmH = hNorm.findIndex((x) => x.includes("dm/h") || x.includes("dmh"));
+    const H = combinedHeaders.map(normHeader);
 
-    // tìm tất cả cột mốc dạng ->9h, ->10h...
-    const milestoneCols = [];
-    for (let c = 0; c < hNorm.length; c++) {
-      if (hNorm[c].startsWith("->")) milestoneCols.push(c);
-    }
-    const lastMilestoneCol = milestoneCols.length ? milestoneCols[milestoneCols.length - 1] : -1;
+    const idxChuyen = H.findIndex(x => x.includes("chuyen"));
+    const idxMaHang = H.findIndex(x => x === "mh" || x.includes("mahang") || x.includes("mãhang"));
+    const idxDmNgay = H.findIndex(x => x.includes("dm/ngay") || x.includes("dmngay") || x === "dm");
+    const idxDmH = H.findIndex(x => x.includes("dm/h") || x.includes("dmh") || x === "h");
 
-    const dataStart = headerRowIdx + 1;
+    // các mốc
+    const mocCols = combinedHeaders
+      .map((name, i) => ({ name: String(name || "").trim(), i }))
+      .filter(x => String(x.name).trim().startsWith("->"));
+
+    const dataRows = rows.slice(headerRowIdx + 1);
+
     const lines = [];
+    const perLine = {};
 
-    for (let r = dataStart; r < rows.length; r++) {
-      const row = rows[r] || [];
-      const chuyen = String(row[colChuyen] || "").trim();
+    for (const r of dataRows) {
+      const chuyen = String(r?.[idxChuyen] || "").trim();
       if (!chuyen) continue;
 
-      const maHang = colMaHang >= 0 ? String(row[colMaHang] || "").trim() : "";
+      const maHang = idxMaHang >= 0 ? String(r?.[idxMaHang] || "").trim() : "";
+      const dmNgay = idxDmNgay >= 0 ? toNum(r?.[idxDmNgay]) : 0;
+      const dmH = idxDmH >= 0 ? toNum(r?.[idxDmH]) : (dmNgay ? dmNgay / 8 : 0);
 
-      const dmNgay = colDmNgay >= 0 ? toNum(row[colDmNgay]) : 0;
-      const dmH = colDmH >= 0 ? toNum(row[colDmH]) : 0;
-
-      const luyTien = milestoneCols.map((c) => ({
-        label: headers[c],
-        value: toNum(row[c]),
-      }));
-
-      const last = lastMilestoneCol >= 0 ? toNum(row[lastMilestoneCol]) : 0;
-      const hsDat = dmNgay > 0 && last > 0 ? (last / dmNgay) * 100 : null;
-
-      const hsDinhMuc = 90; // bạn đang để HS định mức 90%
-      const trangThaiNgay =
-        hsDat === null ? "CHƯA CÓ" : hsDat >= 100 ? "ĐẠT" : "KHÔNG ĐẠT";
-
-      // tính DM lũy tiến & chênh theo dmH (bắt đầu 8:00)
-      const luyTienWithExpected = luyTien.map((p) => {
-        const hours = parseMilestoneLabelToHours(p.label);
-        const expected = hours === null ? null : Math.round(dmH * hours);
-        const diff = expected === null ? null : p.value - expected;
-        const status =
-          expected === null ? "N/A" : p.value >= expected ? "ĐẠT" : "THIẾU";
-        return { ...p, expected, diff, status };
+      // lấy lũy tiến theo mốc
+      const mocs = mocCols.map(m => {
+        const moc = m.name;
+        const luyTien = toNum(r?.[m.i]);
+        const hours = MOC_HOURS[moc] ?? 0;
+        const dmLuyTien = dmH * hours;
+        const chenh = luyTien - dmLuyTien;
+        const trangThai = hours === 0 ? "N/A" : (chenh >= 0 ? "VƯỢT/ĐẠT" : "THIẾU");
+        return { moc, luyTien, dmLuyTien: Number(dmLuyTien.toFixed(2)), chenh: Number(chenh.toFixed(2)), trangThai };
       });
 
-      lines.push({
+      // HS ngày: dùng mốc cuối ->16h30 nếu có
+      const end = mocs.find(x => x.moc === "->16h30") || mocs[mocs.length - 1];
+      const tongNgay = end ? end.luyTien : 0;
+
+      const hsDat = dmNgay > 0 ? (tongNgay / dmNgay) * 100 : 0;
+      let trangThaiNgay = "CHƯA CÓ";
+      if (tongNgay > 0 && dmNgay > 0) trangThaiNgay = hsDat >= 100 ? "ĐẠT" : "KHÔNG ĐẠT";
+      else if (tongNgay > 0 && dmNgay === 0) trangThaiNgay = "THIẾU DM";
+
+      const lineObj = {
         chuyen,
-        maHang,
-        dmNgay,
-        dmH,
-        last,
-        hsDat,
-        hsDinhMuc,
+        maHang: maHang || "—",
+        hsDat: Number(hsDat.toFixed(2)),
+        hsDinhMuc: HS_DINH_MUC,
         trangThaiNgay,
-        luyTien: luyTienWithExpected,
-      });
+      };
+
+      lines.push(lineObj);
+      perLine[chuyen] = { chuyen, maHang: maHang || "—", dmNgay, dmH, mocs };
     }
 
-    return Response.json({
+    return NextResponse.json({
       ok: true,
       date,
       range,
       lines,
-      meta: { headerRowIdx, milestoneCount: milestoneCols.length },
+      perLine,
+      meta: { headers: combinedHeaders },
     });
   } catch (e) {
-    return Response.json({ ok: false, error: e.message }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: e?.message || String(e) },
+      { status: 500 }
+    );
   }
 }

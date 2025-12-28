@@ -1,7 +1,11 @@
-import { getSheetsClient, getSpreadsheetId } from "../_lib/googleSheetsClient";
+
+import { NextResponse } from "next/server";
+import { getSheetsClient } from "../_lib/googleSheetsClient";
 
 export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+
+const CONFIG_SHEET = "CONFIG_KPI";
+const CONFIG_RANGE = `${CONFIG_SHEET}!A:B`; // A=DATE, B=RANGE
 
 function normDate(s) {
   return String(s || "").trim();
@@ -9,46 +13,45 @@ function normDate(s) {
 
 export async function GET(req) {
   try {
+    const { sheets, spreadsheetId } = await getSheetsClient();
     const { searchParams } = new URL(req.url);
+    const date = normDate(searchParams.get("date"));
     const list = searchParams.get("list");
 
-    const sheets = getSheetsClient();
-    const spreadsheetId = getSpreadsheetId();
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: CONFIG_RANGE,
+      valueRenderOption: "FORMATTED_VALUE",
+    });
 
-    // CONFIG_KPI: cột A=DATE, B=RANGE (như ảnh bạn sửa)
-    const range = "CONFIG_KPI!A:B";
-    const res = await sheets.spreadsheets.values.get({ spreadsheetId, range });
     const rows = res.data.values || [];
+    const body = rows.slice(1) // bỏ header
+      .map(r => ({ date: normDate(r?.[0]), range: normDate(r?.[1]) }))
+      .filter(x => x.date && x.range);
 
-    if (rows.length < 2) {
-      return Response.json({ ok: true, dates: [], map: {} });
+    const dates = body.map(x => x.date);
+
+    if (list === "1") {
+      return NextResponse.json({ ok: true, dates });
     }
 
-    const header = rows[0].map((x) => String(x || "").trim().toUpperCase());
-    const idxDate = header.indexOf("DATE");
-    const idxRange = header.indexOf("RANGE");
+    if (!date) {
+      return NextResponse.json({ ok: true, dates, hint: "Pass ?date=dd/MM/yyyy" });
+    }
 
-    if (idxDate === -1 || idxRange === -1) {
-      return Response.json(
-        { ok: false, error: "CONFIG_KPI cần header: DATE | RANGE" },
-        { status: 400 }
+    const found = body.find(x => x.date === date);
+    if (!found) {
+      return NextResponse.json(
+        { ok: false, error: `No RANGE found for date: ${date}, dates`},
+        { status: 404 }
       );
     }
 
-    const map = {};
-    for (let i = 1; i < rows.length; i++) {
-      const d = normDate(rows[i][idxDate]);
-      const r = String(rows[i][idxRange] || "").trim();
-      if (d && r) map[d] = r;
-    }
-
-    const dates = Object.keys(map);
-
-    // ?list=1 => trả list ngày
-    if (list) return Response.json({ ok: true, dates });
-
-    return Response.json({ ok: true, map, dates });
+    return NextResponse.json({ ok: true, date, range: found.range, dates });
   } catch (e) {
-    return Response.json({ ok: false, error: e.message }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: e?.message || String(e) },
+      { status: 500 }
+    );
   }
 }
