@@ -1,187 +1,216 @@
-// app/api/check-kpi/route.js
 import { NextResponse } from "next/server";
-import { readSheetRange, readConfigRanges } from "../_lib/googleSheetsClient";
+import { getSheetsClient } from "../_lib/googleSheetsClient";
 
 export const dynamic = "force-dynamic";
 
-const MILESTONES = ["->9h", "->10h", "->11h", "->12h30", "->13h30", "->14h30", "->15h30", "->16h30"];
-const HOURS_AT = { "->9h": 1, "->10h": 2, "->11h": 3, "->12h30": 4, "->13h30": 5, "->14h30": 6, "->15h30": 7, "->16h30": 8 };
+const MARKS = ["->9h", "->10h", "->11h", "->12h30", "->13h30", "->14h30", "->15h30", "->16h30"];
 
 function norm(s) {
-  return (s ?? "").toString().trim().toUpperCase();
+  return String(s || "")
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/đ/g, "d")
+    .trim();
 }
 
-function toNumber(x) {
-  if (x === null || x === undefined) return 0;
-  const s = x.toString().replace(/,/g, "").trim();
-  if (!s) return 0;
+function parseNumberFlexible(v) {
+  if (v === null || v === undefined || v === "") return NaN;
+  if (typeof v === "number") return v;
+
+  let s = String(v).trim();
+  if (!s) return NaN;
+
+  // bỏ ký tự không cần
+  s = s.replace(/\s+/g, "");
+
+  // nếu dạng 1,08 (thập phân phẩy)
+  const hasComma = s.includes(",");
+  const hasDot = s.includes(".");
+
+  if (hasComma && hasDot) {
+    // đoán dấu thập phân theo vị trí cuối
+    if (s.lastIndexOf(",") > s.lastIndexOf(".")) {
+      // comma decimal, dot thousand
+      s = s.replace(/\./g, "").replace(",", ".");
+    } else {
+      // dot decimal, comma thousand
+      s = s.replace(/,/g, "");
+    }
+  } else if (hasComma && !hasDot) {
+    s = s.replace(",", ".");
+  }
+
+  s = s.replace(/[^\d.-]/g, "");
   const n = Number(s);
-  return Number.isFinite(n) ? n : 0;
+  return Number.isFinite(n) ? n : NaN;
 }
 
-function toPercent(x) {
-  if (x === null || x === undefined) return null;
-  const s = x.toString().trim();
-  if (!s) return null;
+function parsePercentFlexible(v) {
+  if (v === null || v === undefined || v === "") return NaN;
+  if (typeof v === "number") {
+    // nếu 0.9587 thì là 95.87%
+    if (v <= 1) return v * 100;
+    return v;
+  }
+  const s = String(v).trim();
+  if (!s) return NaN;
 
   if (s.includes("%")) {
-    const n = Number(s.replace("%", "").replace(",", "."));
-    return Number.isFinite(n) ? n / 100 : null;
+    const n = parseNumberFlexible(s.replace("%", ""));
+    return Number.isFinite(n) ? n : NaN;
   }
 
-  const n = Number(s.replace(",", "."));
-  if (!Number.isFinite(n)) return null;
-
-  // nếu sheet trả 0.9587 => 95.87%
-  if (n <= 1) return n;
-  // nếu sheet trả 95.87 => 95.87%
-  if (n <= 100) return n / 100;
-  return null;
+  const n = parseNumberFlexible(s);
+  if (!Number.isFinite(n)) return NaN;
+  if (n <= 1) return n * 100;
+  return n;
 }
 
-function pickHeaderRow(values) {
-  // tìm dòng header chứa ít nhất 1 mốc giờ + DM/H
-  for (let r = 0; r < values.length; r++) {
-    const row = values[r] || [];
-    const rowStr = row.map((c) => (c ?? "").toString());
-    const hasMilestone = rowStr.some((c) => MILESTONES.some((m) => c.includes(m)));
-    const hasDmH = rowStr.some((c) => norm(c).includes("DM/H"));
-    if (hasMilestone && hasDmH) return r;
-  }
-  return -1;
-}
-
-function colIndexOf(headerRow, keywords) {
-  const hdr = headerRow.map((c) => norm(c));
-  for (let i = 0; i < hdr.length; i++) {
-    for (const kw of keywords) {
-      if (hdr[i].includes(kw)) return i;
+function findCol(headerRow, includesList) {
+  const H = headerRow.map((x) => norm(x));
+  for (let i = 0; i < H.length; i++) {
+    for (const inc of includesList) {
+      if (H[i].includes(norm(inc))) return i;
     }
   }
   return -1;
 }
 
-function parseLines(values) {
-  const headerRowIndex = pickHeaderRow(values);
-  if (headerRowIndex < 0) {
-    return { lines: [], meta: { message: "Không tìm thấy dòng tiêu đề (phải có '->9h' và 'DM/H')." } };
-  }
-
-  const header = values[headerRowIndex] || [];
-
-  const idxLine = 0; // cột A thường là chuyền (C1..)
-  const idxDmDay = colIndexOf(header, ["DM/NGÀY", "DM/NGAY"]);
-  const idxDmH = colIndexOf(header, ["DM/H"]);
-  const idxHsDat = colIndexOf(header, ["SUẤT ĐẠT TRONG", "SUAT DAT TRONG", "SUAT DAT"]);
-  const idxHsDinhMuc = colIndexOf(header, ["ĐỊNH MỨC TRONG", "DINH MUC TRONG", "DINH MUC"]);
-
-  // milestone cols
-  const milestoneCols = {};
-  for (const m of MILESTONES) {
-    milestoneCols[m] = header.findIndex((c) => (c ?? "").toString().includes(m));
-  }
-
-  const startData = headerRowIndex + 1;
-  const lines = [];
-
-  for (let r = startData; r < values.length; r++) {
-    const row = values[r] || [];
-    const lineName = (row[idxLine] ?? "").toString().trim();
-    if (!lineName) continue;
-
-    // bỏ các dòng TOTAL
-    const up = norm(lineName);
-    if (up.includes("TOTAL")) continue;
-
-    const dmDay = idxDmDay >= 0 ? toNumber(row[idxDmDay]) : 0;
-    const dmH = idxDmH >= 0 ? toNumber(row[idxDmH]) : 0;
-
-    const hsDat = idxHsDat >= 0 ? toPercent(row[idxHsDat]) : null;
-    const hsTarget = idxHsDinhMuc >= 0 ? toPercent(row[idxHsDinhMuc]) : null;
-
-    const actual = {};
-    for (const m of MILESTONES) {
-      const ci = milestoneCols[m];
-      actual[m] = ci >= 0 ? toNumber(row[ci]) : 0;
-    }
-
-    const baseDmH = dmH > 0 ? dmH : (dmDay > 0 ? dmDay / 8 : 0);
-
-    const target = {};
-    const diff = {};
-    const status = {};
-    for (const m of MILESTONES) {
-      const need = Math.round(baseDmH * HOURS_AT[m]); // làm tròn
-      target[m] = need;
-      diff[m] = actual[m] - need;
-
-      if (need === 0) status[m] = "N/A";
-      else if (diff[m] < 0) status[m] = "THIẾU";
-      else if (diff[m] === 0) status[m] = "ĐỦ";
-      else status[m] = "VƯỢT";
-    }
-
-    const latest = "->16h30";
-    const hsStatus =
-      hsDat === null ? "CHƯA CÓ" :
-      (hsTarget ?? 0.9) === 0 ? "CHƯA CÓ" :
-      hsDat >= (hsTarget ?? 0.9) ? "ĐẠT" : "KHÔNG ĐẠT";
-
-    lines.push({
-      line: lineName,
-      dmDay,
-      dmH,
-      baseDmH,
-      actual,
-      target,
-      diff,
-      status,
-      latestMilestone: latest,
-      hsDat,
-      hsTarget: hsTarget ?? 0.9,
-      hsStatus,
-    });
-  }
-
-  return {
-    lines,
-    meta: {
-      headerRowIndex,
-      idxDmDay,
-      idxDmH,
-      idxHsDat,
-      idxHsDinhMuc,
-      milestoneCols,
-    },
-  };
-}
-
-export async function GET(request) {
-  const { searchParams } = new URL(request.url);
-  const date = searchParams.get("date");
-  if (!date) return NextResponse.json({ status: "error", message: "Missing ?date=" }, { status: 400 });
-
+export async function GET(req) {
   try {
-    const configRows = await readConfigRanges();
-    const found = configRows.find((x) => x.date.trim() === date.trim());
-    if (!found) return NextResponse.json({ status: "error", message: "Date not found in CONFIG_KPI" }, { status: 404 });
+    const url = new URL(req.url);
+    const date = url.searchParams.get("date") || "";
+    if (!date) {
+      return NextResponse.json(
+        { status: "error", message: "Missing date" },
+        { status: 400, headers: { "Cache-Control": "no-store" } }
+      );
+    }
 
-    const raw = await readSheetRange(found.range);
-    const parsed = parseLines(raw);
+    const CONFIG_SHEET = process.env.CONFIG_KPI_SHEET_NAME || "CONFIG_KPI";
+    const CONFIG_RANGE = `${CONFIG_SHEET}!A1:B500`;
+    const DEFAULT_HS_TARGET = Number(process.env.DEFAULT_HS_TARGET || 90);
+
+    const { sheets, sheetId } = getSheetsClient();
+
+    // đọc config
+    const cfgResp = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: CONFIG_RANGE });
+    const cfgVals = cfgResp.data.values || [];
+    if (cfgVals.length < 2) throw new Error("CONFIG_KPI trống.");
+
+    const header = cfgVals[0].map((x) => String(x || "").trim().toUpperCase());
+    const idxDate = header.indexOf("DATE");
+    const idxRange = header.indexOf("RANGE");
+    if (idxDate === -1 || idxRange === -1) throw new Error("CONFIG_KPI phải có header DATE | RANGE");
+
+    let targetRange = "";
+    for (let i = 1; i < cfgVals.length; i++) {
+      const r = cfgVals[i] || [];
+      const d = String(r[idxDate] || "").trim();
+      const rr = String(r[idxRange] || "").trim();
+      if (d === date && rr) {
+        targetRange = rr;
+        break;
+      }
+    }
+    if (!targetRange) throw new Error(`Không tìm thấy RANGE cho ngày ${date} trong CONFIG_KPI.`);
+
+    // đọc KPI theo range
+    const kpiResp = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: targetRange });
+    const values = kpiResp.data.values || [];
+    if (!values.length) throw new Error("Range KPI rỗng.");
+
+    // tìm header row có ->9h
+    let headerRowIdx = values.findIndex((row) => (row || []).some((c) => norm(c).includes("->9h")));
+    if (headerRowIdx === -1) headerRowIdx = 0;
+
+    const headerRow = values[headerRowIdx] || [];
+
+    // cột giờ
+    const colMark = {};
+    for (const m of MARKS) {
+      const idx = findCol(headerRow, [m]);
+      colMark[m] = idx;
+    }
+
+    // cột DM/NGÀY
+    let colDmDay = findCol(headerRow, ["dm/ngay", "dm/ngày", "đm/ngay", "đm/ngày", "dmngay"]);
+    // cột DM/H (nhiều sheet chỉ ghi "H" → lấy cột kế bên DM/NGÀY)
+    let colDmHour = findCol(headerRow, ["dm/h", "đm/h"]);
+    if (colDmHour === -1 && colDmDay !== -1) colDmHour = colDmDay + 1;
+
+    // HS đạt + HS định mức (nếu không có sẽ fallback)
+    const colHsDay = findCol(headerRow, ["hieusuattrongngay", "suatdat", "hsdat", "hieusuat"]);
+    const colHsTarget = findCol(headerRow, ["hsdinhmuc", "dinhmuc", "hieusuatdinhmuc"]);
+
+      // nếu không có, dùng DEFAULT_HS_TARGET
+
+    const lines = [];
+    for (let r = headerRowIdx + 1; r < values.length; r++) {
+      const row = values[r] || [];
+      const line = String(row[0] || "").trim();
+      if (!line) continue;
+
+      const dmDay = colDmDay >= 0 ? parseNumberFlexible(row[colDmDay]) : NaN;
+      const dmHour = colDmHour >= 0 ? parseNumberFlexible(row[colDmHour]) : NaN;
+
+      const hourly = {};
+      for (const m of MARKS) {
+        const c = colMark[m];
+        hourly[m] = c >= 0 ? parseNumberFlexible(row[c]) : NaN;
+      }
+
+      // HS đạt: ưu tiên lấy từ cột HS nếu có, không thì tính bằng ->16h30 / DM/NGÀY
+      let hsDay = colHsDay >= 0 ? parsePercentFlexible(row[colHsDay]) : NaN;
+      const latestVal = Number.isFinite(hourly["->16h30"]) ? hourly["->16h30"] : NaN;
+      if (!Number.isFinite(hsDay) && Number.isFinite(latestVal) && Number.isFinite(dmDay) && dmDay > 0) {
+        hsDay = (latestVal / dmDay) * 100;
+      }
+
+      // HS target
+      let hsTarget = colHsTarget >= 0 ? parsePercentFlexible(row[colHsTarget]) : NaN;
+      if (!Number.isFinite(hsTarget)) hsTarget = DEFAULT_HS_TARGET;
+
+      let hsStatus = "CHƯA CÓ";
+      if (Number.isFinite(hsDay)) {
+        hsStatus = hsDay >= hsTarget ? "ĐẠT" : "KHÔNG ĐẠT";
+      }
+
+      lines.push({
+        line,
+        dmDay: Number.isFinite(dmDay) ? dmDay : 0,
+        dmHour: Number.isFinite(dmHour) ? dmHour : 0,
+        hourly: Object.fromEntries(
+          MARKS.map((m) => [m, Number.isFinite(hourly[m]) ? hourly[m] : NaN])
+        ),
+        hsDay: Number.isFinite(hsDay) ? hsDay : null,
+        hsTarget,
+        hsStatus,
+      });
+    }
+
+    // fix NaN to null for hourly
+    for (const l of lines) {
+      for (const m of MARKS) {
+        const v = l.hourly[m];
+        l.hourly[m] = Number.isFinite(v) ? v : null;
+      }
+    }
 
     return NextResponse.json(
       {
         status: "success",
         date,
-        range: found.range,
-        rawCount: raw.length,
-        ...parsed,
+        range: targetRange,
+        latestMark: "->16h30",
+        marks: MARKS,
+        lines,
       },
       { headers: { "Cache-Control": "no-store" } }
     );
   } catch (e) {
     return NextResponse.json(
-      { status: "error", message: e?.message || "Unknown error" },
+      { status: "error", message: e?.message || String(e) },
       { status: 500, headers: { "Cache-Control": "no-store" } }
     );
   }

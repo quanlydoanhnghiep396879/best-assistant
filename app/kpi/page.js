@@ -1,7 +1,6 @@
-// app/kpi/page.js
-import KpiDashboardClient from "./KpiDashboardClient";
+import dynamic from "next/dynamic";
 
-export const dynamic = "force-dynamic";
+const KpiDashboardClient = dynamic(() => import("./KpiDashboardClient"), { ssr: false });
 
 export default function Page() {
   return <KpiDashboardClient />;
