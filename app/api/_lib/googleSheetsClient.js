@@ -10,7 +10,7 @@ function mustEnv(name) {
 
 function loadServiceAccount() {
   // Khuyến nghị: để JSON service account dạng Base64 trong env
-  const b64 = mustEnv("GOOGLE_SERVICE_ACCOUNT_JSON_BASE64");
+  const b64 = mustEnv("GOOGLE_SERVICE_ACCOUNT_BASE64");
   const jsonStr = Buffer.from(b64, "base64").toString("utf8");
   const creds = JSON.parse(jsonStr);
 
