@@ -7,27 +7,39 @@ function pct(x) {
   return (x * 100).toFixed(2) + "%";
 }
 
-function statusClass(s) {
+function isGreenStatus(s) {
   const up = String(s || "").toUpperCase();
-
-  const green = ["VƯỢT", "ĐỦ", "ĐẠT"];
-  const red = ["THIẾU", "CHƯA ĐẠT", "KHÔNG ĐẠT", "CHƯA CÓ"];
-
-  if (green.some((k) => up.includes(k))) {
-    return "bg-green-100 text-green-700 border-green-300";
-  }
-  if (red.some((k) => up.includes(k))) {
-    return "bg-red-100 text-red-700 border-red-300";
-  }
-  return "bg-gray-100 text-gray-700 border-gray-300";
+  return ["VƯỢT","ĐỦ","ĐẠT"].some(k => up.includes(k));
+}
+function isRedStatus(s) {
+  const up = String(s || "").toUpperCase();
+  return ["THIẾU","CHƯA ĐẠT","KHÔNG ĐẠT","CHƯA CÓ"].some(k => up.includes(k));
 }
 
 function StatusPill({ value }) {
-  return (
-    <span className={`inline-block px-2 py-0.5 rounded border text-xs font-semibold ${statusClass(value)}`}>
-      {value || "—"}
-    </span>
-  );
+  const v = value || "—";
+  const style = {
+    display: "inline-block",
+    padding: "2px 8px",
+    borderRadius: 999,
+    border: "1px solid #ccc",
+    fontSize: 12,
+    fontWeight: 700,
+    background: "#f3f4f6",
+    color: "#374151",
+  };
+
+  if (isGreenStatus(v)) {
+    style.background = "#dcfce7";
+    style.border = "1px solid #86efac";
+    style.color = "#166534";
+  } else if (isRedStatus(v)) {
+    style.background = "#fee2e2";
+    style.border = "1px solid #fca5a5";
+    style.color = "#991b1b";
+  }
+
+  return <span style={style}>{v}</span>;
 }
 
 export default function KpiDashboardClient() {
@@ -46,7 +58,7 @@ export default function KpiDashboardClient() {
     const j = await r.json();
     if (j.status !== "success") throw new Error(j.message || "Config error");
     setDates(j.dates || []);
-    if (!selectedDate) setSelectedDate(j.dates?.[j.dates.length - 1] || "");
+    setSelectedDate((prev) => prev || (j.dates?.[j.dates.length - 1] || ""));
   }
 
   async function loadData(d) {
@@ -57,14 +69,12 @@ export default function KpiDashboardClient() {
     if (j.status !== "success") throw new Error(j.message || "Load data error");
     setData(j);
 
-    // auto select line
     const firstLine = j.lines?.[0]?.line || "";
     setSelectedLine((prev) => prev || firstLine);
   }
 
   useEffect(() => {
     loadConfig().catch((e) => setErr(String(e.message || e)));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -86,7 +96,7 @@ export default function KpiDashboardClient() {
   }, [lines, q]);
 
   const current = useMemo(() => {
-    return (lines || []).find((x) => x.line === selectedLine) || null;
+    return lines.find((x) => x.line === selectedLine) || null;
   }, [lines, selectedLine]);
 
   const marks = data?.marks || [];
@@ -114,74 +124,81 @@ export default function KpiDashboardClient() {
   }, [current, marks]);
 
   return (
-    <div className="p-6">
-      <h1 className="text-4xl font-extrabold mb-2">KPI Dashboard</h1>
-      <div className="text-gray-700 mb-4">Chọn ngày để xem so sánh lũy tiến theo giờ và hiệu suất ngày.</div>
+    <div style={{ padding: 24 }}>
+      <h1 style={{ fontSize: 44, fontWeight: 900, marginBottom: 6 }}>KPI Dashboard</h1>
+      <div style={{ color: "#374151", marginBottom: 16 }}>
+        Chọn ngày để xem so sánh lũy tiến theo giờ và hiệu suất ngày.
+      </div>
 
-      <div className="flex items-center gap-3 mb-4">
-        <div className="font-semibold">Ngày:</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
+        <div style={{ fontWeight: 800 }}>Ngày:</div>
         <select
-          className="border rounded px-2 py-1"
           value={selectedDate}
           onChange={(e) => setSelectedDate(e.target.value)}
+          style={{ border: "1px solid #d1d5db", borderRadius: 8, padding: "6px 10px" }}
         >
           <option value="">—</option>
-          {dates.map((d) => (
-            <option key={d} value={d}>{d}</option>
-          ))}
+          {dates.map((d) => <option key={d} value={d}>{d}</option>)}
         </select>
 
         <button
-          className="border rounded px-3 py-1 font-semibold"
           onClick={() => loadData(selectedDate).catch((e) => setErr(String(e.message || e)))}
           disabled={!selectedDate}
+          style={{
+            border: "1px solid #111827",
+            borderRadius: 8,
+            padding: "6px 12px",
+            fontWeight: 800,
+            cursor: selectedDate ? "pointer" : "not-allowed",
+          }}
         >
           Xem dữ liệu
         </button>
 
-        <label className="flex items-center gap-2">
+        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
           <span>Tự cập nhật (1 phút)</span>
         </label>
 
         {data?.updatedAt && (
-          <div className="text-gray-600">
+          <div style={{ color: "#6b7280" }}>
             Cập nhật: {new Date(data.updatedAt).toLocaleTimeString("vi-VN")} {new Date(data.updatedAt).toLocaleDateString("vi-VN")}
           </div>
         )}
       </div>
 
-      {err && <div className="text-red-600 font-semibold mb-4">Lỗi: {err}</div>}
+      {err && <div style={{ color: "#dc2626", fontWeight: 900, marginBottom: 12 }}>Lỗi: {err}</div>}
 
-      <div className="grid grid-cols-2 gap-6">
-        {/* LEFT: DAILY */}
-        <div className="border rounded-lg p-4">
-          <div className="flex items-center justify-between mb-3">
-            <div className="text-xl font-bold">So sánh hiệu suất ngày</div>
-            <div className="text-gray-600">Mốc cuối: -&gt;16h30</div>
+      {/* GRID 2 CỘT (CSS CỨNG) */}
+      <div className="kpiGrid">
+        {/* LEFT */}
+        <div className="card">
+          <div className="cardHeader">
+            <div className="cardTitle">So sánh hiệu suất ngày</div>
+            <div className="muted">Mốc cuối: -&gt;16h30</div>
           </div>
 
-          <div className="overflow-auto">
-            <table className="w-full text-sm">
+          <div className="tableWrap">
+            <table className="tbl">
               <thead>
-                <tr className="border-b">
-                  <th className="text-left py-2">Chuyền</th>
-                  <th className="text-left py-2">HS đạt</th>
-                  <th className="text-left py-2">HS định mức</th>
-                  <th className="text-left py-2">Trạng thái</th>
+                <tr>
+                  <th>Chuyền</th>
+                  <th>HS đạt</th>
+                  <th>HS định mức</th>
+                  <th>Trạng thái</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredLines.map((x) => (
                   <tr
                     key={x.line}
-                    className={`border-b hover:bg-gray-50 cursor-pointer ${x.line === selectedLine ? "bg-gray-50" : ""}`}
                     onClick={() => setSelectedLine(x.line)}
+                    className={x.line === selectedLine ? "rowActive" : ""}
                   >
-                    <td className="py-2 font-semibold">{x.line}</td>
-                    <td className="py-2">{pct(x.hsDay)}</td>
-                    <td className="py-2">{pct(x.hsTarget)}</td>
-                    <td className="py-2"><StatusPill value={x.hsStatus} /></td>
+                    <td style={{ fontWeight: 800 }}>{x.line}</td>
+                    <td>{pct(x.hsDay)}</td>
+                    <td>{pct(x.hsTarget)}</td>
+                    <td><StatusPill value={x.hsStatus} /></td>
                   </tr>
                 ))}
               </tbody>
@@ -189,66 +206,105 @@ export default function KpiDashboardClient() {
           </div>
         </div>
 
-        {/* RIGHT: HOURLY */}
-        <div className="border rounded-lg p-4">
-          <div className="text-xl font-bold mb-3">So sánh lũy tiến theo giờ (chuyền: {selectedLine || "—"})</div>
+        {/* RIGHT */}
+        <div className="card">
+          <div className="cardHeader" style={{ marginBottom: 10 }}>
+            <div className="cardTitle">So sánh lũy tiến theo giờ (chuyền: {selectedLine || "—"})</div>
+          </div>
 
           <input
-            className="border rounded px-2 py-1 w-56 mb-3"
-            placeholder="Tìm chuyền..."
             value={q}
             onChange={(e) => setQ(e.target.value)}
+            placeholder="Tìm chuyền..."
+            style={{ width: 240, border: "1px solid #d1d5db", borderRadius: 8, padding: "6px 10px", marginBottom: 10 }}
           />
 
-          <div className="flex flex-wrap gap-2 mb-3">
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
             {filteredLines.map((x) => (
               <button
                 key={x.line}
-                className={`border rounded-full px-3 py-1 text-sm ${x.line === selectedLine ? "bg-black text-white" : ""}`}
                 onClick={() => setSelectedLine(x.line)}
+                style={{
+                  border: "1px solid #d1d5db",
+                  borderRadius: 999,
+                  padding: "4px 10px",
+                  fontWeight: 800,
+                  background: x.line === selectedLine ? "#111827" : "white",
+                  color: x.line === selectedLine ? "white" : "#111827",
+                }}
               >
                 {x.line}
               </button>
             ))}
           </div>
 
-          <div className="text-sm font-semibold mb-3">
-            DM/H: {Number.isFinite(current?.dmHour) ? current.dmHour.toFixed(2) : "—"} &nbsp;&nbsp;•&nbsp;&nbsp;
+          <div style={{ fontWeight: 800, marginBottom: 12 }}>
+            DM/H: {Number.isFinite(current?.dmHour) ? current.dmHour.toFixed(2) : "—"} &nbsp; • &nbsp;
             DM/NGÀY: {Number.isFinite(current?.dmDay) ? current.dmDay : "—"}
           </div>
 
-          <div className="overflow-auto">
-            <table className="w-full text-sm">
+          <div className="tableWrap">
+            <table className="tbl">
               <thead>
-                <tr className="border-b">
-                  <th className="text-left py-2">Mốc</th>
-                  <th className="text-left py-2">Lũy tiến</th>
-                  <th className="text-left py-2">DM lũy tiến</th>
-                  <th className="text-left py-2">Chênh</th>
-                  <th className="text-left py-2">Trạng thái</th>
+                <tr>
+                  <th>Mốc</th>
+                  <th>Lũy tiến</th>
+                  <th>DM lũy tiến</th>
+                  <th>Chênh</th>
+                  <th>Trạng thái</th>
                 </tr>
               </thead>
               <tbody>
                 {hourlyRows.map((r) => (
-                  <tr key={r.mark} className="border-b">
-                    <td className="py-2">{r.mark}</td>
-                    <td className="py-2">{Number.isFinite(r.actual) ? r.actual : "—"}</td>
-                    <td className="py-2">{Number.isFinite(r.dmCum) ? Math.round(r.dmCum) : "—"}</td>
-                    <td className="py-2">{Number.isFinite(r.diff) ? (r.diff > 0 ? `+${Math.round(r.diff)}` : `${Math.round(r.diff)}`) : "—"}</td>
-                    <td className="py-2"><StatusPill value={r.status} /></td>
+                  <tr key={r.mark}>
+                    <td>{r.mark}</td>
+                    <td>{Number.isFinite(r.actual) ? r.actual : "—"}</td>
+                    <td>{Number.isFinite(r.dmCum) ? Math.round(r.dmCum) : "—"}</td>
+                    <td>{Number.isFinite(r.diff) ? (r.diff > 0 ? `+${Math.round(r.diff)}` : `${Math.round(r.diff)}`) : "—"}</td>
+                    <td><StatusPill value={r.status} /></td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
 
-          {data?.parsed && (
-            <div className="text-xs text-gray-500 mt-3">
-              Debug parse: DM/NGÀY col={data.parsed.colDmDay}, ĐM/H col={data.parsed.colDmHour}
-            </div>
-          )}
+          <div style={{ marginTop: 10, fontSize: 12, color: "#6b7280" }}>
+            Debug parse: DM/NGÀY col={data?.parsed?.colDmDay}, ĐM/H col={data?.parsed?.colDmHour}
+          </div>
         </div>
       </div>
+
+      <style jsx>{`
+        .kpiGrid{
+          display:grid;
+          grid-template-columns: 1.35fr 1fr;
+          gap: 20px;
+          align-items:start;
+        }
+        @media (max-width: 1024px){
+          .kpiGrid{ grid-template-columns: 1fr; }
+        }
+        .card{
+          border: 1px solid #e5e7eb;
+          border-radius: 12px;
+          padding: 14px;
+          background: white;
+        }
+        .cardHeader{
+          display:flex;
+          align-items:center;
+          justify-content:space-between;
+          margin-bottom: 10px;
+        }
+        .cardTitle{ font-size: 20px; font-weight: 900; }
+        .muted{ color:#6b7280; font-weight:600; }
+        .tableWrap{ overflow:auto; }
+        .tbl{ width:100%; border-collapse: collapse; font-size: 14px; }
+        .tbl th{ text-align:left; padding: 10px 8px; border-bottom: 1px solid #e5e7eb; }
+        .tbl td{ padding: 10px 8px; border-bottom: 1px solid #f3f4f6; }
+        .tbl tr:hover{ background:#f9fafb; cursor:pointer; }
+        .rowActive{ background:#f3f4f6; }
+      `}</style>
     </div>
   );
 }
