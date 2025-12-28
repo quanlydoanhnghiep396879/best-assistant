@@ -1,6 +1,4 @@
-import dynamic from "next/dynamic";
-
-const KpiDashboardClient = dynamic(() => import("./KpiDashboardClient"), { ssr: false });
+import KpiDashboardClient from "./KpiDashboardClient";
 
 export default function Page() {
   return <KpiDashboardClient />;

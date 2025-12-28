@@ -1,41 +1,37 @@
 import { google } from "googleapis";
 
-function getServiceAccount() {
-  const rawJson = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+function loadServiceAccount() {
   const b64 = process.env.GOOGLE_SERVICE_ACCOUNT_BASE64;
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
 
-  if (rawJson && rawJson.trim()) {
-    try {
-      return JSON.parse(rawJson);
-    } catch (e) {
-      throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON parse lỗi (JSON không hợp lệ).");
-    }
+  if (b64) {
+    const jsonStr = Buffer.from(b64, "base64").toString("utf8");
+    const obj = JSON.parse(jsonStr);
+    if (obj.private_key) obj.private_key = obj.private_key.replace(/\\n/g, "\n");
+    return obj;
   }
 
-  if (b64 && b64.trim()) {
-    try {
-      const decoded = Buffer.from(b64, "base64").toString("utf-8");
-      return JSON.parse(decoded);
-    } catch (e) {
-      throw new Error("GOOGLE_SERVICE_ACCOUNT_BASE64 decode/parse lỗi.");
-    }
+  if (raw) {
+    const obj = JSON.parse(raw);
+    if (obj.private_key) obj.private_key = obj.private_key.replace(/\\n/g, "\n");
+    return obj;
   }
 
   throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_BASE64");
 }
 
-export function getSheetsClient() {
-  const sheetId = process.env.GOOGLE_SHEET_ID || process.env.GOOGLE_SHEETS_ID; // fallback nếu lỡ đặt tên cũ
-  if (!sheetId) throw new Error("Missing GOOGLE_SHEET_ID");
-
-  const sa = getServiceAccount();
-
+export async function getSheetsClient() {
+  const sa = loadServiceAccount();
   const auth = new google.auth.JWT({
     email: sa.client_email,
-    key: (sa.private_key || "").replace(/\\n/g, "\n"),
+    key: sa.private_key,
     scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
   });
+  await auth.authorize();
+  return google.sheets({ version: "v4", auth });
+}
 
-  const sheets = google.sheets({ version: "v4", auth });
-  return { sheets, sheetId };
+export function getSheetIdEnv() {
+  // bạn dùng GOOGLE_SHEET_ID (không phải GOOGLE_SHEETS_ID)
+  return process.env.GOOGLE_SHEET_ID || "";
 }

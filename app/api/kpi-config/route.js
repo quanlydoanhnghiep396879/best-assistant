@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
-import { getSheetsClient } from "../_lib/googleSheetsClient";
+import { getSheetsClient, getSheetIdEnv } from "../_lib/googleSheetsClient";
 
 export const dynamic = "force-dynamic";
 
-function serialToDateVN(serial) {
-  // Google/Excel serial: 1899-12-30
-  const base = new Date(Date.UTC(1899, 11, 30));
-  const d = new Date(base.getTime() + Number(serial) * 86400000);
+function serialToDDMMYYYY(serial) {
+  // Google Sheets serial date ~ Excel serial (base 1899-12-30)
+  const base = Date.UTC(1899, 11, 30);
+  const ms = base + Number(serial) * 86400000;
+  const d = new Date(ms);
   const dd = String(d.getUTCDate()).padStart(2, "0");
   const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
   const yyyy = d.getUTCFullYear();
@@ -14,82 +15,64 @@ function serialToDateVN(serial) {
 }
 
 function normalizeDateCell(v) {
-  if (v === null || v === undefined || v === "") return "";
-  if (typeof v === "number") return serialToDateVN(v);
-
+  if (v == null || v === "") return null;
+  // numeric date
+  if (typeof v === "number" || /^[0-9]+(\.[0-9]+)?$/.test(String(v))) {
+    const n = Number(v);
+    if (Number.isFinite(n) && n > 1000) return serialToDDMMYYYY(n);
+  }
+  // string date
   const s = String(v).trim();
-  if (!s) return "";
-
-  // nếu là số dạng "46014"
-  if (/^\d+(\.\d+)?$/.test(s)) return serialToDateVN(Number(s));
-
-  // dạng dd/mm/yyyy
-  if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(s)) {
-    const [d, m, y] = s.split("/");
-    return `${String(d).padStart(2, "0")}/${String(m).padStart(2, "0")}/${y}`;
-  }
-
-  // dạng yyyy-mm-dd
-  if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(s)) {
-    const [y, m, d] = s.split("-");
-    return `${String(d).padStart(2, "0")}/${String(m).padStart(2, "0")}/${y}`;
-  }
-
+  if (!s) return null;
   return s;
 }
 
 export async function GET() {
   try {
-    const CONFIG_SHEET = process.env.CONFIG_KPI_SHEET_NAME || "CONFIG_KPI";
-    const range = `${CONFIG_SHEET}!A1:B200`;
-
-    const { sheets, sheetId } = getSheetsClient();
-    const resp = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range });
-    const values = resp.data.values || [];
-
-    if (values.length < 2) {
-      return NextResponse.json(
-        { status: "success", dates: [], configRows: [] },
-        { headers: { "Cache-Control": "no-store" } }
-      );
+    const spreadsheetId = getSheetIdEnv();
+    if (!spreadsheetId) {
+      return NextResponse.json({ status: "error", message: "Missing GOOGLE_SHEET_ID" }, { status: 400 });
     }
 
-    const header = values[0].map((x) => String(x || "").trim().toUpperCase());
-    const idxDate = header.indexOf("DATE");
-    const idxRange = header.indexOf("RANGE");
+    const configSheet = process.env.CONFIG_KPI_SHEET_NAME || "CONFIG_KPI";
+    const sheets = await getSheetsClient();
 
-    if (idxDate === -1 || idxRange === -1) {
-      return NextResponse.json(
-        { status: "error", message: "CONFIG_KPI phải có header: DATE | RANGE" },
-        { status: 400, headers: { "Cache-Control": "no-store" } }
-      );
-    }
+    const range = `${configSheet}!A:B`;
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range,
+      valueRenderOption: "UNFORMATTED_VALUE",
+      dateTimeRenderOption: "SERIAL_NUMBER",
+    });
 
-    const configRows = [];
+    const values = res.data.values || [];
+    // Expect:
+    // A1=DATE, B1=RANGE
+    const rows = [];
     for (let i = 1; i < values.length; i++) {
-      const row = values[i] || [];
-      const date = normalizeDateCell(row[idxDate]);
-      const r = String(row[idxRange] || "").trim();
-      if (date && r) configRows.push({ date, range: r });
+      const a = values[i]?.[0];
+      const b = values[i]?.[1];
+      const dateStr = normalizeDateCell(a);
+      const rangeStr = b ? String(b).trim() : "";
+      if (dateStr && rangeStr) rows.push({ date: dateStr, range: rangeStr });
     }
 
-    // sort theo ngày
+    // sort by date (dd/mm/yyyy)
     const toKey = (d) => {
-      const [dd, mm, yy] = d.split("/");
-      return `${yy}-${mm}-${dd}`;
+      const [dd, mm, yyyy] = d.split("/").map((x) => Number(x));
+      return yyyy * 10000 + mm * 100 + dd;
     };
-    configRows.sort((a, b) => toKey(a.date).localeCompare(toKey(b.date)));
+    rows.sort((x, y) => toKey(x.date) - toKey(y.date));
 
-    const dates = Array.from(new Set(configRows.map((x) => x.date)));
-
-    return NextResponse.json(
-      { status: "success", dates, configRows },
-      { headers: { "Cache-Control": "no-store" } }
-    );
+    return NextResponse.json({
+      status: "success",
+      configSheet,
+      dates: rows.map((r) => r.date),
+      configRows: rows,
+    }, {
+      headers: { "Cache-Control": "no-store" }
+    });
   } catch (e) {
-    return NextResponse.json(
-      { status: "error", message: e?.message || String(e) },
-      { status: 500, headers: { "Cache-Control": "no-store" } }
-    );
+    return NextResponse.json({ status: "error", message: String(e?.message || e) }, { status: 500 });
   }
 }

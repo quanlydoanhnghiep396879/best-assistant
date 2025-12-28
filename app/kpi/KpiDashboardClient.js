@@ -1,319 +1,251 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-const MARKS = ["->9h", "->10h", "->11h", "->12h30", "->13h30", "->14h30", "->15h30", "->16h30"];
-
-function fmtPercent(v) {
-  if (v === null || v === undefined || Number.isNaN(v)) return "—";
-  return `${Number(v).toFixed(2)}%`;
+function pct(x) {
+  if (x == null) return "—";
+  return (x * 100).toFixed(2) + "%";
 }
 
-function safeText(v) {
-  return (v ?? "").toString();
+function statusClass(s) {
+  const up = String(s || "").toUpperCase();
+
+  const green = ["VƯỢT", "ĐỦ", "ĐẠT"];
+  const red = ["THIẾU", "CHƯA ĐẠT", "KHÔNG ĐẠT", "CHƯA CÓ"];
+
+  if (green.some((k) => up.includes(k))) {
+    return "bg-green-100 text-green-700 border-green-300";
+  }
+  if (red.some((k) => up.includes(k))) {
+    return "bg-red-100 text-red-700 border-red-300";
+  }
+  return "bg-gray-100 text-gray-700 border-gray-300";
+}
+
+function StatusPill({ value }) {
+  return (
+    <span className={`inline-block px-2 py-0.5 rounded border text-xs font-semibold ${statusClass(value)}`}>
+      {value || "—"}
+    </span>
+  );
 }
 
 export default function KpiDashboardClient() {
-  const [configRows, setConfigRows] = useState([]); // [{date, range}]
   const [dates, setDates] = useState([]);
   const [selectedDate, setSelectedDate] = useState("");
-  const [loadingConfig, setLoadingConfig] = useState(false);
+  const [auto, setAuto] = useState(true);
 
-  const [loadingData, setLoadingData] = useState(false);
-  const [error, setError] = useState("");
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState("");
 
-  const [data, setData] = useState(null); // payload từ /api/check-kpi
+  const [q, setQ] = useState("");
   const [selectedLine, setSelectedLine] = useState("");
 
-  const [autoRefresh, setAutoRefresh] = useState(true);
-  const [lastUpdated, setLastUpdated] = useState("");
-
-  const [lineSearch, setLineSearch] = useState("");
-
-  const refreshTimer = useRef(null);
-
-  async function fetchConfig() {
-    setLoadingConfig(true);
-    setError("");
-    try {
-      const res = await fetch(`/api/kpi-config?t=${Date.now()}`, { method: "GET" });
-      const json = await res.json();
-      if (!res.ok || json.status !== "success") throw new Error(json.message || "Không đọc được config.");
-
-      setConfigRows(json.configRows || []);
-      setDates(json.dates || []);
-      if ((json.dates || []).length > 0) {
-        setSelectedDate((prev) => prev || json.dates[0]); // auto chọn ngày đầu
-      }
-    } catch (e) {
-      setError(e?.message || String(e));
-    } finally {
-      setLoadingConfig(false);
-    }
+  async function loadConfig() {
+    const r = await fetch("/api/kpi-config", { cache: "no-store" });
+    const j = await r.json();
+    if (j.status !== "success") throw new Error(j.message || "Config error");
+    setDates(j.dates || []);
+    if (!selectedDate) setSelectedDate(j.dates?.[j.dates.length - 1] || "");
   }
 
-  async function fetchData(dateStr) {
-    if (!dateStr) return;
-    setLoadingData(true);
-    setError("");
-    try {
-      const res = await fetch(`/api/check-kpi?date=${encodeURIComponent(dateStr)}&t=${Date.now()}`, {
-        method: "GET",
-      });
-      const json = await res.json();
-      if (!res.ok || json.status !== "success") throw new Error(json.message || "Không đọc được KPI.");
+  async function loadData(d) {
+    if (!d) return;
+    setErr("");
+    const r = await fetch(`/api/check-kpi?date=${encodeURIComponent(d)}`, { cache: "no-store" });
+    const j = await r.json();
+    if (j.status !== "success") throw new Error(j.message || "Load data error");
+    setData(j);
 
-      setData(json);
-      const lines = (json.lines || []).map((x) => x.line);
-      setSelectedLine((prev) => (prev && lines.includes(prev) ? prev : (lines[0] || "")));
-
-      const now = new Date();
-      const pad = (n) => String(n).padStart(2, "0");
-      setLastUpdated(`${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())} ${pad(now.getDate())}/${pad(now.getMonth() + 1)}/${now.getFullYear()}`);
-    } catch (e) {
-      setData(null);
-      setError(e?.message || String(e));
-    } finally {
-      setLoadingData(false);
-    }
+    // auto select line
+    const firstLine = j.lines?.[0]?.line || "";
+    setSelectedLine((prev) => prev || firstLine);
   }
 
-  // load config lần đầu
   useEffect(() => {
-    fetchConfig();
+    loadConfig().catch((e) => setErr(String(e.message || e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // auto refresh 1 phút
   useEffect(() => {
-    if (refreshTimer.current) clearInterval(refreshTimer.current);
-    if (!autoRefresh || !selectedDate) return;
+    if (!auto) return;
+    if (!selectedDate) return;
 
-    refreshTimer.current = setInterval(() => {
-      fetchData(selectedDate);
-    }, 60 * 1000);
+    const t = setInterval(() => {
+      loadData(selectedDate).catch((e) => setErr(String(e.message || e)));
+    }, 60_000);
 
-    return () => {
-      if (refreshTimer.current) clearInterval(refreshTimer.current);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoRefresh, selectedDate]);
+    return () => clearInterval(t);
+  }, [auto, selectedDate]);
 
-  const lines = useMemo(() => (data?.lines || []), [data]);
-  const lineMap = useMemo(() => {
-    const m = new Map();
-    for (const l of lines) m.set(l.line, l);
-    return m;
-  }, [lines]);
-
+  const lines = data?.lines || [];
   const filteredLines = useMemo(() => {
-    const q = lineSearch.trim().toLowerCase();
-    if (!q) return lines;
-    return lines.filter((x) => x.line.toLowerCase().includes(q));
-  }, [lines, lineSearch]);
+    const s = q.trim().toUpperCase();
+    if (!s) return lines;
+    return lines.filter((x) => String(x.line).toUpperCase().includes(s));
+  }, [lines, q]);
 
-  const currentLine = selectedLine ? lineMap.get(selectedLine) : null;
+  const current = useMemo(() => {
+    return (lines || []).find((x) => x.line === selectedLine) || null;
+  }, [lines, selectedLine]);
 
-  const hourlyCompareRows = useMemo(() => {
-    if (!currentLine) return [];
+  const marks = data?.marks || [];
 
-    const dmDay = Number(currentLine.dmDay || 0);
-    const dmHourRaw = Number(currentLine.dmHour || 0);
+  const hourlyRows = useMemo(() => {
+    if (!current) return [];
+    const dmHour = Number.isFinite(current.dmHour) ? current.dmHour : null;
 
-    // nếu DM/H không có thì fallback DM/NGÀY / 8
-    const dmHour = dmHourRaw > 0 ? dmHourRaw : (dmDay > 0 ? (dmDay / 8) : 0);
-
-    const rows = MARKS.map((mark, idx) => {
-      const i = idx + 1; // mốc thứ i
-      const actual = currentLine.hourly?.[mark];
-      const expected = dmHour > 0 ? Math.round(dmHour * i) : 0;
-
-      const actualNum = (actual === null || actual === undefined || actual === "" || Number.isNaN(Number(actual)))
-        ? null
-        : Number(actual);
-
-      const diff = actualNum === null ? null : (actualNum - expected);
+    return marks.map((m, idx) => {
+      const actual = current.hourly?.[m];
+      const dmCum = Number.isFinite(dmHour) ? dmHour * (idx + 1) : null;
 
       let status = "N/A";
-      if (actualNum !== null) {
-        if (diff < 0) status = "THIẾU";
-        else if (diff === 0) status = "ĐỦ";
-        else status = "VƯỢT";
+      let diff = null;
+
+      if (Number.isFinite(dmCum) && dmCum > 0 && Number.isFinite(actual)) {
+        diff = actual - dmCum;
+        if (diff === 0) status = "ĐỦ";
+        else if (diff > 0) status = "VƯỢT";
+        else status = "THIẾU";
       }
 
-      return {
-        mark,
-        actual: actualNum,
-        expected,
-        diff,
-        status,
-      };
+      return { mark: m, actual, dmCum, diff, status };
     });
-
-    return rows;
-  }, [currentLine]);
+  }, [current, marks]);
 
   return (
-    <div style={{ padding: 18, fontFamily: "Arial, sans-serif" }}>
-      <h1 style={{ margin: 0 }}>KPI Dashboard</h1>
-      <p style={{ marginTop: 8, color: "#444" }}>
-        Chọn ngày để xem so sánh lũy tiến theo giờ và hiệu suất ngày.
-      </p>
+    <div className="p-6">
+      <h1 className="text-4xl font-extrabold mb-2">KPI Dashboard</h1>
+      <div className="text-gray-700 mb-4">Chọn ngày để xem so sánh lũy tiến theo giờ và hiệu suất ngày.</div>
 
-      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginTop: 10 }}>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <b>Ngày:</b>
-          <select
-            disabled={loadingConfig || dates.length === 0}
-            value={selectedDate}
-            onChange={(e) => setSelectedDate(e.target.value)}
-            style={{ padding: "6px 8px", minWidth: 160 }}
-          >
-            {dates.length === 0 ? (
-              <option>Đang tải ngày...</option>
-            ) : (
-              dates.map((d) => (
-                <option key={d} value={d}>{d}</option>
-              ))
-            )}
-          </select>
-        </div>
+      <div className="flex items-center gap-3 mb-4">
+        <div className="font-semibold">Ngày:</div>
+        <select
+          className="border rounded px-2 py-1"
+          value={selectedDate}
+          onChange={(e) => setSelectedDate(e.target.value)}
+        >
+          <option value="">—</option>
+          {dates.map((d) => (
+            <option key={d} value={d}>{d}</option>
+          ))}
+        </select>
 
         <button
-          disabled={!selectedDate || loadingData}
-          onClick={() => fetchData(selectedDate)}
-          style={{ padding: "8px 14px", cursor: "pointer" }}
+          className="border rounded px-3 py-1 font-semibold"
+          onClick={() => loadData(selectedDate).catch((e) => setErr(String(e.message || e)))}
+          disabled={!selectedDate}
         >
-          {loadingData ? "Đang tải..." : "Xem dữ liệu"}
+          Xem dữ liệu
         </button>
 
-        <label style={{ display: "flex", gap: 8, alignItems: "center", cursor: "pointer" }}>
-          <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} />
-          Tự cập nhật (1 phút)
+        <label className="flex items-center gap-2">
+          <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
+          <span>Tự cập nhật (1 phút)</span>
         </label>
 
-        {lastUpdated ? <span style={{ color: "#666" }}>Cập nhật: <b>{lastUpdated}</b></span> : null}
+        {data?.updatedAt && (
+          <div className="text-gray-600">
+            Cập nhật: {new Date(data.updatedAt).toLocaleTimeString("vi-VN")} {new Date(data.updatedAt).toLocaleDateString("vi-VN")}
+          </div>
+        )}
       </div>
 
-      {error ? (
-        <div style={{ marginTop: 10, color: "red" }}>
-          <b>Lỗi:</b> {error}
-        </div>
-      ) : null}
+      {err && <div className="text-red-600 font-semibold mb-4">Lỗi: {err}</div>}
 
-      {/* 2 bảng song song */}
-      <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 16, marginTop: 14 }}>
-        {/* LEFT: hiệu suất ngày */}
-        <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-            <h3 style={{ margin: 0 }}>So sánh hiệu suất ngày</h3>
-            <span style={{ color: "#666" }}>Mốc cuối: <b>{data?.latestMark || "->16h30"}</b></span>
+      <div className="grid grid-cols-2 gap-6">
+        {/* LEFT: DAILY */}
+        <div className="border rounded-lg p-4">
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-xl font-bold">So sánh hiệu suất ngày</div>
+            <div className="text-gray-600">Mốc cuối: -&gt;16h30</div>
           </div>
 
-          <div style={{ overflow: "auto", marginTop: 10, maxHeight: 520 }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+          <div className="overflow-auto">
+            <table className="w-full text-sm">
               <thead>
-                <tr>
-                  {["Chuyền", "HS đạt", "HS định mức", "Trạng thái"].map((h) => (
-                    <th key={h} style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: "8px 6px" }}>{h}</th>
-                  ))}
+                <tr className="border-b">
+                  <th className="text-left py-2">Chuyền</th>
+                  <th className="text-left py-2">HS đạt</th>
+                  <th className="text-left py-2">HS định mức</th>
+                  <th className="text-left py-2">Trạng thái</th>
                 </tr>
               </thead>
               <tbody>
-                {lines.length === 0 ? (
-                  <tr><td colSpan={4} style={{ padding: 10, color: "#666" }}>Chưa có dữ liệu. Hãy chọn ngày rồi bấm “Xem dữ liệu”.</td></tr>
-                ) : (
-                  lines.map((l) => (
-                    <tr key={l.line}>
-                      <td style={{ borderBottom: "1px solid #f0f0f0", padding: "8px 6px" }}><b>{l.line}</b></td>
-                      <td style={{ borderBottom: "1px solid #f0f0f0", padding: "8px 6px" }}>{fmtPercent(l.hsDay)}</td>
-                      <td style={{ borderBottom: "1px solid #f0f0f0", padding: "8px 6px" }}>{fmtPercent(l.hsTarget)}</td>
-                      <td style={{ borderBottom: "1px solid #f0f0f0", padding: "8px 6px" }}>
-                        {safeText(l.hsStatus || "CHƯA CÓ")}
-                      </td>
-                    </tr>
-                  ))
-                )}
+                {filteredLines.map((x) => (
+                  <tr
+                    key={x.line}
+                    className={`border-b hover:bg-gray-50 cursor-pointer ${x.line === selectedLine ? "bg-gray-50" : ""}`}
+                    onClick={() => setSelectedLine(x.line)}
+                  >
+                    <td className="py-2 font-semibold">{x.line}</td>
+                    <td className="py-2">{pct(x.hsDay)}</td>
+                    <td className="py-2">{pct(x.hsTarget)}</td>
+                    <td className="py-2"><StatusPill value={x.hsStatus} /></td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
         </div>
 
-        {/* RIGHT: lũy tiến theo giờ */}
-        <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12 }}>
-          <h3 style={{ margin: 0 }}>So sánh lũy tiến theo giờ (chuyền: <b>{selectedLine || "—"}</b>)</h3>
+        {/* RIGHT: HOURLY */}
+        <div className="border rounded-lg p-4">
+          <div className="text-xl font-bold mb-3">So sánh lũy tiến theo giờ (chuyền: {selectedLine || "—"})</div>
 
-          {lines.length > 0 ? (
-            <>
-              <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
-                <input
-                  value={lineSearch}
-                  onChange={(e) => setLineSearch(e.target.value)}
-                  placeholder="Tìm chuyền..."
-                  style={{ padding: "6px 8px", minWidth: 160 }}
-                />
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                  {filteredLines.map((l) => (
-                    <button
-                      key={l.line}
-                      onClick={() => setSelectedLine(l.line)}
-                      style={{
-                        padding: "4px 8px",
-                        borderRadius: 999,
-                        border: "1px solid #ccc",
-                        cursor: "pointer",
-                        background: l.line === selectedLine ? "#111" : "#fff",
-                        color: l.line === selectedLine ? "#fff" : "#111",
-                      }}
-                    >
-                      {l.line}
-                    </button>
-                  ))}
-                </div>
-              </div>
+          <input
+            className="border rounded px-2 py-1 w-56 mb-3"
+            placeholder="Tìm chuyền..."
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
 
-              {!currentLine ? (
-                <div style={{ marginTop: 12, color: "#666" }}>Chưa chọn chuyền.</div>
-              ) : (
-                <>
-                  <div style={{ marginTop: 10, color: "#333" }}>
-                    <b>DM/H:</b> {Number(currentLine.dmHour || 0).toFixed(2)} &nbsp;•&nbsp;
-                    <b>DM/NGÀY:</b> {Number(currentLine.dmDay || 0).toFixed(0)}
-                  </div>
+          <div className="flex flex-wrap gap-2 mb-3">
+            {filteredLines.map((x) => (
+              <button
+                key={x.line}
+                className={`border rounded-full px-3 py-1 text-sm ${x.line === selectedLine ? "bg-black text-white" : ""}`}
+                onClick={() => setSelectedLine(x.line)}
+              >
+                {x.line}
+              </button>
+            ))}
+          </div>
 
-                  <div style={{ overflow: "auto", marginTop: 10 }}>
-                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
-                      <thead>
-                        <tr>
-                          {["Mốc", "Lũy tiến", "ĐM lũy tiến", "Chênh", "Trạng thái"].map((h) => (
-                            <th key={h} style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: "8px 6px" }}>{h}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {hourlyCompareRows.map((r) => (
-                          <tr key={r.mark}>
-                            <td style={{ borderBottom: "1px solid #f0f0f0", padding: "8px 6px" }}>{r.mark}</td>
-                            <td style={{ borderBottom: "1px solid #f0f0f0", padding: "8px 6px" }}>
-                              {r.actual === null ? "—" : r.actual}
-                            </td>
-                            <td style={{ borderBottom: "1px solid #f0f0f0", padding: "8px 6px" }}>{r.expected || 0}</td>
-                            <td style={{ borderBottom: "1px solid #f0f0f0", padding: "8px 6px" }}>
-                              {r.diff === null ? "—" : (r.diff > 0 ? `+${r.diff}` : `${r.diff}`)}
-                            </td>
-                            <td style={{ borderBottom: "1px solid #f0f0f0", padding: "8px 6px" }}>
-                              <b>{r.status}</b>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </>
-              )}
-            </>
-          ) : (
-            <div style={{ marginTop: 10, color: "#666" }}>Chưa có dữ liệu.</div>
+          <div className="text-sm font-semibold mb-3">
+            DM/H: {Number.isFinite(current?.dmHour) ? current.dmHour.toFixed(2) : "—"} &nbsp;&nbsp;•&nbsp;&nbsp;
+            DM/NGÀY: {Number.isFinite(current?.dmDay) ? current.dmDay : "—"}
+          </div>
+
+          <div className="overflow-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b">
+                  <th className="text-left py-2">Mốc</th>
+                  <th className="text-left py-2">Lũy tiến</th>
+                  <th className="text-left py-2">DM lũy tiến</th>
+                  <th className="text-left py-2">Chênh</th>
+                  <th className="text-left py-2">Trạng thái</th>
+                </tr>
+              </thead>
+              <tbody>
+                {hourlyRows.map((r) => (
+                  <tr key={r.mark} className="border-b">
+                    <td className="py-2">{r.mark}</td>
+                    <td className="py-2">{Number.isFinite(r.actual) ? r.actual : "—"}</td>
+                    <td className="py-2">{Number.isFinite(r.dmCum) ? Math.round(r.dmCum) : "—"}</td>
+                    <td className="py-2">{Number.isFinite(r.diff) ? (r.diff > 0 ? `+${Math.round(r.diff)}` : `${Math.round(r.diff)}`) : "—"}</td>
+                    <td className="py-2"><StatusPill value={r.status} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {data?.parsed && (
+            <div className="text-xs text-gray-500 mt-3">
+              Debug parse: DM/NGÀY col={data.parsed.colDmDay}, ĐM/H col={data.parsed.colDmHour}
+            </div>
           )}
         </div>
       </div>
