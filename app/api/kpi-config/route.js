@@ -1,58 +1,39 @@
+// app/api/kpi-config/route.js
 import { NextResponse } from "next/server";
-import { getSheetsClient, getSpreadsheetId } from "../_lib/googleSheetsClient";
+import { readRange, normalizeDDMMYYYY, ddmmyyyySortKey } from "../_lib/googleSheetsClient";
 
-function excelSerialToDMY(serial) {
-  const n = Number(serial);
-  if (!Number.isFinite(n)) return null;
-  const ms = Date.UTC(1899, 11, 30) + n * 86400000;
-  const d = new Date(ms);
-  return new Intl.DateTimeFormat("vi-VN", {
-    timeZone: "Asia/Ho_Chi_Minh",
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-  }).format(d);
-}
-
-function normDate(s) {
-  let t = (s ?? "").toString().trim().replace(/\s+/g, "").replace(/-/g, "/");
-  // nếu là serial 46015
-  if (/^\d+(\.\d+)?$/.test(t)) {
-    const dmy = excelSerialToDMY(t);
-    if (dmy) t = dmy.replace(/\s+/g, "");
-  }
-  return t;
-}
-
-function parseDMY(dmy) {
-  const [dd, mm, yy] = (dmy || "").split("/").map(Number);
-  if (!dd || !mm || !yy) return NaN;
-  return new Date(yy, mm - 1, dd).getTime();
-}
+export const runtime = "nodejs";
 
 export async function GET(req) {
   try {
-    const sheets = getSheetsClient();
-    const spreadsheetId = getSpreadsheetId();
+    const { searchParams } = new URL(req.url);
+    const list = searchParams.get("list");
 
-    const r = await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range: "CONFIG_KPI!A2:B",
-      valueRenderOption: "UNFORMATTED_VALUE",
+    // CONFIG_KPI có cột DATE và RANGE, ví dụ:
+    // A: DATE, B: RANGE
+    const rows = await readRange("CONFIG_KPI!A2:B", {
+      // FORMATTED_VALUE để ưu tiên ra 23/12/2025,
+      // nhưng vẫn normalize được nếu lỡ ra serial.
+      valueRenderOption: "FORMATTED_VALUE",
     });
 
-    const rows = r.data.values || [];
-    const dates = [];
-
-    for (const row of rows) {
-      const d = normDate(row?.[0]);
-      const range = row?.[1];
-      if (d && range) dates.push(d);
+    const items = [];
+    for (const r of rows) {
+      const rawDate = r?.[0];
+      const range = (r?.[1] || "").trim();
+      const date = normalizeDDMMYYYY(rawDate);
+      if (!date || !range) continue;
+      items.push({ date, range });
     }
 
-    const uniq = Array.from(new Set(dates)).sort((a, b) => parseDMY(a) - parseDMY(b));
+    // sort tăng dần: 23/12/2025 trước 24/12/2025
+    items.sort((a, b) => ddmmyyyySortKey(a.date).localeCompare(ddmmyyyySortKey(b.date)));
 
-    return NextResponse.json({ ok: true, dates: uniq });
+    if (list === "1") {
+      return NextResponse.json({ ok: true, dates: items.map(x => x.date) });
+    }
+
+    return NextResponse.json({ ok: true, items });
   } catch (e) {
     return NextResponse.json({ ok: false, error: String(e?.message || e) }, { status: 500 });
   }
