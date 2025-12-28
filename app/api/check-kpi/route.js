@@ -1,28 +1,72 @@
-import {
-  getValues,
-  normalizeDateKey,
-  toNumberSafe,
-  dateStrToSerial,
-} from "../_lib/googleSheetsClient";
+import { NextResponse } from "next/server";
+import { getSheetsClient, getSpreadsheetId } from "../_lib/googleSheetsClient";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
-const CONFIG_SHEET = process.env.CONFIG_SHEET_NAME || "CONFIG_KPI";
-const KPI_SHEET_DEFAULT = process.env.KPI_SHEET_NAME || "KPI";
-
-function normHeader(s) {
-  return String(s || "")
-    .replace(/\s+/g, " ")
+function norm(s) {
+  return (s ?? "")
+    .toString()
     .trim()
-    .toUpperCase();
+    .replace(/\s+/g, " ")
+    .replace(/-/g, "/");
 }
 
-function findColIndex(headers, includesList) {
-  for (let i = 0; i < headers.length; i++) {
-    const h = normHeader(headers[i]);
-    if (!h) continue;
-    if (includesList.some((k) => h.includes(k))) return i;
+function normKey(s) {
+  return (s ?? "")
+    .toString()
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, "");
+}
+
+function normDateForMatch(s) {
+  return (s ?? "")
+    .toString()
+    .trim()
+    .replace(/\s+/g, "")
+    .replace(/-/g, "/");
+}
+
+function excelSerialToDMY(serial) {
+  const n = Number(serial);
+  if (!Number.isFinite(n)) return null;
+  const ms = Date.UTC(1899, 11, 30) + n * 86400000;
+  const d = new Date(ms);
+  return new Intl.DateTimeFormat("vi-VN", {
+    timeZone: "Asia/Ho_Chi_Minh",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).format(d);
+}
+
+function toNumberSafe(v) {
+  if (v === null || v === undefined) return 0;
+  if (typeof v === "string") {
+    const t = v.trim();
+    if (!t) return 0;
+    const n = Number(t.replace(/,/g, ""));
+    return Number.isFinite(n) ? n : 0;
+  }
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function findHeaderRow(values) {
+  // tìm row có DM/NGÀY và DM/H
+  for (let i = 0; i < values.length; i++) {
+    const row = values[i] || [];
+    const joined = row.map(normKey).join("|");
+    if (joined.includes("DM/NGÀY") && (joined.includes("DM/H") || joined.includes("DMH"))) {
+      return i;
+    }
+  }
+  return 0; // fallback
+}
+
+function findColIndex(headers, candidates) {
+  const map = headers.map((h) => normKey(h));
+  for (const c of candidates) {
+    const idx = map.indexOf(normKey(c));
+    if (idx >= 0) return idx;
   }
   return -1;
 }
@@ -30,154 +74,113 @@ function findColIndex(headers, includesList) {
 export async function GET(req) {
   try {
     const { searchParams } = new URL(req.url);
+    let date = searchParams.get("date");
 
-    const dateParam = searchParams.get("date") || "";
-    const lineParam = String(searchParams.get("line") || "").trim();
-
-    // ===== 1) Load config map (date -> range) =====
-    const cfgRows = await getValues(`${CONFIG_SHEET}!A:B`, {
-      valueRenderOption: "UNFORMATTED_VALUE",
-    });
-
-    const map = {};
-    for (const r of cfgRows) {
-      const rawDate = r?.[0];
-      const rawRange = r?.[1];
-      if (String(rawDate || "").toUpperCase().includes("DATE")) continue;
-
-      const k = normalizeDateKey(rawDate);
-      const range = String(rawRange || "").trim();
-      if (!k || !range) continue;
-      map[k] = range;
+    if (!date) {
+      return NextResponse.json({ ok: false, error: "MISSING_DATE" }, { status: 400 });
     }
 
-    const availableDates = Object.keys(map).sort(
-      (a, b) => dateStrToSerial(a) - dateStrToSerial(b)
-    );
+    date = normDateForMatch(date);
 
-    // normalize incoming date
-    const dateKey = normalizeDateKey(dateParam) || "";
-    if (!dateKey || !map[dateKey]) {
-      return Response.json(
-        { ok: false, error: "DATE_NOT_FOUND", date: dateParam, normalized: dateKey, availableDates },
-        { status: 404 }
+    // nếu date là serial
+    if (/^\d+(\.\d+)?$/.test(date)) {
+      const dmy = excelSerialToDMY(date);
+      if (dmy) date = normDateForMatch(dmy);
+    }
+
+    const sheets = getSheetsClient();
+    const spreadsheetId = getSpreadsheetId();
+
+    // đọc CONFIG_KPI để lấy range theo date
+    const cfg = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: "CONFIG_KPI!A2:B",
+    });
+
+    const cfgRows = cfg.data.values || [];
+    const found = cfgRows.find((r) => {
+      let d = normDateForMatch(r?.[0]);
+      if (/^\d+(\.\d+)?$/.test(d)) {
+        const dmy = excelSerialToDMY(d);
+        if (dmy) d = normDateForMatch(dmy);
+      }
+      return d === date;
+    });
+
+    if (!found) {
+      return NextResponse.json(
+        { ok: false, error: "DATE_NOT_FOUND", date },
+        { status: 200 }
       );
     }
 
-    const range = map[dateKey];
+    const range = found?.[1];
+    if (!range) {
+      return NextResponse.json(
+        { ok: false, error: "RANGE_NOT_FOUND", date },
+        { status: 200 }
+      );
+    }
 
-    // ===== 2) Read KPI block =====
-    const values = await getValues(range, {
-      valueRenderOption: "UNFORMATTED_VALUE",
-    });
+    // đọc KPI range
+    const r = await sheets.spreadsheets.values.get({ spreadsheetId, range });
+    const values = r.data.values || [];
 
     if (!values.length) {
-      return Response.json({ ok: false, error: "NO_DATA", date: dateKey, range }, { status: 404 });
+      return NextResponse.json({ ok: true, date, range, lines: [] });
     }
 
-    // ===== 3) Detect header rows =====
-    // Find a row containing keywords like "CHUYỀN" or "MÃ HÀNG" or "DM/NGÀY"
-    let headerRow = -1;
-    for (let i = 0; i < Math.min(values.length, 8); i++) {
-      const rowText = values[i].map((x) => normHeader(x)).join(" | ");
-      if (
-        rowText.includes("CHUYEN") ||
-        rowText.includes("CHUYỀN") ||
-        rowText.includes("MA HANG") ||
-        rowText.includes("MÃ HÀNG") ||
-        rowText.includes("DM/NGÀY") ||
-        rowText.includes("DM/NGAY")
-      ) {
-        headerRow = i;
-        break;
-      }
-    }
+    const headerRowIndex = findHeaderRow(values);
+    const headers = values[headerRowIndex] || [];
 
-    // Fallback: assume 2 header rows then data
-    if (headerRow < 0) headerRow = 1;
+    // cột cố định
+    const colLine = 0; // cột A thường là CHUYỀN (C1,C2...)
+    const colMaHang = findColIndex(headers, ["MH", "MÃHÀNG", "MÃ HÀNG", "MAHANG"]);
+    const colDmNgay = findColIndex(headers, ["DM/NGÀY", "DMNGÀY", "DMNGAY"]);
+    const colAfter1630 = findColIndex(headers, [">16H30", "->16H30", "AFTER16H30", "AFTER 16H30"]);
 
-    const headers = values[headerRow] || [];
-    const dataStart = headerRow + 1;
+    const lines = [];
 
-    // column indices
-    const idxLine = findColIndex(headers, ["CHUYEN", "CHUYỀN"]);
-    const idxMaHang = findColIndex(headers, ["MÃ HÀNG", "MA HANG", "MH"]);
-    const idxDmNgay = findColIndex(headers, ["DM/NGÀY", "DM/NGAY", "DM NGAY"]);
-    const idxDmH = findColIndex(headers, ["DM/H", "DMH", "DM H"]);
-
-    // time columns: header contains "H" and a number or has ">" (e.g. >9H, >12H30, ...)
-    const timeCols = [];
-    for (let c = 0; c < headers.length; c++) {
-      const h = String(headers[c] || "").trim();
-      const hu = normHeader(h);
-      if (!hu) continue;
-      if (hu.includes(">") && hu.includes("H")) {
-        timeCols.push({ label: h, col: c });
-      } else if (/\b\d{1,2}H(\d{2})?\b/i.test(h)) {
-        timeCols.push({ label: h, col: c });
-      }
-    }
-
-    // Prefer AFTER 16H30 column for daily actual if exists
-    const idxAfter1630 =
-      timeCols.find((t) => normHeader(t.label).includes("16H30"))?.col ??
-      (timeCols.length ? timeCols[timeCols.length - 1].col : -1);
-
-    // ===== 4) Parse rows -> summary =====
-    const summary = [];
-    const perLine = {}; // for right-side detail
-
-    for (let r = dataStart; r < values.length; r++) {
-      const row = values[r] || [];
-      const line = String(row[idxLine] ?? "").trim();
+    for (let i = headerRowIndex + 1; i < values.length; i++) {
+      const row = values[i] || [];
+      const line = norm(row[colLine]);
       if (!line) continue;
 
-      // stop if reached empty section
-      if (normHeader(line).includes("TOTAL")) continue;
+      // bỏ dòng tổng / tiêu đề phụ
+      const key = normKey(line);
+      if (key.startsWith("TOTAL") || key.startsWith("DATE")) continue;
 
-      const maHang = String(row[idxMaHang] ?? "").trim();
-      const dmNgay = toNumberSafe(row[idxDmNgay]);
-      const dmH = toNumberSafe(row[idxDmH]);
-      const after1630 = idxAfter1630 >= 0 ? toNumberSafe(row[idxAfter1630]) : 0;
+      const maHang = colMaHang >= 0 ? norm(row[colMaHang]) : "";
+      const dmNgay = colDmNgay >= 0 ? toNumberSafe(row[colDmNgay]) : 0;
+      const after1630 = colAfter1630 >= 0 ? toNumberSafe(row[colAfter1630]) : 0;
 
-      const hsDat = dmNgay > 0 ? (after1630 / dmNgay) * 100 : 0;
-      const statusDay = hsDat >= 100 ? "ĐẠT" : "KHÔNG ĐẠT";
+      const hs = dmNgay > 0 ? (after1630 / dmNgay) * 100 : 0;
+      const status = hs >= 100 ? "ĐẠT" : "KHÔNG ĐẠT";
 
-      summary.push({
-        line,
-        maHang,
-        dmNgay,
-        dmH,
-        after1630,
-        hsDat,
-        statusDay,
+      // chỉ lấy những dòng giống chuyền (C1,C2,C10...) hoặc các line đặc biệt
+      if (!/^C\d+$/i.test(line) && !["CẮT", "KCS", "HOÀN TẤT", "NM", "NN"].includes(line.toUpperCase())) {
+        continue;
+      }
+
+      lines.push({
+        chuyen: line,
+        maHang: maHang || "-",
+        hsDat: Number.isFinite(hs) ? Number(hs.toFixed(2)) : 0,
+        trangThai: status,
       });
-
-      // build timeline detail for this line (actual cumulative vs planned cumulative)
-      const timeline = timeCols.map((t, i) => {
-        const actual = toNumberSafe(row[t.col]);
-        const planned = dmH > 0 ? dmH * (i + 1) : 0; // đơn giản theo mốc 1..n
-        const diff = actual - planned;
-        const status = actual >= planned ? "ĐẠT" : "KHÔNG ĐẠT";
-        return { moc: t.label, actual, planned, diff, status };
-      });
-
-      perLine[line] = { line, maHang, dmNgay, dmH, timeline };
     }
 
-    // optional single line detail
-    const detail = lineParam ? perLine[lineParam] || null : null;
-
-    return Response.json({
+    return NextResponse.json({
       ok: true,
-      date: dateKey,
+      date,
       range,
-      availableDates,
-      lines: summary.map((x) => x.line),
-      summary,
-      detail,
+      meta: { headerRowIndex, headers },
+      lines,
     });
   } catch (e) {
-    return Response.json({ ok: false, error: String(e?.message || e) }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: String(e?.message || e) },
+      { status: 500 }
+    );
   }
 }

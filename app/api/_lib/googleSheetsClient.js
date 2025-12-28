@@ -1,29 +1,30 @@
 import { google } from "googleapis";
 
-export function mustEnv(...names) {
+function mustEnvAny(names) {
   for (const n of names) {
     const v = process.env[n];
-    if (v && String(v).trim()) return v;
+    if (v && String(v).trim()) return String(v).trim();
   }
-  throw new Error(`Missing env ${names.join(" or ")}`);
+  throw new Error(`Missing env: one of [${names.join(", ")}]`);
 }
 
-export function getServiceAccountJson() {
-  // bạn nói bạn để base64 => ưu tiên GOOGLE_SERVICE_ACCOUNT_JSON_BASE64
-  const b64 = process.env.GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 || process.env.GOOGLE_SERVICE_ACCOUNT_BASE64;
-  if (b64 && String(b64).trim()) {
-    const jsonText = Buffer.from(b64, "base64").toString("utf8");
-    return JSON.parse(jsonText);
-  }
-
-  // fallback: để thẳng JSON (không khuyến khích nhưng vẫn hỗ trợ)
-  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-  if (raw && String(raw).trim()) return JSON.parse(raw);
-
-  throw new Error("Missing env GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 (or GOOGLE_SERVICE_ACCOUNT_JSON)");
+export function getSpreadsheetId() {
+  return mustEnvAny(["GOOGLE_SHEETS_ID", "GOOGLE_SHEET_ID", "SPREADSHEET_ID"]);
 }
 
-export function sheetsClient() {
+function getServiceAccountJson() {
+  const b64 = mustEnvAny([
+    "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64",
+    "GOOGLE_SERVICE_ACCOUNT_BASE64",
+    "SERVICE_ACCOUNT_JSON_BASE64",
+  ]);
+
+  // base64 -> json
+  const jsonStr = Buffer.from(b64, "base64").toString("utf8");
+  return JSON.parse(jsonStr);
+}
+
+export function getSheetsClient() {
   const sa = getServiceAccountJson();
 
   const auth = new google.auth.JWT({
