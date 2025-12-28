@@ -1,321 +1,360 @@
-// ================================
-// File: app/api/check-kpi/route.js
-// Next.js App Router route handler
-// ================================
-import { google } from "googleapis";
+// app/api/check-kpi/route.js
+import { NextResponse } from "next/server";
+import { getSheetsClient } from "@/lib/googleSheetsClient";
 
-export const runtime = "nodejs"; // googleapis needs node runtime
+const CONFIG_SHEET = process.env.KPI_CONFIG_SHEET || "CONFIG_KPI";
+const SHEET_ID = process.env.GOOGLE_SHEET_ID;
 
-// ---------- helpers ----------
-function jsonResponse(obj, status = 200) {
-  return new Response(JSON.stringify(obj, null, 2), {
-    status,
-    headers: { "Content-Type": "application/json; charset=utf-8" },
-  });
-}
-
-function normText(s) {
-  return String(s ?? "")
+// ===== helpers =====
+const strip = (s) =>
+  String(s ?? "")
     .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, ""); // remove accents
+
+const norm = (s) =>
+  strip(s)
     .toUpperCase()
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-    .replace(/[–—]/g, "-")
     .replace(/\s+/g, " ")
-    .replace(/\s*\/\s*/g, "/"); // "DM / NGAY" => "DM/NGAY"
-}
+    .trim();
 
-// dd/mm/yyyy
-function toDDMMYYYY(input) {
-  const raw = String(input ?? "").trim();
-  if (!raw) return "";
+const isLikelyLine = (v) => {
+  const t = norm(v);
+  if (!t) return false;
+  // C1..C99, CAT, KCS, HOAN TAT, NM...
+  return (
+    /^C\d{1,3}$/.test(t) ||
+    t === "CAT" ||
+    t === "KCS" ||
+    t === "HOAN TAT" ||
+    t === "NM" ||
+    t === "HOÀN TẤT".toUpperCase() // safety
+  );
+};
 
-  // already dd/mm/yyyy
-  if (/^\d{2}\/\d{2}\/\d{4}$/.test(raw)) return raw;
+const parseNumber = (v) => {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  if (!s) return null;
+  // allow "1,08" or "1.08" etc
+  const cleaned = s.replace(/\./g, "").replace(",", ".");
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : null;
+};
 
-  // yyyy-mm-dd
-  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
-    const [y, m, d] = raw.split("-");
-    return `${d}/${m}/${y}`;
-  }
+const normalizePercent = (v) => {
+  // accepts 0.9587, 95.87, "95.87%", "0.9587"
+  if (v === null || v === undefined) return null;
+  const s = String(v).replace("%", "").trim();
+  const n = parseNumber(s);
+  if (n === null) return null;
+  if (n > 1.5) return n / 100; // 90 => 0.9
+  return n; // 0.9 => 0.9
+};
 
-  // try Date parse
-  const dt = new Date(raw);
-  if (!Number.isNaN(dt.getTime())) {
-    const d = String(dt.getDate()).padStart(2, "0");
-    const m = String(dt.getMonth() + 1).padStart(2, "0");
-    const y = dt.getFullYear();
-    return `${d}/${m}/${y}`;
-  }
+const fmtPercent = (x) => {
+  if (x === null || x === undefined) return "—";
+  const n = Number(x);
+  if (!Number.isFinite(n)) return "—";
+  return (n * 100).toFixed(2) + "%";
+};
 
-  return raw;
-}
-
-function getServiceAccountFromEnv() {
-  const rawJson = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-  const rawB64 = process.env.GOOGLE_SERVICE_ACCOUNT_BASE64;
-
-  if (rawJson && rawJson.trim()) {
-    return JSON.parse(rawJson);
-  }
-  if (rawB64 && rawB64.trim()) {
-    const decoded = Buffer.from(rawB64, "base64").toString("utf8");
-    return JSON.parse(decoded);
-  }
-  throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_BASE64");
-}
-
-async function getSheetsClient() {
-  const sa = getServiceAccountFromEnv();
-
-  // private_key from env sometimes contains literal \n
-  if (sa.private_key && sa.private_key.includes("\\n")) {
-    sa.private_key = sa.private_key.replace(/\\n/g, "\n");
-  }
-
-  const auth = new google.auth.JWT({
-    email: sa.client_email,
-    key: sa.private_key,
-    scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
-  });
-
-  const sheets = google.sheets({ version: "v4", auth });
-  return sheets;
-}
-
-async function readRange(sheets, spreadsheetId, range) {
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range,
-    valueRenderOption: "UNFORMATTED_VALUE",
-    dateTimeRenderOption: "FORMATTED_STRING",
-  });
-  return res.data.values || [];
-}
-
-// Find best header row in first N rows
-function detectHeaderRow(values, maxScanRows = 12) {
-  const n = Math.min(values.length, maxScanRows);
-  let best = { idx: 0, score: -1 };
-
-  for (let r = 0; r < n; r++) {
+function findHeaderRow(values) {
+  // search top 6 rows for a row containing CHUYEN or DM/NGAY etc
+  const max = Math.min(values.length, 8);
+  for (let r = 0; r < max; r++) {
     const row = values[r] || [];
-    const texts = row.map(normText);
-
-    const hasDmDay = texts.some(t => t.includes("DM/NGAY") || t.includes("ĐM/NGAY"));
-    const hasDmHour = texts.some(t => t.includes("DM/H") || t.includes("ĐM/H"));
-    const markCount = texts.filter(t => t.startsWith("->") || /^-\>\s*\d+H/.test(t)).length;
-
-    // also accept "->9H" etc if user typed strange spacing
-    const score = (hasDmDay ? 3 : 0) + (hasDmHour ? 3 : 0) + markCount;
-
-    if (score > best.score) best = { idx: r, score };
+    const joined = norm(row.join(" | "));
+    if (
+      joined.includes("CHUYEN") ||
+      joined.includes("DM/NGAY") ||
+      joined.includes("DM/H") ||
+      joined.includes("MA HANG") ||
+      joined.includes("MÃ HÀNG".toUpperCase())
+    ) {
+      return r;
+    }
   }
-
-  return best.idx;
+  return 0;
 }
 
-function findCol(rowNorm, predicate) {
-  for (let c = 0; c < rowNorm.length; c++) {
-    if (predicate(rowNorm[c], c)) return c;
+function findDataStartRow(values, lineColGuess = 0) {
+  // find first row that looks like a line name
+  for (let r = 0; r < values.length; r++) {
+    const row = values[r] || [];
+    if (isLikelyLine(row[lineColGuess])) return r;
+  }
+  // fallback: scan any col
+  for (let r = 0; r < values.length; r++) {
+    const row = values[r] || [];
+    for (let c = 0; c < row.length; c++) {
+      if (isLikelyLine(row[c])) return r;
+    }
+  }
+  return 0;
+}
+
+function findColByHeader(values, headerRow, candidates) {
+  // candidates: array of header keywords already normalized
+  const row = values[headerRow] || [];
+  for (let c = 0; c < row.length; c++) {
+    const cell = norm(row[c]);
+    if (!cell) continue;
+    for (const k of candidates) {
+      if (cell === k) return c;
+    }
+  }
+  // second pass: contains
+  for (let c = 0; c < row.length; c++) {
+    const cell = norm(row[c]);
+    if (!cell) continue;
+    for (const k of candidates) {
+      if (cell.includes(k)) return c;
+    }
   }
   return -1;
 }
 
-function parseMarksFromHeader(headerRow) {
-  const marks = []; // {key:'->9h', col, hourPoint}
-  for (let c = 0; c < headerRow.length; c++) {
-    const t = normText(headerRow[c]);
-    if (!t) continue;
-
-    // Accept: "->9H", "->12H30"
-    const m = t.match(/^\-\>\s*(\d{1,2})H(?:(\d{2}))?$/);
-    if (m) {
-      const hh = Number(m[1]);
-      const mm = m[2] ? Number(m[2]) : 0;
-      const hourPoint = hh + (mm / 60);
-      const key = `->${hh}h${mm ? String(mm).padStart(2, "0") : ""}`.replace("h00","h");
-      marks.push({ key, col: c, hourPoint });
+function detectHourCols(values, headerRow) {
+  const row = values[headerRow] || [];
+  const cols = [];
+  for (let c = 0; c < row.length; c++) {
+    const raw = String(row[c] ?? "").trim();
+    const t = norm(raw);
+    // Match ->9h, ->10h, ->12h30, ...
+    if (/^->\s*\d{1,2}H(\d{1,2})?$/.test(t.replace(/\s+/g, ""))) {
+      const key = t.replace(/\s+/g, "").replace("->", "M"); // "M9H" etc
+      cols.push({ col: c, label: raw, key });
     }
   }
-  return marks;
+  return cols;
 }
 
-function isLineCode(s) {
-  const t = normText(s);
-  if (!t) return false;
-  if (/^C\d{1,2}$/.test(t)) return true;
-  if (t === "CAT" || t === "CẮT") return true;
-  if (t === "KCS") return true;
-  if (t === "HOAN TAT" || t === "HOÀN TẤT") return true;
-  if (t === "NM") return true;
-  return false;
+function getBadgeClass(status) {
+  const s = norm(status);
+  if (s === "VUOT" || s === "DU" || s === "DAT") return "good";
+  if (s === "THIEU" || s === "CHUA DAT" || s === "CHUA CO") return "bad";
+  return "na";
 }
 
-function calcHourlyStatus(actual, dm) {
-  if (dm === null || dm === undefined || !Number.isFinite(dm)) return { status: "N/A", badge: "na" };
-  if (!Number.isFinite(actual)) return { status: "N/A", badge: "na" };
-
-  const delta = actual - dm;
-  // vượt: >= 105% DM
-  if (actual >= dm * 1.05) return { status: "VƯỢT", badge: "ok" };
-  // đủ/đạt: >= DM
-  if (delta >= 0) return { status: "ĐỦ", badge: "ok" };
-  // thiếu
-  return { status: "THIẾU", badge: "bad" };
+function calcHourlyStatus(diff, step) {
+  if (diff === null) return "N/A";
+  // tolerance: 1 sp or 2% of step
+  const tol = Math.max(1, Math.round((step ?? 0) * 0.02));
+  if (diff >= 0) return "VƯỢT";
+  if (diff >= -tol) return "ĐỦ";
+  return "THIẾU";
 }
 
-function calcDayStatus(hsDay, hsTarget = 0.9) {
-  if (!Number.isFinite(hsDay)) return { status: "CHƯA CÓ", badge: "na" };
-  if (hsDay >= 1.0) return { status: "VƯỢT", badge: "ok" };
-  if (hsDay >= hsTarget) return { status: "ĐẠT", badge: "ok" };
-  return { status: "CHƯA ĐẠT", badge: "bad" };
-}
-
-// ---------- main ----------
+// ===== main =====
 export async function GET(req) {
   try {
-    const spreadsheetId = process.env.GOOGLE_SHEET_ID;
-    if (!spreadsheetId) return jsonResponse({ error: "Missing GOOGLE_SHEET_ID" }, 400);
+    if (!SHEET_ID) {
+      return NextResponse.json(
+        { ok: false, error: "Missing GOOGLE_SHEET_ID" },
+        { status: 500 }
+      );
+    }
 
-    const url = new URL(req.url);
-    const dateParam = url.searchParams.get("date") || "";
-    const dateDDMM = toDDMMYYYY(dateParam);
+    const { searchParams } = new URL(req.url);
+    const dateQuery = (searchParams.get("date") || "").trim(); // dd/mm/yyyy
 
     const sheets = await getSheetsClient();
 
-    // 1) Read CONFIG_KPI to find range for date
-    const configValues = await readRange(sheets, spreadsheetId, "CONFIG_KPI!A:B");
+    // Read CONFIG_KPI A:B by header
+    const cfgRes = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: `${CONFIG_SHEET}!A:B`,
+    });
 
-    // Find header row in CONFIG_KPI
-    let startRow = 0;
-    for (let i = 0; i < Math.min(configValues.length, 5); i++) {
-      const a = normText(configValues[i]?.[0]);
-      const b = normText(configValues[i]?.[1]);
-      if (a === "DATE" && b === "RANGE") { startRow = i + 1; break; }
+    const cfg = cfgRes.data.values || [];
+    if (cfg.length < 2) {
+      return NextResponse.json(
+        { ok: false, error: `CONFIG sheet ${CONFIG_SHEET} is empty` },
+        { status: 500 }
+      );
     }
 
-    const dateToRange = new Map();
-    for (let i = startRow; i < configValues.length; i++) {
-      const d = toDDMMYYYY(configValues[i]?.[0]);
-      const r = String(configValues[i]?.[1] ?? "").trim();
-      if (d && r) dateToRange.set(d, r);
+    const header = cfg[0] || [];
+    const dateCol = header.findIndex((x) => norm(x) === "DATE");
+    const rangeCol = header.findIndex((x) => norm(x) === "RANGE");
+
+    if (dateCol < 0 || rangeCol < 0) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: `CONFIG_KPI must have header DATE and RANGE (row 1). Found: ${header.join(
+            ", "
+          )}`,
+        },
+        { status: 500 }
+      );
     }
 
-    // list dates for dropdown
-    const availableDates = Array.from(dateToRange.keys());
+    const availableDates = [];
+    const mapDateToRange = new Map();
 
-    // if no date => return only list for UI
-    if (!dateDDMM) {
-      return jsonResponse({
-        ok: true,
-        dates: availableDates,
-        hint: "Call /api/check-kpi?date=dd/mm/yyyy",
-      });
+    for (let i = 1; i < cfg.length; i++) {
+      const row = cfg[i] || [];
+      const d = String(row[dateCol] ?? "").trim();
+      const r = String(row[rangeCol] ?? "").trim();
+      if (!d || !r) continue;
+      availableDates.push(d);
+      mapDateToRange.set(d, r);
     }
 
-    const range = dateToRange.get(dateDDMM);
-    if (!range) {
-      return jsonResponse({
-        ok: true,
-        date: dateDDMM,
-        dates: availableDates,
-        lines: [],
-        marks: [],
-        message: "No range found for date in CONFIG_KPI",
-      });
+    if (availableDates.length === 0) {
+      return NextResponse.json(
+        { ok: false, error: "No DATE/RANGE rows in CONFIG_KPI" },
+        { status: 500 }
+      );
     }
 
-    // 2) Read KPI range
-    const values = await readRange(sheets, spreadsheetId, range);
+    const date = dateQuery && mapDateToRange.has(dateQuery)
+      ? dateQuery
+      : availableDates[availableDates.length - 1]; // default latest row
+
+    const dataRange = mapDateToRange.get(date);
+
+    // Read KPI range
+    const kpiRes = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: dataRange,
+      valueRenderOption: "UNFORMATTED_VALUE",
+    });
+
+    const values = kpiRes.data.values || [];
     if (!values.length) {
-      return jsonResponse({ ok: true, date: dateDDMM, range, lines: [], marks: [] });
+      return NextResponse.json(
+        {
+          ok: true,
+          date,
+          dataRange,
+          availableDates,
+          marks: [],
+          lines: [],
+          warning: "KPI range returned empty",
+        },
+        { status: 200 }
+      );
     }
 
-    // 3) Detect header row + parse columns
-    const headerIdx = detectHeaderRow(values, 14);
-    const headerRow = values[headerIdx] || [];
-    const headerNorm = headerRow.map(normText);
+    const headerRow = findHeaderRow(values);
 
-    const colLine = 0; // by your sheet: line is usually column A in range
-    const colMaHang = findCol(headerNorm, (t) => t === "MA HANG" || t === "MÃ HÀNG" || t.includes("MA HANG"));
+    // detect key columns
+    const lineCol = findColByHeader(values, headerRow, ["CHUYEN", "CHUYỀN".toUpperCase()]);
+    const maHangCol = findColByHeader(values, headerRow, ["MA HANG", "MÃ HÀNG".toUpperCase()]);
+    const dmNgayCol = findColByHeader(values, headerRow, ["DM/NGAY", "DM NGAY", "DM/NGÀY".toUpperCase()]);
+    const dmHCol = findColByHeader(values, headerRow, ["DM/H", "DM H"]);
 
-    const colDmDay = findCol(headerNorm, (t) => t.includes("DM/NGAY") || t.includes("ĐM/NGÀY") || t === "DMNGAY");
-    const colDmHour = findCol(headerNorm, (t) => t.includes("DM/H") || t.includes("ĐM/H") || t === "DMH");
+    // Hour marks columns
+    const hourCols = detectHourCols(values, headerRow);
 
-    const marks = parseMarksFromHeader(headerRow); // {key, col, hourPoint}
-    // choose last mark = max hourPoint
-    const lastMark = marks.length ? marks.reduce((a,b)=> (b.hourPoint>a.hourPoint?b:a)) : null;
+    // Determine data start row
+    const dataStart = findDataStartRow(values, lineCol >= 0 ? lineCol : 0);
 
-    // 4) Parse rows after header
+    // Build marks
+    const marks = hourCols.map((m) => ({ key: m.key, label: m.label, col: m.col }));
+
+    // Parse each line row
     const lines = [];
-    for (let r = headerIdx + 1; r < values.length; r++) {
+    for (let r = dataStart; r < values.length; r++) {
       const row = values[r] || [];
-      const lineRaw = row[colLine];
-      if (!isLineCode(lineRaw)) continue;
+      const lineName = String(row[lineCol >= 0 ? lineCol : 0] ?? "").trim();
+      if (!isLikelyLine(lineName)) continue;
 
-      const lineName = String(lineRaw ?? "").trim();
-      const maHang = (colMaHang >= 0) ? String(row[colMaHang] ?? "").trim() : "";
+      const maHang = maHangCol >= 0 ? String(row[maHangCol] ?? "").trim() : "";
 
-      const dmDay = (colDmDay >= 0) ? Number(row[colDmDay]) : NaN;
-      const dmHour = (colDmHour >= 0) ? Number(row[colDmHour]) : NaN;
+      const dmNgay = dmNgayCol >= 0 ? parseNumber(row[dmNgayCol]) : null;
+      const dmHour = dmHCol >= 0 ? parseNumber(row[dmHCol]) : null;
 
-      // actual last cumulative = value at last mark col
-      const actualLast = lastMark ? Number(row[lastMark.col]) : NaN;
-
-      // hs day = actual / dmDay
-      const hsDay = (Number.isFinite(actualLast) && Number.isFinite(dmDay) && dmDay > 0)
-        ? (actualLast / dmDay)
-        : NaN;
-
-      const hsTarget = 0.9;
-      const dayStatus = calcDayStatus(hsDay, hsTarget);
-
+      // actual hourly cumulative
       const hourly = {};
       for (const m of marks) {
-        const actual = Number(row[m.col]);
-        const dmCum = (Number.isFinite(dmHour) ? dmHour * Math.max(0, (m.hourPoint - 8)) : NaN); 
-        // giả định bắt đầu SX từ 8h -> 9h là 1 giờ. Nếu bạn muốn bắt đầu khác, đổi "8".
+        hourly[m.key] = parseNumber(row[m.col]);
+      }
 
-        const delta = (Number.isFinite(actual) && Number.isFinite(dmCum)) ? (actual - dmCum) : NaN;
-        const st = calcHourlyStatus(actual, dmCum);
+      // determine step (prefer dmHour, else dmNgay/marksCount)
+      const marksCount = marks.length || 8;
+      const step =
+        (dmHour && dmHour > 0)
+          ? dmHour
+          : (dmNgay && dmNgay > 0 && marksCount > 0)
+          ? dmNgay / marksCount
+          : null;
 
-        hourly[m.key] = {
-          actual: Number.isFinite(actual) ? actual : null,
-          dm: Number.isFinite(dmCum) ? Math.round(dmCum) : null,
-          delta: Number.isFinite(delta) ? Math.round(delta) : null,
-          status: st.status,
-          badge: st.badge,
-        };
+      // expected cumulative + diff + status
+      const expected = {};
+      const diff = {};
+      const hourlyStatus = {};
+      for (let i = 0; i < marks.length; i++) {
+        const mk = marks[i].key;
+        if (step === null) {
+          expected[mk] = null;
+          diff[mk] = null;
+          hourlyStatus[mk] = "N/A";
+          continue;
+        }
+        expected[mk] = Math.round(step * (i + 1));
+        const a = hourly[mk];
+        diff[mk] = a === null ? null : a - expected[mk];
+        hourlyStatus[mk] = calcHourlyStatus(diff[mk], step);
+      }
+
+      // daily efficiency from last mark
+      const lastMarkKey = marks.length ? marks[marks.length - 1].key : null;
+      const lastActual = lastMarkKey ? hourly[lastMarkKey] : null;
+
+      const hsTarget = 0.9;
+      const hsDay =
+        (lastActual !== null && dmNgay && dmNgay > 0)
+          ? lastActual / dmNgay
+          : null;
+
+      let hsStatus = "CHƯA CÓ";
+      if (hsDay !== null) {
+        if (hsDay >= 1) hsStatus = "VƯỢT";
+        else if (hsDay >= hsTarget) hsStatus = "ĐẠT";
+        else hsStatus = "CHƯA ĐẠT";
       }
 
       lines.push({
         line: lineName,
         maHang: maHang || null,
-
-        dmDay: Number.isFinite(dmDay) ? dmDay : null,
-        dmHour: Number.isFinite(dmHour) ? dmHour : null,
-
-        hsDay: Number.isFinite(hsDay) ? Number((hsDay * 100).toFixed(2)) : null, // percent
-        hsTarget: hsTarget * 100,
-        hsStatus: dayStatus.status,
-        hsBadge: dayStatus.badge,
-
+        dmNgay: dmNgay ?? null,
+        dmHour: dmHour ?? null,
+        hsDay: hsDay ?? null,
+        hsTarget,
+        hsStatus,
+        hsBadge: getBadgeClass(hsStatus),
         hourly,
+        expected,
+        diff,
+        hourlyStatus,
       });
     }
 
-    return jsonResponse({
+    return NextResponse.json({
       ok: true,
-      date: dateDDMM,
-      range,
-      dates: availableDates,
-      headerIdx,
-      cols: { colMaHang, colDmDay, colDmHour, marks: marks.map(m => ({ key: m.key, col: m.col })) },
-      marks: marks.map(m => m.key),
-      lastMark: lastMark?.key ?? null,
+      date,
+      dataRange,
+      availableDates,
+      marks: marks.map(({ key, label }) => ({ key, label })),
       lines,
+      debug: {
+        headerRow,
+        dataStart,
+        lineCol,
+        maHangCol,
+        dmNgayCol,
+        dmHCol,
+        marksCount: marks.length,
+      },
     });
-  } catch (err) {
-    return jsonResponse({ ok: false, error: String(err?.message || err) }, 500);
+  } catch (e) {
+    return NextResponse.json(
+      { ok: false, error: String(e?.message || e) },
+      { status: 500 }
+    );
   }
 }

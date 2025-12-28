@@ -1,160 +1,165 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-const MARKS = ["->9h", "->10h", "->11h", "->12h30", "->13h30", "->14h30", "->15h30", "->16h30"];
+const fmtPercent = (x) => {
+  if (x === null || x === undefined) return "—";
+  const n = Number(x);
+  if (!Number.isFinite(n)) return "—";
+  return (n * 100).toFixed(2) + "%";
+};
 
-function fmtPercent(x) {
-  if (typeof x !== "number" || !Number.isFinite(x)) return "—";
-  return `${(x * 100).toFixed(2)}%`;
-}
-function fmtNum(x) {
-  if (typeof x !== "number" || !Number.isFinite(x)) return "—";
-  // hiển thị đẹp kiểu số nguyên nếu gần nguyên
-  const isInt = Math.abs(x - Math.round(x)) < 1e-9;
-  return isInt ? String(Math.round(x)) : x.toFixed(2);
-}
+const fmtNum = (x) => {
+  if (x === null || x === undefined) return "—";
+  const n = Number(x);
+  if (!Number.isFinite(n)) return "—";
+  return String(Math.round(n));
+};
 
-function badgeToneForHs(hsStatus) {
-  if (hsStatus === "ĐẠT") return "good";
-  if (hsStatus === "CHƯA ĐẠT") return "bad";
-  return "neutral";
-}
-function badgeToneForStep(stepStatus) {
-  if (stepStatus === "VƯỢT" || stepStatus === "ĐỦ" || stepStatus === "ĐẠT") return "good";
-  if (stepStatus === "THIẾU" || stepStatus === "CHƯA ĐẠT") return "bad";
-  return "neutral";
-}
-
-function Badge({ tone = "neutral", children }) {
-  return <span className={`kpi-badge kpi-badge--${tone}`}>{children}</span>;
-}
+const badgeClass = (status) => {
+  const s = String(status || "").toUpperCase();
+  if (s.includes("VƯỢT") || s.includes("ĐỦ") || s.includes("ĐẠT")) return "badge good";
+  if (s.includes("THIẾU") || s.includes("CHƯA")) return "badge bad";
+  if (s.includes("N/A")) return "badge na";
+  return "badge na";
+};
 
 export default function KpiDashboardClient() {
-  const [dates, setDates] = useState([]);
-  const [date, setDate] = useState("");
+  const [loading, setLoading] = useState(true);
   const [auto, setAuto] = useState(true);
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState("");
   const [data, setData] = useState(null);
-
-  const [lineSearch, setLineSearch] = useState("");
+  const [date, setDate] = useState("");
   const [selectedLine, setSelectedLine] = useState("");
+  const [q, setQ] = useState("");
+  const [err, setErr] = useState("");
 
-  async function loadDates() {
-    try {
-      setErr("");
-      const res = await fetch("/api/kpi-config", { cache: "no-store" });
-      if (!res.ok) throw new Error(await res.text());
-      const json = await res.json();
-      const list = Array.isArray(json) ? json : json?.dates || json?.items || [];
-      setDates(list);
-      if (!date && list.length) setDate(list[0]);
-    } catch (e) {
-      // không có endpoint thì thôi, user vẫn có thể nhập date (nhưng bạn đang có dropdown nên thường OK)
-      console.error(e);
-    }
-  }
-
-  async function loadData(d) {
-    if (!d) return;
+  const fetchData = async (pickedDate) => {
     setLoading(true);
     setErr("");
     try {
-      const res = await fetch(`/api/check-kpi?date=${encodeURIComponent(d)}`, { cache: "no-store" });
+      const url = pickedDate ? `/api/check-kpi?date=${encodeURIComponent(pickedDate)}` : `/api/check-kpi`;
+      const res = await fetch(url, { cache: "no-store" });
       const json = await res.json();
-      if (!res.ok) throw new Error(json?.message || "Load failed");
-      setData(json);
+      if (!json.ok) throw new Error(json.error || "Fetch failed");
 
-      // set line mặc định
-      const firstLine = json?.lines?.[0]?.line || "";
-      setSelectedLine((prev) => prev || firstLine);
+      setData(json);
+      setDate(json.date);
+      if (!pickedDate) {
+        // default selected line = first line
+        const first = (json.lines || [])[0]?.line || "";
+        setSelectedLine(first);
+      } else {
+        // keep selected if exists
+        const exists = (json.lines || []).some((x) => x.line === selectedLine);
+        if (!exists) setSelectedLine((json.lines || [])[0]?.line || "");
+      }
     } catch (e) {
-      setErr(e?.message || String(e));
+      setErr(String(e.message || e));
       setData(null);
     } finally {
       setLoading(false);
     }
-  }
+  };
 
   useEffect(() => {
-    loadDates();
+    fetchData("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    loadData(date);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [date]);
-
-  useEffect(() => {
-    if (!auto || !date) return;
-    const t = setInterval(() => loadData(date), 60_000);
+    if (!auto) return;
+    const t = setInterval(() => fetchData(date), 60_000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auto, date]);
 
   const lines = data?.lines || [];
+  const marks = data?.marks || [];
+  const availableDates = data?.availableDates || [];
 
   const filteredLines = useMemo(() => {
-    const q = lineSearch.trim().toUpperCase();
-    if (!q) return lines;
-    return lines.filter((x) => (x.line || "").toUpperCase().includes(q) || (x.maHang || "").toUpperCase().includes(q));
-  }, [lines, lineSearch]);
+    const kw = q.trim().toLowerCase();
+    if (!kw) return lines;
+    return lines.filter((x) => {
+      const a = (x.line || "").toLowerCase();
+      const b = (x.maHang || "").toLowerCase();
+      return a.includes(kw) || b.includes(kw);
+    });
+  }, [lines, q]);
 
   const selected = useMemo(() => {
-    return lines.find((x) => x.line === selectedLine) || filteredLines[0] || null;
-  }, [lines, selectedLine, filteredLines]);
+    return lines.find((x) => x.line === selectedLine) || null;
+  }, [lines, selectedLine]);
 
-  const updateAt = useMemo(() => {
+  const lastUpdated = useMemo(() => {
+    if (!data) return "";
     const now = new Date();
     return now.toLocaleString();
   }, [data]);
 
   return (
-    <div className="kpi-page">
-      <div className="kpi-top">
-        <div>
-          <div className="kpi-title">KPI Dashboard</div>
-          <div className="kpi-sub">Chọn ngày để xem so sánh lũy tiến theo giờ và hiệu suất ngày.</div>
+    <div className="kpi-root">
+      <div className="kpi-hero">
+        <div className="kpi-title">KPI Dashboard</div>
+        <div className="kpi-sub">
+          Chọn ngày để xem so sánh lũy tiến theo giờ và hiệu suất ngày.
         </div>
 
-        <div className="kpi-controls">
-          <label className="kpi-label">Ngày:</label>
-          <select className="kpi-select" value={date} onChange={(e) => setDate(e.target.value)}>
-            {dates.map((d) => (
-              <option key={d} value={d}>
-                {d}
-              </option>
-            ))}
-          </select>
+        <div className="kpi-toolbar">
+          <div className="tool">
+            <label>Ngày:</label>
+            <select
+              className="dark-select"
+              value={date}
+              onChange={(e) => {
+                const d = e.target.value;
+                setDate(d);
+                fetchData(d);
+              }}
+            >
+              {availableDates.map((d) => (
+                <option key={d} value={d}>
+                  {d}
+                </option>
+              ))}
+            </select>
+          </div>
 
-          <button className="kpi-btn" onClick={() => loadData(date)} disabled={loading || !date}>
+          <button
+            className="btn-primary"
+            onClick={() => fetchData(date)}
+            disabled={loading}
+          >
             {loading ? "Đang tải..." : "Xem dữ liệu"}
           </button>
 
-          <label className="kpi-check">
-            <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
-            <span>Tự cập nhật (1 phút)</span>
+          <label className="checkbox">
+            <input
+              type="checkbox"
+              checked={auto}
+              onChange={(e) => setAuto(e.target.checked)}
+            />
+            Tự cập nhật (1 phút)
           </label>
 
-          <div className="kpi-muted">Cập nhật: {updateAt}</div>
+          <div className="muted">Cập nhật: {lastUpdated}</div>
         </div>
 
-        {err ? <div className="kpi-error">Lỗi: {err}</div> : null}
+        {err ? <div className="error">Lỗi: {err}</div> : null}
       </div>
 
       <div className="kpi-grid">
-        {/* LEFT: Hiệu suất ngày */}
-        <section className="kpi-card">
-          <div className="kpi-card-h">
+        {/* LEFT: Daily */}
+        <div className="card">
+          <div className="card-head">
             <div>
-              <div className="kpi-card-title">So sánh hiệu suất ngày</div>
-              <div className="kpi-card-sub">Mốc cuối: {MARKS[MARKS.length - 1]}</div>
+              <div className="card-title">So sánh hiệu suất ngày</div>
+              <div className="muted2">Mốc cuối: {marks[marks.length - 1]?.label || "—"}</div>
             </div>
           </div>
 
-          <div className="kpi-table-wrap">
-            <table className="kpi-table">
+          <div className="table-wrap">
+            <table className="table">
               <thead>
                 <tr>
                   <th>Chuyền</th>
@@ -165,67 +170,57 @@ export default function KpiDashboardClient() {
                 </tr>
               </thead>
               <tbody>
-                {lines.map((x) => (
-                  <tr
-                    key={x.line}
-                    className={x.line === selectedLine ? "is-active" : ""}
-                    onClick={() => setSelectedLine(x.line)}
-                    style={{ cursor: "pointer" }}
-                  >
-                    <td className="kpi-strong">{x.line}</td>
-                    <td className="kpi-code">{x.maHang || "—"}</td>
-                    <td>{fmtPercent(x.hsDay)}</td>
-                    <td>{fmtPercent(x.hsTarget)}</td>
-                    <td>
-                      <Badge tone={badgeToneForHs(x.hsStatus)}>{x.hsStatus}</Badge>
-                    </td>
-                  </tr>
-                ))}
-                {!lines.length ? (
+                {filteredLines.length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="kpi-empty">
-                      Không có dữ liệu
-                    </td>
+                    <td colSpan={5} className="empty">Không có dữ liệu</td>
                   </tr>
-                ) : null}
+                ) : (
+                  filteredLines.map((r) => (
+                    <tr
+                      key={r.line}
+                      className={r.line === selectedLine ? "row-active" : ""}
+                      onClick={() => setSelectedLine(r.line)}
+                    >
+                      <td className="strong">{r.line}</td>
+                      <td>{r.maHang ?? "—"}</td>
+                      <td>{fmtPercent(r.hsDay)}</td>
+                      <td>{fmtPercent(r.hsTarget)}</td>
+                      <td>
+                        <span className={badgeClass(r.hsStatus)}>{r.hsStatus}</span>
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
-        </section>
+        </div>
 
-        {/* RIGHT: Lũy tiến theo giờ */}
-        <section className="kpi-card">
-          <div className="kpi-card-h kpi-card-h--split">
+        {/* RIGHT: Hourly */}
+        <div className="card">
+          <div className="card-head">
             <div>
-              <div className="kpi-card-title">
-                So sánh lũy tiến theo giờ (chuyền: <span className="kpi-accent">{selected?.line || "—"}</span>)
+              <div className="card-title">
+                So sánh lũy tiến theo giờ (chuyền: {selected?.line ?? "—"})
               </div>
-              <div className="kpi-card-sub">
-                Mã hàng: <span className="kpi-code">{selected?.maHang || "—"}</span>
-                {selected?.chungLoai ? (
-                  <>
-                    {" "}
-                    • Chủng loại: <span className="kpi-code">{selected?.chungLoai}</span>
-                  </>
-                ) : null}
+              <div className="muted2">
+                Mã hàng: <b>{selected?.maHang ?? "—"}</b>
               </div>
             </div>
 
-            <div className="kpi-right-tools">
-              <input
-                className="kpi-search"
-                placeholder="Tìm chuyền hoặc mã hàng..."
-                value={lineSearch}
-                onChange={(e) => setLineSearch(e.target.value)}
-              />
-            </div>
+            <input
+              className="search"
+              placeholder="Tìm chuyền hoặc mã hàng..."
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
           </div>
 
-          <div className="kpi-chips">
-            {filteredLines.map((x) => (
+          <div className="chips">
+            {filteredLines.slice(0, 20).map((x) => (
               <button
                 key={x.line}
-                className={`kpi-chip ${x.line === selected?.line ? "is-active" : ""}`}
+                className={`chip ${x.line === selectedLine ? "chip-active" : ""}`}
                 onClick={() => setSelectedLine(x.line)}
                 title={x.maHang || ""}
               >
@@ -234,57 +229,64 @@ export default function KpiDashboardClient() {
             ))}
           </div>
 
-          <div className="kpi-kpis">
-            <div className="kpi-kpi">
-              <div className="kpi-kpi-label">ĐM/H</div>
-              <div className="kpi-kpi-val">{fmtNum(selected?.dmHour)}</div>
+          <div className="kpi-mini">
+            <div className="mini-box">
+              <div className="mini-label">DM/H</div>
+              <div className="mini-val">{selected?.dmHour ?? "—"}</div>
             </div>
-            <div className="kpi-kpi">
-              <div className="kpi-kpi-label">ĐM/NGÀY</div>
-              <div className="kpi-kpi-val">{fmtNum(selected?.dmDay)}</div>
+            <div className="mini-box">
+              <div className="mini-label">DM/NGÀY</div>
+              <div className="mini-val">{selected?.dmNgay ?? "—"}</div>
             </div>
           </div>
 
-          <div className="kpi-table-wrap">
-            <table className="kpi-table">
+          <div className="table-wrap">
+            <table className="table">
               <thead>
                 <tr>
                   <th>Mốc</th>
                   <th>Lũy tiến</th>
-                  <th>ĐM lũy tiến</th>
+                  <th>DM lũy tiến</th>
                   <th>Chênh</th>
                   <th>Trạng thái</th>
                 </tr>
               </thead>
               <tbody>
-                {MARKS.map((m) => {
-                  const v = selected?.hourly?.[m] ?? null;
-                  const dm = selected?.dmCum?.[m] ?? null;
-                  const df = selected?.diff?.[m] ?? null;
-                  const st = selected?.status?.[m] ?? "N/A";
-                  return (
-                    <tr key={m}>
-                      <td className="kpi-strong">{m}</td>
-                      <td>{fmtNum(v)}</td>
-                      <td>{fmtNum(dm)}</td>
-                      <td>{typeof df === "number" ? (df >= 0 ? `+${fmtNum(df)}` : fmtNum(df)) : "—"}</td>
-                      <td>
-                        <Badge tone={badgeToneForStep(st)}>{st}</Badge>
-                      </td>
-                    </tr>
-                  );
-                })}
                 {!selected ? (
                   <tr>
-                    <td colSpan={5} className="kpi-empty">
-                      Chưa chọn chuyền
-                    </td>
+                    <td colSpan={5} className="empty">Chưa chọn chuyền</td>
                   </tr>
-                ) : null}
+                ) : (
+                  marks.map((m) => {
+                    const a = selected.hourly?.[m.key] ?? null;
+                    const e = selected.expected?.[m.key] ?? null;
+                    const d = selected.diff?.[m.key] ?? null;
+                    const st = selected.hourlyStatus?.[m.key] ?? "N/A";
+                    return (
+                      <tr key={m.key}>
+                        <td className="strong">{m.label}</td>
+                        <td>{fmtNum(a)}</td>
+                        <td>{fmtNum(e)}</td>
+                        <td>{d === null ? "—" : (d > 0 ? `+${fmtNum(d)}` : fmtNum(d))}</td>
+                        <td>
+                          <span className={badgeClass(st)}>{st}</span>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
               </tbody>
             </table>
           </div>
-        </section>
+
+          {data?.debug ? (
+            <div className="debug">
+              Debug: headerRow={data.debug.headerRow}, dataStart={data.debug.dataStart},
+              dmNgayCol={data.debug.dmNgayCol}, dmHCol={data.debug.dmHCol}, maHangCol={data.debug.maHangCol},
+              marks={data.debug.marksCount}
+            </div>
+          ) : null}
+        </div>
       </div>
     </div>
   );
