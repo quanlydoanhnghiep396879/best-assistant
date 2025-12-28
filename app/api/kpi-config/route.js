@@ -1,68 +1,59 @@
 import { NextResponse } from "next/server";
-import { sheetsClient, mustEnv } from "../_lib/googleSheetsClient";
+import { getSheetsClient, getSpreadsheetId } from "../_lib/googleSheetsClient";
 
-// ===== helpers =====
-function pad2(n) { return String(n).padStart(2, "0"); }
-
-function serialToDMY(serial) {
-  const base = Date.UTC(1899, 11, 30);
-  const ms = base + Number(serial) * 86400000;
+function excelSerialToDMY(serial) {
+  const n = Number(serial);
+  if (!Number.isFinite(n)) return null;
+  const ms = Date.UTC(1899, 11, 30) + n * 86400000;
   const d = new Date(ms);
-  return `${pad2(d.getUTCDate())}/${pad2(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}`;
+  return new Intl.DateTimeFormat("vi-VN", {
+    timeZone: "Asia/Ho_Chi_Minh",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).format(d);
 }
 
-function normalizeDateCell(v) {
-  if (v === null || v === undefined) return "";
-  if (typeof v === "number") return serialToDMY(v);
-
-  const s = String(v).trim();
-  if (!s) return "";
-
-  // chuỗi toàn số => serial
-  if (/^\d+$/.test(s)) return serialToDMY(Number(s));
-
-  return s; // dd/mm/yyyy
+function normDate(s) {
+  let t = (s ?? "").toString().trim().replace(/\s+/g, "").replace(/-/g, "/");
+  // nếu là serial 46015
+  if (/^\d+(\.\d+)?$/.test(t)) {
+    const dmy = excelSerialToDMY(t);
+    if (dmy) t = dmy.replace(/\s+/g, "");
+  }
+  return t;
 }
 
-function dmyToKey(dmy) {
-  // "23/12/2025" -> "2025-12-23" để sort
-  const [dd, mm, yyyy] = dmy.split("/");
-  if (!dd || !mm || !yyyy) return "";
-  return `${yyyy}-${mm}-${dd}`;
+function parseDMY(dmy) {
+  const [dd, mm, yy] = (dmy || "").split("/").map(Number);
+  if (!dd || !mm || !yy) return NaN;
+  return new Date(yy, mm - 1, dd).getTime();
 }
 
 export async function GET(req) {
   try {
-    const spreadsheetId = mustEnv("SPREADSHEET_ID", "GOOGLE_SHEET_ID");
+    const sheets = getSheetsClient();
+    const spreadsheetId = getSpreadsheetId();
 
-    // đọc CONFIG_KPI: cột A=DATE, B=RANGE, bắt đầu từ dòng 2
-    const sheets = sheetsClient();
-    const resp = await sheets.spreadsheets.values.get({
+    const r = await sheets.spreadsheets.values.get({
       spreadsheetId,
       range: "CONFIG_KPI!A2:B",
-      valueRenderOption: "UNFORMATTED_VALUE", // để lấy serial number nếu có
+      valueRenderOption: "UNFORMATTED_VALUE",
     });
 
-    const rows = resp.data.values || [];
+    const rows = r.data.values || [];
+    const dates = [];
 
-    const items = rows
-      .map(r => ({
-        date: normalizeDateCell(r?.[0]),
-        range: (r?.[1] || "").toString().trim(),
-      }))
-      .filter(x => x.date && x.range); // phải có cả date + range
+    for (const row of rows) {
+      const d = normDate(row?.[0]);
+      const range = row?.[1];
+      if (d && range) dates.push(d);
+    }
 
-    // sort tăng dần để 23 nằm trên 24
-    items.sort((a, b) => dmyToKey(a.date).localeCompare(dmyToKey(b.date)));
+    const uniq = Array.from(new Set(dates)).sort((a, b) => parseDMY(a) - parseDMY(b));
 
-    // list ngày
-    const dates = items.map(x => x.date);
-
-    return NextResponse.json({ ok: true, dates });
+    return NextResponse.json({ ok: true, dates: uniq });
   } catch (e) {
-    return NextResponse.json(
-      { ok: false, error: e?.message || String(e) },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: String(e?.message || e) }, { status: 500 });
   }
 }
