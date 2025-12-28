@@ -11,7 +11,7 @@ function getSpreadsheetId() {
 }
 
 function decodeServiceAccount() {
-  const b64 = mustEnv("GOOGLE_SERVICE_ACCOUNT_JSON_BASE64");
+  const b64 = mustEnv("GOOGLE_SERVICE_ACCOUNT_BASE64");
   const jsonStr = Buffer.from(b64, "base64").toString("utf8");
   try {
     return JSON.parse(jsonStr);
