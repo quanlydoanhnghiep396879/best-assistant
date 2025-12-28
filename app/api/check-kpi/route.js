@@ -4,6 +4,16 @@ import { readSheetRange } from "../_lib/googleSheetsClient";
 export const dynamic = "force-dynamic";
 
 const MARKS = ["->9h", "->10h", "->11h", "->12h30", "->13h30", "->14h30", "->15h30", "->16h30"];
+const MARK_HOURS = {
+  "->9h": 1,
+  "->10h": 2,
+  "->11h": 3,
+  "->12h30": 4.5,
+  "->13h30": 5.5,
+  "->14h30": 6.5,
+  "->15h30": 7.5,
+  "->16h30": 8.5,
+};
 
 function norm(s) {
   let x = (s ?? "").toString().trim();
@@ -13,16 +23,16 @@ function norm(s) {
   x = x.replace(/\s+/g, " ");
   return x.toUpperCase();
 }
-
+function keyOf(s) {
+  return norm(s).replace(/[^A-Z0-9]/g, "");
+}
 function toNum(v) {
   if (v === null || v === undefined) return null;
   let s = String(v).trim();
   if (!s || s === "—" || s === "-" || s === "N/A") return null;
 
-  // percent
   if (s.includes("%")) {
-    s = s.replace("%", "").trim();
-    s = s.replace(/\s+/g, "");
+    s = s.replace("%", "").trim().replace(/\s+/g, "");
     if (s.includes(",") && s.includes(".")) s = s.replace(/\./g, "").replace(",", ".");
     else if (s.includes(",") && !s.includes(".")) s = s.replace(",", ".");
     const n = Number(s);
@@ -30,7 +40,6 @@ function toNum(v) {
   }
 
   s = s.replace(/\s+/g, "");
-  // VN: 1,08 => 1.08 ; 1.234,5 => 1234.5
   if (s.includes(",") && s.includes(".")) s = s.replace(/\./g, "").replace(",", ".");
   else if (s.includes(",") && !s.includes(".")) s = s.replace(",", ".");
   const n = Number(s);
@@ -41,78 +50,73 @@ function isLineName(x) {
   const s = norm(x);
   return /^(C\d+|CAT|KCS|HOAN TAT|NM)$/.test(s);
 }
-
-function findBestHeaderRow(values) {
-  // chọn row có nhiều keyword nhất
-  let best = 0;
-  let bestScore = -1;
-
-  for (let r = 0; r < values.length; r++) {
-    const row = values[r] || [];
-    const cells = row.map(norm);
-
-    let score = 0;
-    if (cells.some((c) => c.includes("CHUYEN") || c.includes("CHUYỀN"))) score += 2;
-    if (cells.some((c) => c.includes("DM/NGAY") || c.includes("DM NGAY") || c.includes("ĐM/NGÀY"))) score += 3;
-    if (cells.some((c) => c.includes("DM/H") || c === "H")) score += 3;
-    if (cells.some((c) => c.includes("SUAT") || c.includes("HIEU SUAT") || c.includes("HS"))) score += 2;
-    if (cells.some((c) => MARKS.map(norm).includes(c))) score += 4;
-
-    if (score > bestScore) {
-      bestScore = score;
-      best = r;
-    }
-  }
-  return best;
+function prettyLine(x) {
+  const s = norm(x);
+  if (s === "CAT") return "CÁT";
+  if (s === "HOAN TAT") return "HOÀN TẤT";
+  return s;
 }
 
-function findCol(values, headerRow, regex) {
-  // scan 2 hàng: headerRow và headerRow+1 (vì sheet hay merge)
-  const rows = [values[headerRow] || [], values[headerRow + 1] || []];
+function forwardFillRow(row) {
+  const out = [...(row || [])];
+  let last = "";
+  for (let i = 0; i < out.length; i++) {
+    const v = (out[i] ?? "").toString().trim();
+    if (v) last = v;
+    else if (last) out[i] = last;
+  }
+  return out;
+}
 
-  for (let rr = 0; rr < rows.length; rr++) {
-    const row = rows[rr];
-    for (let c = 0; c < row.length; c++) {
-      const cell = norm(row[c]);
-      if (regex.test(cell)) return c;
+function findRowHavingMarks(values) {
+  const scan = Math.min(values.length, 12);
+  for (let r = 0; r < scan; r++) {
+    const row = forwardFillRow(values[r] || []);
+    const set = new Set(row.map((c) => norm(c)));
+    let hit = 0;
+    for (const m of MARKS) if (set.has(norm(m))) hit++;
+    if (hit >= 3) return r;
+  }
+  return -1;
+}
+
+function buildHeaderTexts(values, r) {
+  const r0 = Math.max(0, r - 1);
+  const r1 = r;
+  const r2 = Math.min(values.length - 1, r + 1);
+
+  const a = forwardFillRow(values[r0] || []);
+  const b = forwardFillRow(values[r1] || []);
+  const c = forwardFillRow(values[r2] || []);
+
+  const maxCol = Math.max(a.length, b.length, c.length);
+  const headers = Array(maxCol).fill("");
+
+  for (let i = 0; i < maxCol; i++) {
+    const parts = [];
+    if ((a[i] ?? "").toString().trim()) parts.push(a[i]);
+    if ((b[i] ?? "").toString().trim()) parts.push(b[i]);
+    if ((c[i] ?? "").toString().trim()) parts.push(c[i]);
+    headers[i] = keyOf(parts.join(" "));
+  }
+  return headers;
+}
+
+function findCol(headers, includesAnyKeys) {
+  for (let i = 0; i < headers.length; i++) {
+    const h = headers[i] || "";
+    for (const k of includesAnyKeys) {
+      if (h.includes(k)) return i;
     }
   }
   return -1;
 }
 
-function findMarkCols(values, headerRow) {
-  const cols = {};
-  for (const m of MARKS) {
-    const mm = norm(m);
-    let found = -1;
-    for (const r of [headerRow, headerRow + 1]) {
-      const row = values[r] || [];
-      for (let c = 0; c < row.length; c++) {
-        if (norm(row[c]) === mm) {
-          found = c;
-          break;
-        }
-      }
-      if (found !== -1) break;
-    }
-    cols[m] = found;
-  }
-  return cols;
-}
-
-function findStartRow(values, afterRow, colLineGuess) {
-  // tìm dòng đầu tiên có C1/C2... ở cột gần colLineGuess nhất
-  for (let r = afterRow; r < values.length; r++) {
-    const row = values[r] || [];
-    // ưu tiên cột đoán
-    if (colLineGuess >= 0 && isLineName(row[colLineGuess])) return r;
-
-    // fallback: quét vài cột đầu
-    for (let c = 0; c < Math.min(row.length, 6); c++) {
-      if (isLineName(row[c])) return r;
-    }
-  }
-  return afterRow + 1;
+function statusFromDiff(diff, tol = 0.5) {
+  if (diff === null) return "N/A";
+  if (Math.abs(diff) <= tol) return "ĐỦ";
+  if (diff > tol) return "VƯỢT";
+  return "THIẾU";
 }
 
 export async function GET(req) {
@@ -121,7 +125,7 @@ export async function GET(req) {
     const date = (searchParams.get("date") || "").trim();
     if (!date) return NextResponse.json({ message: "Missing date" }, { status: 400 });
 
-    // đọc config để lấy RANGE theo date
+    // CONFIG_KPI: A=DATE, B=RANGE
     const cfg = await readSheetRange("CONFIG_KPI!A2:B");
     const map = new Map(
       cfg
@@ -130,63 +134,108 @@ export async function GET(req) {
     );
 
     const rangeA1 = map.get(date);
-    if (!rangeA1) return NextResponse.json({ message: `Không tìm thấy RANGE cho ngày: ${date}` }, { status: 400 });
+    if (!rangeA1) {
+      return NextResponse.json({ message: `Không tìm thấy RANGE cho ngày: ${date}` }, { status: 400 });
+    }
 
     const values = await readSheetRange(rangeA1);
+    if (!values?.length) return NextResponse.json({ message: "Range rỗng" }, { status: 400 });
 
-    // ===== detect header + columns =====
-    const headerRow = findBestHeaderRow(values);
+    const rHeader = findRowHavingMarks(values);
+    if (rHeader < 0) {
+      return NextResponse.json(
+        { message: "Không tìm thấy dòng header chứa các mốc (->9h, ->10h...). Hãy chắc RANGE bao trùm đúng header." },
+        { status: 400 }
+      );
+    }
 
-    const colLine = findCol(values, headerRow, /CHUYEN|CHUYỀN/);
-    const colDmDay = findCol(values, headerRow, /DM\/NGAY|DM NGAY|ĐM\/NGÀY|ĐM NGÀY/);
-    const colDmHour = findCol(values, headerRow, /DM\/H|ĐM\/H|DMH|^H$/);
+    const headers = buildHeaderTexts(values, rHeader);
 
-    const colHsDay = findCol(values, headerRow, /SUAT DAT TRONG|HIEU SUAT TRONG NGAY|HS DAT TRONG NGAY/);
-    const colHsTarget = findCol(values, headerRow, /DINH MUC TRONG|HS DINH MUC|SUAT DINH MUC/);
+    const colLine = findCol(headers, ["CHUYEN"]);
+    const colDmDay = findCol(headers, ["DMNGAY"]);
+    const colDmHour = findCol(headers, ["DMH"]);
 
-    const markCols = findMarkCols(values, headerRow);
+    // ✅ thêm cột MÃ HÀNG + CHỦNG LOẠI theo header
+    const colMaHang = findCol(headers, ["MAHANG"]);
+    const colChungLoai = findCol(headers, ["CHUNGLOAI"]);
 
-    const startRow = findStartRow(values, headerRow + 1, colLine);
+    const markCols = {};
+    for (const m of MARKS) {
+      const mk = keyOf(m); // ->9h => 9H
+      markCols[m] = findCol(headers, [mk]);
+    }
 
-    // ===== parse rows =====
-    const lines = [];
+    if (colLine < 0) {
+      return NextResponse.json({ message: "Không tìm thấy cột CHUYỀN trong header." }, { status: 400 });
+    }
+    if (colDmDay < 0 || colDmHour < 0) {
+      return NextResponse.json(
+        { message: "Không tìm thấy cột ĐM/NGÀY hoặc ĐM/H theo header.", debug: { colDmDay, colDmHour, rHeader } },
+        { status: 400 }
+      );
+    }
 
-    for (let r = startRow; r < values.length; r++) {
+    // data rows
+    const dataRows = [];
+    for (let r = rHeader + 1; r < values.length; r++) {
       const row = values[r] || [];
-      const lineCell = colLine >= 0 ? row[colLine] : row[0];
+      if (isLineName(row[colLine])) dataRows.push(r);
+    }
 
-      if (!lineCell && r > startRow) break; // hết bảng
-      if (!isLineName(lineCell)) continue;  // bỏ dòng không phải chuyền
+    const lines = [];
+    const hsTarget = 0.9;
 
-      const line = norm(lineCell).replace("CAT", "CÁT").replace("HOAN TAT", "HOÀN TẤT");
+    // ✅ khử trùng chuyền bị lặp (NM thường bị 2 dòng)
+    const seen = new Set();
 
-      const dmDay = colDmDay >= 0 ? toNum(row[colDmDay]) : null;
-      const dmHour = colDmHour >= 0 ? toNum(row[colDmHour]) : null;
+    for (const r of dataRows) {
+      const row = values[r] || [];
+      const line = prettyLine(row[colLine]);
+      if (seen.has(line)) continue;
+      seen.add(line);
 
-      // lũy tiến theo giờ
+      const maHang = colMaHang >= 0 ? (row[colMaHang] ?? "").toString().trim() : "";
+      const chungLoai = colChungLoai >= 0 ? (row[colChungLoai] ?? "").toString().trim() : "";
+
+      const dmDay = toNum(row[colDmDay]);
+      const dmHour = toNum(row[colDmHour]);
+
       const hourly = {};
+      const dmCum = {};
+      const diff = {};
+      const status = {};
+
       for (const m of MARKS) {
         const c = markCols[m];
         hourly[m] = c >= 0 ? toNum(row[c]) : null;
+
+        dmCum[m] =
+          typeof dmHour === "number" && MARK_HOURS[m] ? dmHour * MARK_HOURS[m] : null;
+
+        diff[m] =
+          typeof hourly[m] === "number" && typeof dmCum[m] === "number" ? hourly[m] - dmCum[m] : null;
+
+        status[m] = statusFromDiff(diff[m]);
       }
 
-      // hiệu suất ngày (nếu có)
-      const hsDay = colHsDay >= 0 ? toNum(row[colHsDay]) : null;
-      const hsTarget = colHsTarget >= 0 ? toNum(row[colHsTarget]) : 0.9;
+      const last = hourly["->16h30"];
+      const hsDay =
+        typeof last === "number" && typeof dmDay === "number" && dmDay !== 0 ? last / dmDay : null;
 
-      // status HS
-      let hsStatus = "CHƯA CÓ";
-      if (typeof hsDay === "number" && isFinite(hsDay)) {
-        hsStatus = hsDay >= (hsTarget || 0.9) ? "ĐẠT" : "CHƯA ĐẠT";
-      }
+      const hsStatus = hsDay === null ? "CHƯA CÓ" : hsDay >= hsTarget ? "ĐẠT" : "CHƯA ĐẠT";
 
       lines.push({
         line,
+        maHang,
+        chungLoai,
         dmDay: typeof dmDay === "number" ? dmDay : null,
         dmHour: typeof dmHour === "number" ? dmHour : null,
         hourly,
-        hsDay: typeof hsDay === "number" ? hsDay : null,
-        hsTarget: typeof hsTarget === "number" ? hsTarget : 0.9,
+        dmCum,
+        diff,
+        status,
+        hsDay,
+        hsTarget,
         hsStatus,
       });
     }
@@ -195,16 +244,7 @@ export async function GET(req) {
       {
         date,
         range: rangeA1,
-        meta: {
-          headerRow,
-          startRow,
-          colLine,
-          colDmDay,
-          colDmHour,
-          colHsDay,
-          colHsTarget,
-          markCols,
-        },
+        meta: { rHeader, colLine, colDmDay, colDmHour, colMaHang, colChungLoai, markCols, lineCount: lines.length },
         lines,
       },
       { status: 200 }

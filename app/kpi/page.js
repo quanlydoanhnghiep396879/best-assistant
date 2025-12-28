@@ -1,3 +1,4 @@
+import "./kpi.css";
 import KpiDashboardClient from "./KpiDashboardClient";
 
 export const dynamic = "force-dynamic";
