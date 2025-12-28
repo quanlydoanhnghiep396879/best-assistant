@@ -1,39 +1,62 @@
 // app/api/_lib/googleSheetsClient.js
 import { google } from "googleapis";
 
-function loadServiceAccount() {
-  const b64 = process.env.GOOGLE_SERVICE_ACCOUNT_BASE64;
-  const jsonStr = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-
-  if (b64) {
-    const raw = Buffer.from(b64, "base64").toString("utf8");
-    return JSON.parse(raw);
-  }
-  if (jsonStr) return JSON.parse(jsonStr);
-
-  throw new Error(
-    "Missing GOOGLE_SERVICE_ACCOUNT_BASE64 or GOOGLE_SERVICE_ACCOUNT_JSON"
-  );
+function mustEnv(name) {
+  const v = process.env[name];
+  if (!v) throw new Error(Missing ${name});
+  return v;
 }
 
-export async function getSheetsClient() {
-  const credentials = loadServiceAccount();
+function loadServiceAccount() {
+  // ưu tiên GOOGLE_SERVICE_ACCOUNT_JSON_B64
+  const b64 =
+    process.env.GOOGLE_SERVICE_ACCOUNT_JSON_B64 ||
+    process.env.GOOGLE_SERVICE_ACCOUNT_KEY_B64;
 
-  const auth = new google.auth.GoogleAuth({
-    credentials,
+  if (!b64) throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON_B64");
+
+  const jsonStr = Buffer.from(b64, "base64").toString("utf8");
+  const sa = JSON.parse(jsonStr);
+
+  // sửa newline private_key nếu bị mất \n
+  if (sa.private_key && typeof sa.private_key === "string") {
+    sa.private_key = sa.private_key.replace(/\\n/g, "\n");
+  }
+  return sa;
+}
+
+let cached = null;
+
+export async function getSheetsClient() {
+  if (cached) return cached;
+
+  const sa = loadServiceAccount();
+  const auth = new google.auth.JWT({
+    email: sa.client_email,
+    key: sa.private_key,
     scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
   });
 
   const sheets = google.sheets({ version: "v4", auth });
-  return sheets;
+  cached = { sheets, clientEmail: sa.client_email };
+  return cached;
 }
 
-export async function readSheetRange({ spreadsheetId, range }) {
-  const sheets = await getSheetsClient();
+export async function readValues(rangeA1, spreadsheetId = null) {
+  const sid =
+    spreadsheetId ||
+    process.env.GOOGLE_SHEET_ID ||
+    process.env.GOOGLE_SHEETS_ID;
+
+  if (!sid) throw new Error("Missing GOOGLE_SHEET_ID");
+
+  const { sheets } = await getSheetsClient();
   const res = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range,
+    spreadsheetId: sid,
+    range: rangeA1,
     valueRenderOption: "UNFORMATTED_VALUE",
+    dateTimeRenderOption: "FORMATTED_STRING",
   });
+
   return res.data.values || [];
 }

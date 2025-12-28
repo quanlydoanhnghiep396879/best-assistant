@@ -1,19 +1,15 @@
+
 // app/api/check-kpi/route.js
 import { NextResponse } from "next/server";
-import { readSheetRange } from "../_lib/googleSheetsClient";
-
-export const dynamic = "force-dynamic";
-
-const CONFIG_SHEET = process.env.KPI_CONFIG_SHEET || "CONFIG_KPI";
-
-function stripDiacritics(s) {
-  return String(s || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
-}
+import { readValues } from "../_lib/googleSheetsClient";
 
 function norm(s) {
-  return stripDiacritics(s).trim().toUpperCase().replace(/\s+/g, "");
+  return String(s || "")
+    .trim()
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toUpperCase()
+    .replace(/\s+/g, "");
 }
 
 function toNumberSafe(v) {
@@ -25,155 +21,189 @@ function toNumberSafe(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
-async function loadConfig(spreadsheetId) {
-  const values = await readSheetRange({
-    spreadsheetId,
-    range: `${CONFIG_SHEET}!A:Z`,
-  });
+const HS_DINH_MUC = 90; // 90%
 
-  if (!values.length) return [];
+const MARKS = [
+  { key: "->9h", h: 0.5 },
+  { key: "->10h", h: 1.5 },
+  { key: "->11h", h: 2.5 },
+  { key: "->12h30", h: 4.0 },
+  { key: "->13h30", h: 5.0 },
+  { key: "->14h30", h: 6.0 },
+  { key: "->15h30", h: 7.0 },
+  { key: "->16h30", h: 8.0 },
+];
 
-  const header = values[0] || [];
-  const colDate = header.findIndex((x) => norm(x) === "DATE");
-  const colRange = header.findIndex((x) => norm(x) === "RANGE");
-
-  if (colDate < 0 || colRange < 0) {
-    throw new Error(`CONFIG_KPI thiếu header DATE/RANGE`);
-  }
-
-  const items = [];
-  for (let r = 1; r < values.length; r++) {
-    const row = values[r] || [];
-    const date = row[colDate];
-    const range = row[colRange];
-    if (!date || !range) continue;
-    items.push({ date: String(date), range: String(range) });
-  }
-  return items;
+function isLineName(x) {
+  const s = norm(x);
+  // C1..C20, CAT, KCS, HOANTAT, NM
+  if (/^C\d+$/.test(s)) return true;
+  if (s === "CAT" || s === "KCS" || s === "HOANTAT" || s === "NM") return true;
+  return false;
 }
 
-function detectHeaderRow(values) {
-  // dò 15 dòng đầu, dòng nào chứa nhiều "từ khóa" nhất thì coi là header
-  const maxScan = Math.min(values.length, 15);
-  let best = { idx: 0, score: -1 };
-
-  for (let i = 0; i < maxScan; i++) {
+function findHeaderIndex(values) {
+  // tìm dòng có DM/NGAY hoặc DM/H
+  const max = Math.min(values.length, 6);
+  for (let i = 0; i < max; i++) {
     const row = values[i] || [];
-    let score = 0;
-
-    for (const cell of row) {
-      const c = norm(cell);
-      if (!c) continue;
-
-      if (c.includes("CHUYEN")) score += 3;
-      if (c === "MH" || c.includes("MAHANG")) score += 3;
-      if (c.includes("DM/NGAY") || c.includes("DMNGAY")) score += 3;
-      if (c.includes("DM/H") || c.includes("DMH")) score += 3;
-
-      if (c.includes("->")) score += 1; // mốc giờ
-      if (c.match(/^-\>?\d/)) score += 1;
+    const joined = row.map(norm).join(" ");
+    if (joined.includes("DM/NGAY") || joined.includes("DMNGAY") || joined.includes("DM/H") || joined.includes("DMH")) {
+      return i;
     }
-
-    if (score > best.score) best = { idx: i, score };
   }
-
-  return best.idx;
+  return 1; // fallback
 }
 
-function parseKpi(values) {
-  if (!values.length) return { lines: [], marks: [], cols: {} };
-
-  const headerRow = detectHeaderRow(values);
-  const header = values[headerRow] || [];
-  const headerNorm = header.map(norm);
-
-  const colLine =
-    headerNorm.findIndex((x) => x.includes("CHUYEN")) >= 0
-      ? headerNorm.findIndex((x) => x.includes("CHUYEN"))
-      : 0;
-
-  const colMaHang =
-    headerNorm.findIndex((x) => x === "MH") >= 0
-      ? headerNorm.findIndex((x) => x === "MH")
-      : headerNorm.findIndex((x) => x.includes("MAHANG"));
-
-  const colDmDay =
-    headerNorm.findIndex((x) => x.includes("DM/NGAY") || x.includes("DMNGAY"));
-
-  const colDmHour =
-    headerNorm.findIndex((x) => x.includes("DM/H") || x.includes("DMH"));
-
-  // marks: các cột chứa "->"
-  const marks = [];
-  const markCols = [];
-  header.forEach((cell, idx) => {
-    const raw = String(cell || "").trim();
-    const n = norm(raw);
-    if (!raw) return;
-    if (n.includes("->") || raw.includes("->")) {
-      marks.push(raw);
-      markCols.push(idx);
-    }
-  });
-
-  const lines = [];
-  for (let r = headerRow + 1; r < values.length; r++) {
-    const row = values[r] || [];
-
-    const line = String(row[colLine] || "").trim();
-    if (!line) continue;
-
-    // bỏ các dòng tổng nếu có
-    const nline = norm(line);
-    if (nline.includes("TOTAL")) continue;
-
-    const maHang = colMaHang >= 0 ? String(row[colMaHang] || "").trim() : "";
-
-    const dmDay = colDmDay >= 0 ? toNumberSafe(row[colDmDay]) : 0;
-    const dmHour = colDmHour >= 0 ? toNumberSafe(row[colDmHour]) : 0;
-
-    const hourly = {};
-    for (let i = 0; i < marks.length; i++) {
-      hourly[marks[i]] = toNumberSafe(row[markCols[i]]);
-    }
-
-    lines.push({ line, maHang, dmDay, dmHour, hourly });
+function buildHeader(values, topIdx, subIdx) {
+  const top = values[topIdx] || [];
+  const sub = values[subIdx] || [];
+  const cols = Math.max(top.length, sub.length);
+  const headers = [];
+  for (let c = 0; c < cols; c++) {
+    const a = top[c] ?? "";
+    const b = sub[c] ?? "";
+    headers.push(norm(${a} ${b}));
   }
+  return headers;
+}
 
-  return {
-    lines,
-    marks,
-    cols: { headerRow, colLine, colMaHang, colDmDay, colDmHour },
-  };
+function findCol(headers, includesAny, fallback = -1) {
+  for (let i = 0; i < headers.length; i++) {
+    const h = headers[i];
+    if (!h) continue;
+    if (includesAny.some((k) => h.includes(k))) return i;
+  }
+  return fallback;
 }
 
 export async function GET(req) {
   try {
-    const spreadsheetId = process.env.KPI_SHEET_ID;
-    if (!spreadsheetId) throw new Error("Missing KPI_SHEET_ID");
+    const url = new URL(req.url);
+    const date = (url.searchParams.get("date") || "").trim();
+    if (!date) return NextResponse.json({ ok: false, error: "Missing date" }, { status: 400 });
 
-    const { searchParams } = new URL(req.url);
-    const date = searchParams.get("date");
-    if (!date) throw new Error("Missing date");
-
-    const cfg = await loadConfig(spreadsheetId);
-    const found = cfg.find((x) => String(x.date).trim() === String(date).trim());
-    if (!found) throw new Error(`Không tìm thấy date=${date} trong CONFIG_KPI`);
-
-    const values = await readSheetRange({
-      spreadsheetId,
-      range: found.range,
+    // đọc CONFIG_KPI để lấy range theo date
+    const cfg = await readValues("CONFIG_KPI!A:B");
+    const map = new Map();
+    cfg.slice(1).forEach((r) => {
+      if (r && r[0] && r[1]) map.set(String(r[0]).trim(), String(r[1]).trim());
     });
 
-    const parsed = parseKpi(values);
+    const rangeA1 = map.get(date);
+    if (!rangeA1) {
+      return NextResponse.json({
+        ok: true,
+        date,
+        rangeA1: null,
+        lines: [],
+        marks: MARKS.map((m) => m.key),
+        debug: { reason: "No range found for date in CONFIG_KPI" },
+      });
+    }
+
+    const values = await readValues(rangeA1);
+    if (!values.length) {
+      return NextResponse.json({
+        ok: true,
+        date,
+        rangeA1,
+        lines: [],
+        marks: MARKS.map((m) => m.key),
+        debug: { reason: "Range returns empty values (check share + sheetId + range)" },
+      });
+    }
+
+    const headerSubIdx = findHeaderIndex(values);
+    const headerTopIdx = Math.max(0, headerSubIdx - 1);
+    const headers = buildHeader(values, headerTopIdx, headerSubIdx);
+    const dataStart = headerSubIdx + 1;
+
+    const colChuyen = findCol(headers, ["CHUYEN"], 0); // nếu không có label, lấy cột A
+    const colMaHang = findCol(headers, ["MAHANG", "MH"], 5); // fallback cột F
+    const colDmNgay = findCol(headers, ["DM/NGAY", "DMNGAY"], -1);
+    const colDmH = findCol(headers, ["DM/H", "DMH"], -1);
+
+    const markCols = {};
+    for (const m of MARKS) {
+      const k = norm(m.key);
+      // chấp nhận ->9H, ->09H, v.v.
+      const idx = headers.findIndex((h) => h.includes(k.replace("->", "")) || h.includes(k));
+      markCols[m.key] = idx;
+    }
+
+    const lines = [];
+
+    for (let r = dataStart; r < values.length; r++) {
+      const row = values[r] || [];
+      const chuyen = String(row[colChuyen] ?? "").trim();
+      if (!chuyen) continue;
+      if (!isLineName(chuyen)) continue;
+
+      const maHangRaw = row[colMaHang] ?? "";
+      const maHang = String(maHangRaw).trim() || "";
+
+      const dmDay = colDmNgay >= 0 ? toNumberSafe(row[colDmNgay]) : 0;
+      const dmHour = colDmH >= 0 ? toNumberSafe(row[colDmH]) : 0;
+
+      const hourly = {};
+      let lastActual = 0;
+
+      for (const m of MARKS) {
+        const idx = markCols[m.key];
+        const actual = idx >= 0 ? toNumberSafe(row[idx]) : 0;
+        lastActual = actual;
+
+        const expected = dmDay > 0 ? (dmDay * (m.h / 8)) : 0; // chia theo 8h
+        const diff = actual - expected;
+
+        let status = "N/A";
+        if (dmDay > 0) {
+          if (actual > expected) status = "VƯỢT";
+          else if (Math.abs(diff) < 1e-9) status = "ĐỦ";
+          else status = "THIẾU";
+        }
+
+        hourly[m.key] = { actual, expected, diff, status };
+      }
+
+      const hsDat = dmDay > 0 ? (lastActual / dmDay) * 100 : null;
+      let statusDay = "CHƯA CÓ";
+      if (dmDay > 0 && hsDat !== null) statusDay = hsDat >= 100 ? "ĐẠT" : "CHƯA ĐẠT";
+
+      lines.push({
+        chuyen,
+        maHang,
+        dmDay,
+        dmHour,
+        hsDinhMuc: HS_DINH_MUC,
+        hsDat,
+        statusDay,
+        hourly,
+      });
+    }
 
     return NextResponse.json({
       ok: true,
       date,
-      range: found.range,
-      ...parsed,
+      rangeA1,
+      marks: MARKS.map((m) => m.key),
+      lines,
+      debug: {
+        headerTopIdx,
+        headerSubIdx,
+        dataStart,
+        colChuyen,
+        colMaHang,
+        colDmNgay,
+        colDmH,
+        markCols,
+      },
     });
   } catch (e) {
-    return NextResponse.json({ ok: false, error: e.message || String(e) });
+    return NextResponse.json(
+      { ok: false, error: e.message || String(e) },
+      { status: 500 }
+    );
   }
 }

@@ -2,131 +2,67 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-const HS_TARGET = 90; // 90%
-
-const SLOT_INDEX = {
-  "->9H": 1,
-  "->10H": 2,
-  "->11H": 3,
-  "->12H30": 4,
-  "->13H30": 5,
-  "->14H30": 6,
-  "->15H30": 7,
-  "->16H30": 8,
-};
-
-function slotIndex(label) {
-  const k = String(label || "").replace(/\s+/g, "").toUpperCase();
-  return SLOT_INDEX[k] ?? null;
+function fmtPercent(v) {
+  if (v === null || v === undefined) return "—";
+  if (!Number.isFinite(v)) return "—";
+  return `${v.toFixed(2)}%`;
 }
 
-function fmtPct(x) {
-  if (x === null || x === undefined || !Number.isFinite(x)) return "—";
-  return `${x.toFixed(2)}%`;
-}
-
-function fmtNum(x) {
-  if (x === null || x === undefined || !Number.isFinite(x)) return "—";
-  return String(Math.round(x));
-}
-
-function statusClass(s) {
-  const t = (s || "").toUpperCase();
-  if (["VƯỢT", "VUOT", "ĐỦ", "DU", "ĐẠT", "DAT"].includes(t)) return "pill pill-ok";
-  if (["THIẾU", "THIEU", "CHƯA ĐẠT", "CHUA DAT"].includes(t)) return "pill pill-bad";
-  if (["CHƯA CÓ", "CHUA CO"].includes(t)) return "pill pill-warn";
-  return "pill pill-na";
-}
-
-function calcDaily(lineObj, marks) {
-  const dmDay = lineObj.dmDay || 0;
-  if (!dmDay) return { hs: null, st: "CHƯA CÓ" };
-
-  // ưu tiên ->16h30 nếu có
-  const end =
-    marks.find((m) => String(m).replace(/\s+/g, "").toUpperCase() === "->16H30") ||
-    marks[marks.length - 1];
-
-  const actual = end ? lineObj.hourly?.[end] : null;
-  if (!actual || actual <= 0) return { hs: null, st: "CHƯA CÓ" };
-
-  const hs = (actual / dmDay) * 100;
-  if (hs >= 100) return { hs, st: "VƯỢT" };
-  if (hs >= HS_TARGET) return { hs, st: "ĐẠT" };
-  return { hs, st: "CHƯA ĐẠT" };
-}
-
-function calcHourlyRow(lineObj, label) {
-  const actual = lineObj.hourly?.[label];
-  const dmDay = lineObj.dmDay || 0;
-
-  const idx = slotIndex(label);
-  let expected = null;
-
-  // expected = DM/NGÀY * (slot/8)
-  if (dmDay > 0 && idx) expected = (dmDay * idx) / 8;
-
-  if (expected === null || !Number.isFinite(expected) || expected <= 0) {
-    return { actual, expected: null, diff: null, st: "N/A" };
-  }
-
-  const diff = Number(actual || 0) - expected;
-  let st = "ĐỦ";
-  if (diff > 0) st = "VƯỢT";
-  else if (diff < 0) st = "THIẾU";
-
-  return { actual, expected, diff, st };
+function badgeClass(status) {
+  const s = String(status || "").toUpperCase();
+  if (["ĐẠT", "VƯỢT", "ĐỦ"].includes(s)) return "badge badge-ok";
+  if (["CHƯA ĐẠT", "THIẾU"].includes(s)) return "badge badge-bad";
+  if (["CHƯA CÓ"].includes(s)) return "badge badge-warn";
+  return "badge badge-na";
 }
 
 export default function KpiDashboardClient() {
-  const [cfg, setCfg] = useState([]);
+  const [items, setItems] = useState([]); // config dates
   const [date, setDate] = useState("");
   const [auto, setAuto] = useState(true);
-  const [lastUpdate, setLastUpdate] = useState("");
   const [loading, setLoading] = useState(false);
-
-  const [data, setData] = useState(null); // { lines, marks, cols... }
-  const [pick, setPick] = useState("");
+  const [data, setData] = useState(null);
+  const [selected, setSelected] = useState("");
   const [q, setQ] = useState("");
 
   async function loadConfig() {
     const r = await fetch("/api/kpi-config", { cache: "no-store" });
     const j = await r.json();
-    if (!j.ok) throw new Error(j.error || "Load config failed");
-
-    setCfg(j.items || []);
-    if (!date && j.items?.[0]?.date) setDate(j.items[0].date);
+    if (j.ok) {
+      setItems(j.items || []);
+      if (!date && j.items?.length) setDate(j.items[j.items.length - 1].date);
+    } else {
+      console.error(j.error);
+    }
   }
 
-  async function loadData(forceDate) {
-    const d = forceDate ?? date;
+  async function loadData(d = date) {
     if (!d) return;
-
     setLoading(true);
     try {
-      const r = await fetch(`/api/check-kpi?date=${encodeURIComponent(d)}`, {
-        cache: "no-store",
-      });
+      const r = await fetch(`/api/check-kpi?date=${encodeURIComponent(d)}`, { cache: "no-store" });
       const j = await r.json();
-      if (!j.ok) throw new Error(j.error || "Load data failed");
-
       setData(j);
-      setLastUpdate(new Date().toLocaleString("vi-VN"));
-      if (!pick && j.lines?.[0]?.line) setPick(j.lines[0].line);
+
+      // auto chọn chuyền đầu tiên
+      const first = j?.lines?.[0]?.chuyen || "";
+      setSelected((prev) => prev || first);
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    loadConfig().catch(console.error);
+    loadConfig();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     if (!auto) return;
-    const id = setInterval(() => loadData().catch(console.error), 60_000);
-    return () => clearInterval(id);
+    const t = setInterval(() => {
+      if (date) loadData(date);
+    }, 60_000);
+    return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auto, date]);
 
@@ -134,44 +70,35 @@ export default function KpiDashboardClient() {
   const marks = data?.marks || [];
 
   const filteredLines = useMemo(() => {
-    const t = q.trim().toUpperCase();
-    if (!t) return lines;
-    return lines.filter(
-      (x) =>
-        (x.line || "").toUpperCase().includes(t) ||
-        (x.maHang || "").toUpperCase().includes(t)
+    const qq = q.trim().toLowerCase();
+    if (!qq) return lines;
+    return lines.filter((x) =>
+      String(x.chuyen || "").toLowerCase().includes(qq) ||
+      String(x.maHang || "").toLowerCase().includes(qq)
     );
-  }, [q, lines]);
+  }, [lines, q]);
 
-  const picked = useMemo(() => lines.find((x) => x.line === pick) || null, [lines, pick]);
-  const pickedMaHang = picked?.maHang || "—";
+  const selectedLine = useMemo(() => {
+    return lines.find((x) => x.chuyen === selected) || null;
+  }, [lines, selected]);
 
   return (
     <div className="kpi-page">
       <div className="kpi-hero">
-        <div className="kpi-title">KPI Dashboard</div>
-        <div className="kpi-sub">Chọn ngày để xem so sánh lũy tiến theo giờ và hiệu suất ngày.</div>
+        <div>
+          <div className="kpi-title">KPI Dashboard</div>
+          <div className="kpi-sub">Chọn ngày để xem so sánh lũy tiến theo giờ và hiệu suất ngày.</div>
+        </div>
 
         <div className="kpi-controls">
           <label className="kpi-label">Ngày:</label>
-
-          <select
-            className="kpi-select"
-            value={date}
-            onChange={(e) => {
-              setDate(e.target.value);
-              setPick("");
-              setData(null);
-            }}
-          >
-            {cfg.map((x) => (
-              <option key={x.date} value={x.date}>
-                {x.date}
-              </option>
+          <select className="kpi-select" value={date} onChange={(e) => setDate(e.target.value)}>
+            {items.map((it) => (
+              <option key={it.date} value={it.date}>{it.date}</option>
             ))}
           </select>
 
-          <button className="kpi-btn" onClick={() => loadData().catch(console.error)} disabled={loading}>
+          <button className="kpi-btn" onClick={() => loadData(date)} disabled={!date || loading}>
             {loading ? "Đang tải..." : "Xem dữ liệu"}
           </button>
 
@@ -180,23 +107,33 @@ export default function KpiDashboardClient() {
             Tự cập nhật (1 phút)
           </label>
 
-          <div className="kpi-update">
-            Cập nhật: <span>{lastUpdate || "—"}</span>
+          <div className="kpi-updated">
+            {data?.date ? `Đang xem: ${data.date}` : ""}
           </div>
         </div>
+
+        {data?.ok === false && (
+          <div className="kpi-error">Lỗi: {data.error}</div>
+        )}
+
+        {data?.ok && data?.lines?.length === 0 && (
+          <div className="kpi-warn">
+            Không có dữ liệu (kiểm tra Share sheet cho Service Account + đúng RANGE trong CONFIG_KPI).
+          </div>
+        )}
       </div>
 
       <div className="kpi-grid">
         {/* LEFT */}
-        <div className="kpi-card">
-          <div className="kpi-card-head">
+        <div className="card">
+          <div className="card-head">
             <div>
-              <div className="kpi-card-title">So sánh hiệu suất ngày</div>
-              <div className="kpi-card-note">Mốc cuối: -&gt;16h30</div>
+              <div className="card-title">So sánh hiệu suất ngày</div>
+              <div className="card-sub">Mốc cuối: {marks[marks.length - 1] || "->16h30"}</div>
             </div>
           </div>
 
-          <div className="kpi-table-wrap">
+          <div className="table-wrap">
             <table className="kpi-table">
               <thead>
                 <tr>
@@ -208,32 +145,23 @@ export default function KpiDashboardClient() {
                 </tr>
               </thead>
               <tbody>
-                {lines.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="kpi-empty">
-                      Chưa có dữ liệu (bấm “Xem dữ liệu”)
-                    </td>
-                  </tr>
+                {filteredLines.length === 0 ? (
+                  <tr><td colSpan={5} className="muted">Chưa có dữ liệu (bấm “Xem dữ liệu”)</td></tr>
                 ) : (
-                  lines.map((x) => {
-                    const { hs, st } = calcDaily(x, marks);
-                    return (
-                      <tr
-                        key={x.line}
-                        className={x.line === pick ? "row-active" : ""}
-                        onClick={() => setPick(x.line)}
-                        style={{ cursor: "pointer" }}
-                      >
-                        <td className="td-strong">{x.line}</td>
-                        <td className="td-mh">{x.maHang || "—"}</td>
-                        <td>{fmtPct(hs)}</td>
-                        <td>{fmtPct(HS_TARGET)}</td>
-                        <td>
-                          <span className={statusClass(st)}>{st}</span>
-                        </td>
-                      </tr>
-                    );
-                  })
+                  filteredLines.map((x) => (
+                    <tr
+                      key={x.chuyen}
+                      className={x.chuyen === selected ? "row-active" : ""}
+                      onClick={() => setSelected(x.chuyen)}
+                      style={{ cursor: "pointer" }}
+                    >
+                      <td className="mono">{x.chuyen}</td>
+                      <td className="mono">{x.maHang || "—"}</td>
+                      <td>{fmtPercent(x.hsDat)}</td>
+                      <td>{fmtPercent(x.hsDinhMuc)}</td>
+                      <td><span className={badgeClass(x.statusDay)}>{x.statusDay}</span></td>
+                    </tr>
+                  ))
                 )}
               </tbody>
             </table>
@@ -241,86 +169,77 @@ export default function KpiDashboardClient() {
         </div>
 
         {/* RIGHT */}
-        <div className="kpi-card">
-          <div className="kpi-card-head kpi-card-head-split">
+        <div className="card">
+          <div className="card-head row-between">
             <div>
-              <div className="kpi-card-title">
-                So sánh lũy tiến theo giờ (chuyền: <span className="accent">{pick || "—"}</span>)
+              <div className="card-title">
+                So sánh lũy tiến theo giờ (chuyền: <span className="mono">{selected || "—"}</span>)
               </div>
-              <div className="kpi-card-note">
-                Mã hàng: <span className="accent">{pickedMaHang}</span>
+              <div className="card-sub">
+                Mã hàng: <span className="mono">{selectedLine?.maHang || "—"}</span>
               </div>
             </div>
 
             <input
               className="kpi-search"
+              placeholder="Tìm chuyền hoặc mã hàng..."
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder="Tìm chuyền hoặc mã hàng..."
             />
           </div>
 
-          <div className="kpi-chips">
+          <div className="chip-row">
             {filteredLines.map((x) => (
               <button
-                key={x.line + (x.maHang || "")}
-                className={`chip ${x.line === pick ? "chip-active" : ""}`}
-                onClick={() => setPick(x.line)}
+                key={x.chuyen}
+                className={`chip ${x.chuyen === selected ? "chip-active" : ""}`}
+                onClick={() => setSelected(x.chuyen)}
                 title={x.maHang || ""}
               >
-                {x.line}
+                {x.chuyen}
               </button>
             ))}
           </div>
 
-          <div className="kpi-mini">
-            <div className="mini-card">
-              <div className="mini-label">DM/H</div>
-              <div className="mini-val">{picked ? fmtNum(picked.dmHour) : "—"}</div>
+          <div className="mini-cards">
+            <div className="mini">
+              <div className="mini-title">DM/H</div>
+              <div className="mini-val">{selectedLine?.dmHour ? selectedLine.dmHour : "—"}</div>
             </div>
-            <div className="mini-card">
-              <div className="mini-label">DM/NGÀY</div>
-              <div className="mini-val">{picked ? fmtNum(picked.dmDay) : "—"}</div>
+            <div className="mini">
+              <div className="mini-title">DM/NGÀY</div>
+              <div className="mini-val">{selectedLine?.dmDay ? selectedLine.dmDay : "—"}</div>
             </div>
           </div>
 
-          <div className="kpi-table-wrap">
+          <div className="table-wrap">
             <table className="kpi-table">
               <thead>
                 <tr>
                   <th>Mốc</th>
                   <th>Lũy tiến</th>
-                  <th>DM lũy tiến</th>
+                  <th>ĐM lũy tiến</th>
                   <th>Chênh</th>
                   <th>Trạng thái</th>
                 </tr>
               </thead>
               <tbody>
-                {!picked ? (
-                  <tr>
-                    <td colSpan={5} className="kpi-empty">
-                      Chưa chọn chuyền
-                    </td>
-                  </tr>
+                {!selectedLine ? (
+                  <tr><td colSpan={5} className="muted">Chưa chọn chuyền</td></tr>
                 ) : (
                   marks.map((m) => {
-                    const r = calcHourlyRow(picked, m);
-                    const diffText =
-                      r.diff === null
-                        ? "—"
-                        : r.diff > 0
-                        ? `+${fmtNum(r.diff)}`
-                        : fmtNum(r.diff);
-
+                    const h = selectedLine.hourly?.[m];
+                    const actual = h?.actual ?? null;
+                    const expected = h?.expected ?? null;
+                    const diff = h?.diff ?? null;
+                    const status = h?.status ?? "N/A";
                     return (
                       <tr key={m}>
-                        <td className="td-strong">{m}</td>
-                        <td>{r.actual === null || r.actual === undefined ? "—" : fmtNum(r.actual)}</td>
-                        <td>{r.expected === null ? "—" : fmtNum(r.expected)}</td>
-                        <td>{diffText}</td>
-                        <td>
-                          <span className={statusClass(r.st)}>{r.st}</span>
-                        </td>
+                        <td className="mono">{m}</td>
+                        <td>{actual === null ? "—" : actual}</td>
+                        <td>{expected === null ? "—" : Math.round(expected)}</td>
+                        <td>{diff === null ? "—" : (diff >= 0 ? `+${Math.round(diff)}` : `${Math.round(diff)}`)}</td>
+                        <td><span className={badgeClass(status)}>{status}</span></td>
                       </tr>
                     );
                   })
@@ -329,9 +248,10 @@ export default function KpiDashboardClient() {
             </table>
           </div>
 
-          {data?.cols && (
-            <div className="kpi-debug">
-              Debug: headerRow={data.cols.headerRow}, CHUYỀN={data.cols.colLine}, MH={data.cols.colMaHang}, DM/NGÀY={data.cols.colDmDay}, DM/H={data.cols.colDmHour}, marks={marks.length}
+          {/* debug nhỏ nếu bạn cần */}
+          {data?.debug && (
+            <div className="debug">
+              Debug: DM/NGÀY col={data.debug.colDmNgay}, DM/H col={data.debug.colDmH}
             </div>
           )}
         </div>

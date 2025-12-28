@@ -1,4 +1,4 @@
-
+// app/kpi/page.js
 import "./kpi.css";
 import KpiDashboardClient from "./KpiDashboardClient";
 
