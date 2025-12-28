@@ -2,308 +2,287 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-function pct(x) {
-  if (x == null) return "—";
-  return (x * 100).toFixed(2) + "%";
+function fmtPercent(x) {
+  if (x === null || x === undefined) return "—";
+  const n = Number(x);
+  if (!Number.isFinite(n)) return "—";
+  return `${(n * 100).toFixed(2)}%`;
+}
+function fmtNum(x) {
+  if (x === null || x === undefined) return "—";
+  const n = Number(x);
+  if (!Number.isFinite(n)) return "—";
+  // hiển thị kiểu VN
+  return n.toLocaleString("vi-VN");
 }
 
-function isGreenStatus(s) {
-  const up = String(s || "").toUpperCase();
-  return ["VƯỢT","ĐỦ","ĐẠT"].some(k => up.includes(k));
-}
-function isRedStatus(s) {
-  const up = String(s || "").toUpperCase();
-  return ["THIẾU","CHƯA ĐẠT","KHÔNG ĐẠT","CHƯA CÓ"].some(k => up.includes(k));
-}
-
-function StatusPill({ value }) {
-  const v = value || "—";
-  const style = {
-    display: "inline-block",
-    padding: "2px 8px",
-    borderRadius: 999,
-    border: "1px solid #ccc",
-    fontSize: 12,
-    fontWeight: 700,
-    background: "#f3f4f6",
-    color: "#374151",
-  };
-
-  if (isGreenStatus(v)) {
-    style.background = "#dcfce7";
-    style.border = "1px solid #86efac";
-    style.color = "#166534";
-  } else if (isRedStatus(v)) {
-    style.background = "#fee2e2";
-    style.border = "1px solid #fca5a5";
-    style.color = "#991b1b";
-  }
-
-  return <span style={style}>{v}</span>;
+function badgeClass(text) {
+  const t = String(text || "").toUpperCase();
+  if (["VƯỢT", "ĐỦ", "ĐẠT"].includes(t)) return "badge badge-green";
+  if (["THIẾU", "CHƯA ĐẠT", "CHƯA CÓ"].includes(t)) return "badge badge-red";
+  return "badge badge-gray";
 }
 
 export default function KpiDashboardClient() {
-  const [dates, setDates] = useState([]);
-  const [selectedDate, setSelectedDate] = useState("");
-  const [auto, setAuto] = useState(true);
-
-  const [data, setData] = useState(null);
+  const [cfg, setCfg] = useState([]);
+  const [dateKey, setDateKey] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [auto, setAuto] = useState(true); // mặc định 1 phút
   const [err, setErr] = useState("");
+  const [data, setData] = useState(null);
 
-  const [q, setQ] = useState("");
-  const [selectedLine, setSelectedLine] = useState("");
+  const [searchLine, setSearchLine] = useState("");
+  const [selectedLineLabel, setSelectedLineLabel] = useState("");
 
-  async function loadConfig() {
-    const r = await fetch("/api/kpi-config", { cache: "no-store" });
-    const j = await r.json();
-    if (j.status !== "success") throw new Error(j.message || "Config error");
-    setDates(j.dates || []);
-    setSelectedDate((prev) => prev || (j.dates?.[j.dates.length - 1] || ""));
-  }
-
-  async function loadData(d) {
-    if (!d) return;
-    setErr("");
-    const r = await fetch(`/api/check-kpi?date=${encodeURIComponent(d)}`, { cache: "no-store" });
-    const j = await r.json();
-    if (j.status !== "success") throw new Error(j.message || "Load data error");
-    setData(j);
-
-    const firstLine = j.lines?.[0]?.line || "";
-    setSelectedLine((prev) => prev || firstLine);
-  }
-
+  // load config
   useEffect(() => {
-    loadConfig().catch((e) => setErr(String(e.message || e)));
+    (async () => {
+      try {
+        setErr("");
+        const res = await fetch("/api/kpi-config", { cache: "no-store" });
+        const j = await res.json();
+        if (j.status !== "ok") throw new Error(j.message || "Load config failed");
+        setCfg(j.items || []);
+        if ((j.items || []).length) setDateKey(j.items[0].dateKey);
+      } catch (e) {
+        setErr(e?.message || String(e));
+      }
+    })();
   }, []);
 
+  async function fetchData(nextDateKey = dateKey) {
+    if (!nextDateKey) return;
+    setLoading(true);
+    try {
+      setErr("");
+      const res = await fetch(`/api/check-kpi?date=${encodeURIComponent(nextDateKey)}`, {
+        cache: "no-store",
+        headers: { "Cache-Control": "no-cache" },
+      });
+      const j = await res.json();
+      if (j.status !== "ok") throw new Error(j.message || "Load data failed");
+      setData(j);
+
+      // chọn line mặc định
+      const first = (j.lines || [])[0];
+      if (first) setSelectedLineLabel(first.lineLabel);
+    } catch (e) {
+      setErr(e?.message || String(e));
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // auto refresh 1 phút
   useEffect(() => {
     if (!auto) return;
-    if (!selectedDate) return;
-
-    const t = setInterval(() => {
-      loadData(selectedDate).catch((e) => setErr(String(e.message || e)));
+    const id = setInterval(() => {
+      fetchData(dateKey);
     }, 60_000);
-
-    return () => clearInterval(t);
-  }, [auto, selectedDate]);
+    return () => clearInterval(id);
+  }, [auto, dateKey]);
 
   const lines = data?.lines || [];
-  const filteredLines = useMemo(() => {
-    const s = q.trim().toUpperCase();
-    if (!s) return lines;
-    return lines.filter((x) => String(x.line).toUpperCase().includes(s));
-  }, [lines, q]);
 
-  const current = useMemo(() => {
-    return lines.find((x) => x.line === selectedLine) || null;
-  }, [lines, selectedLine]);
+  const filteredLineChips = useMemo(() => {
+    const q = searchLine.trim().toLowerCase();
+    if (!q) return lines;
+    return lines.filter((x) => String(x.lineLabel).toLowerCase().includes(q));
+  }, [lines, searchLine]);
 
-  const marks = data?.marks || [];
-
-  const hourlyRows = useMemo(() => {
-    if (!current) return [];
-    const dmHour = Number.isFinite(current.dmHour) ? current.dmHour : null;
-
-    return marks.map((m, idx) => {
-      const actual = current.hourly?.[m];
-      const dmCum = Number.isFinite(dmHour) ? dmHour * (idx + 1) : null;
-
-      let status = "N/A";
-      let diff = null;
-
-      if (Number.isFinite(dmCum) && dmCum > 0 && Number.isFinite(actual)) {
-        diff = actual - dmCum;
-        if (diff === 0) status = "ĐỦ";
-        else if (diff > 0) status = "VƯỢT";
-        else status = "THIẾU";
-      }
-
-      return { mark: m, actual, dmCum, diff, status };
-    });
-  }, [current, marks]);
+  const selectedLine = useMemo(() => {
+    return lines.find((x) => x.lineLabel === selectedLineLabel) || null;
+  }, [lines, selectedLineLabel]);
 
   return (
-    <div style={{ padding: 24 }}>
-      <h1 style={{ fontSize: 44, fontWeight: 900, marginBottom: 6 }}>KPI Dashboard</h1>
-      <div style={{ color: "#374151", marginBottom: 16 }}>
-        Chọn ngày để xem so sánh lũy tiến theo giờ và hiệu suất ngày.
-      </div>
+    <div className="wrap">
+      <h1 className="title">KPI Dashboard</h1>
+      <div className="sub">Chọn ngày để xem so sánh lũy tiến theo giờ và hiệu suất ngày.</div>
 
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
-        <div style={{ fontWeight: 800 }}>Ngày:</div>
-        <select
-          value={selectedDate}
-          onChange={(e) => setSelectedDate(e.target.value)}
-          style={{ border: "1px solid #d1d5db", borderRadius: 8, padding: "6px 10px" }}
-        >
-          <option value="">—</option>
-          {dates.map((d) => <option key={d} value={d}>{d}</option>)}
-        </select>
-
-        <button
-          onClick={() => loadData(selectedDate).catch((e) => setErr(String(e.message || e)))}
-          disabled={!selectedDate}
-          style={{
-            border: "1px solid #111827",
-            borderRadius: 8,
-            padding: "6px 12px",
-            fontWeight: 800,
-            cursor: selectedDate ? "pointer" : "not-allowed",
-          }}
-        >
-          Xem dữ liệu
-        </button>
-
-        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
-          <span>Tự cập nhật (1 phút)</span>
-        </label>
-
-        {data?.updatedAt && (
-          <div style={{ color: "#6b7280" }}>
-            Cập nhật: {new Date(data.updatedAt).toLocaleTimeString("vi-VN")} {new Date(data.updatedAt).toLocaleDateString("vi-VN")}
+      <div className="controls">
+        <div className="row">
+          <div className="field">
+            <div className="label">Ngày:</div>
+            <select value={dateKey} onChange={(e) => setDateKey(e.target.value)}>
+              {cfg.map((x) => (
+                <option key={x.dateKey} value={x.dateKey}>
+                  {x.dateLabel}
+                </option>
+              ))}
+            </select>
           </div>
-        )}
+
+          <button disabled={!dateKey || loading} onClick={() => fetchData(dateKey)}>
+            {loading ? "Đang tải..." : "Xem dữ liệu"}
+          </button>
+
+          <label className="chk">
+            <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
+            Tự cập nhật (1 phút)
+          </label>
+
+          <div className="muted">
+            {data?.lastUpdated ? `Cập nhật: ${new Date(data.lastUpdated).toLocaleString("vi-VN")}` : ""}
+          </div>
+        </div>
+
+        {err ? <div className="error">Lỗi: {err}</div> : null}
       </div>
 
-      {err && <div style={{ color: "#dc2626", fontWeight: 900, marginBottom: 12 }}>Lỗi: {err}</div>}
-
-      {/* GRID 2 CỘT (CSS CỨNG) */}
-      <div className="kpiGrid">
+      {/* 2 bảng trái/phải */}
+      <div className="grid2">
         {/* LEFT */}
         <div className="card">
-          <div className="cardHeader">
-            <div className="cardTitle">So sánh hiệu suất ngày</div>
-            <div className="muted">Mốc cuối: -&gt;16h30</div>
+          <div className="cardTitle">
+            <div>So sánh hiệu suất ngày</div>
+            <div className="mutedSmall">Mốc cuối: -&gt;16h30</div>
           </div>
 
-          <div className="tableWrap">
-            <table className="tbl">
-              <thead>
-                <tr>
-                  <th>Chuyền</th>
-                  <th>HS đạt</th>
-                  <th>HS định mức</th>
-                  <th>Trạng thái</th>
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Chuyền</th>
+                <th>HS đạt</th>
+                <th>HS định mức</th>
+                <th>Trạng thái</th>
+              </tr>
+            </thead>
+            <tbody>
+              {lines.map((x) => (
+                <tr key={x.lineLabel}>
+                  <td className="bold">{x.lineLabel}</td>
+                  <td>{fmtPercent(x.hsDay)}</td>
+                  <td>{fmtPercent(x.hsTarget)}</td>
+                  <td>
+                    <span className={badgeClass(x.hsStatus)}>{x.hsStatus}</span>
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {filteredLines.map((x) => (
-                  <tr
-                    key={x.line}
-                    onClick={() => setSelectedLine(x.line)}
-                    className={x.line === selectedLine ? "rowActive" : ""}
-                  >
-                    <td style={{ fontWeight: 800 }}>{x.line}</td>
-                    <td>{pct(x.hsDay)}</td>
-                    <td>{pct(x.hsTarget)}</td>
-                    <td><StatusPill value={x.hsStatus} /></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+              ))}
+              {!lines.length ? (
+                <tr>
+                  <td colSpan={4} className="mutedSmall">
+                    Chưa có dữ liệu.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
         </div>
 
         {/* RIGHT */}
         <div className="card">
-          <div className="cardHeader" style={{ marginBottom: 10 }}>
-            <div className="cardTitle">So sánh lũy tiến theo giờ (chuyền: {selectedLine || "—"})</div>
+          <div className="cardTitle">
+            <div>So sánh lũy tiến theo giờ (chuyền: {selectedLine ? selectedLine.lineLabel : "—"})</div>
           </div>
 
-          <input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Tìm chuyền..."
-            style={{ width: 240, border: "1px solid #d1d5db", borderRadius: 8, padding: "6px 10px", marginBottom: 10 }}
-          />
-
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
-            {filteredLines.map((x) => (
-              <button
-                key={x.line}
-                onClick={() => setSelectedLine(x.line)}
-                style={{
-                  border: "1px solid #d1d5db",
-                  borderRadius: 999,
-                  padding: "4px 10px",
-                  fontWeight: 800,
-                  background: x.line === selectedLine ? "#111827" : "white",
-                  color: x.line === selectedLine ? "white" : "#111827",
-                }}
-              >
-                {x.line}
-              </button>
-            ))}
+          <div className="linePick">
+            <input
+              value={searchLine}
+              onChange={(e) => setSearchLine(e.target.value)}
+              placeholder="Tìm chuyền..."
+            />
+            <div className="chips">
+              {filteredLineChips.map((x) => (
+                <button
+                  key={x.lineLabel}
+                  className={x.lineLabel === selectedLineLabel ? "chip chipActive" : "chip"}
+                  onClick={() => setSelectedLineLabel(x.lineLabel)}
+                >
+                  {x.lineLabel}
+                </button>
+              ))}
+            </div>
           </div>
 
-          <div style={{ fontWeight: 800, marginBottom: 12 }}>
-            DM/H: {Number.isFinite(current?.dmHour) ? current.dmHour.toFixed(2) : "—"} &nbsp; • &nbsp;
-            DM/NGÀY: {Number.isFinite(current?.dmDay) ? current.dmDay : "—"}
-          </div>
+          {selectedLine ? (
+            <>
+              <div className="dmRow">
+                <div className="dmItem">
+                  <span className="dmKey">DM/H:</span> <span className="dmVal">{fmtNum(selectedLine.dmHour)}</span>
+                </div>
+                <div className="dmItem">
+                  <span className="dmKey">DM/NGÀY:</span> <span className="dmVal">{fmtNum(selectedLine.dmDay)}</span>
+                </div>
+              </div>
 
-          <div className="tableWrap">
-            <table className="tbl">
-              <thead>
-                <tr>
-                  <th>Mốc</th>
-                  <th>Lũy tiến</th>
-                  <th>DM lũy tiến</th>
-                  <th>Chênh</th>
-                  <th>Trạng thái</th>
-                </tr>
-              </thead>
-              <tbody>
-                {hourlyRows.map((r) => (
-                  <tr key={r.mark}>
-                    <td>{r.mark}</td>
-                    <td>{Number.isFinite(r.actual) ? r.actual : "—"}</td>
-                    <td>{Number.isFinite(r.dmCum) ? Math.round(r.dmCum) : "—"}</td>
-                    <td>{Number.isFinite(r.diff) ? (r.diff > 0 ? `+${Math.round(r.diff)}` : `${Math.round(r.diff)}`) : "—"}</td>
-                    <td><StatusPill value={r.status} /></td>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Mốc</th>
+                    <th>Lũy tiến</th>
+                    <th>DM lũy tiến</th>
+                    <th>Chênh</th>
+                    <th>Trạng thái</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          <div style={{ marginTop: 10, fontSize: 12, color: "#6b7280" }}>
-            Debug parse: DM/NGÀY col={data?.parsed?.colDmDay}, ĐM/H col={data?.parsed?.colDmHour}
-          </div>
+                </thead>
+                <tbody>
+                  {(data?.marks || []).map((m) => {
+                    const c = selectedLine.hourlyCompare?.[m];
+                    const diff = c?.diff;
+                    const status = c?.status || "N/A";
+                    return (
+                      <tr key={m}>
+                        <td>{m}</td>
+                        <td>{fmtNum(c?.actual)}</td>
+                        <td>{fmtNum(c?.target)}</td>
+                        <td>{diff === null || diff === undefined ? "—" : (diff >= 0 ? `+${fmtNum(diff)}` : fmtNum(diff))}</td>
+                        <td>
+                          <span className={badgeClass(status)}>{status}</span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </>
+          ) : (
+            <div className="mutedSmall">Chưa chọn chuyền.</div>
+          )}
         </div>
       </div>
 
       <style jsx>{`
-        .kpiGrid{
-          display:grid;
-          grid-template-columns: 1.35fr 1fr;
-          gap: 20px;
-          align-items:start;
-        }
-        @media (max-width: 1024px){
-          .kpiGrid{ grid-template-columns: 1fr; }
-        }
-        .card{
-          border: 1px solid #e5e7eb;
-          border-radius: 12px;
-          padding: 14px;
-          background: white;
-        }
-        .cardHeader{
-          display:flex;
-          align-items:center;
-          justify-content:space-between;
-          margin-bottom: 10px;
-        }
-        .cardTitle{ font-size: 20px; font-weight: 900; }
-        .muted{ color:#6b7280; font-weight:600; }
-        .tableWrap{ overflow:auto; }
-        .tbl{ width:100%; border-collapse: collapse; font-size: 14px; }
-        .tbl th{ text-align:left; padding: 10px 8px; border-bottom: 1px solid #e5e7eb; }
-        .tbl td{ padding: 10px 8px; border-bottom: 1px solid #f3f4f6; }
-        .tbl tr:hover{ background:#f9fafb; cursor:pointer; }
-        .rowActive{ background:#f3f4f6; }
+        .wrap { padding: 18px; }
+        .title { font-size: 40px; margin: 0 0 6px; font-weight: 800; }
+        .sub { margin: 0 0 14px; color: #333; }
+        .controls { margin-bottom: 14px; }
+        .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+        .field { display: flex; align-items: center; gap: 8px; }
+        .label { font-weight: 700; }
+        select { padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; min-width: 170px; }
+        button { padding: 9px 14px; border-radius: 10px; border: 1px solid #111; background: #111; color: #fff; cursor: pointer; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .chk { display: flex; align-items: center; gap: 8px; }
+        .muted { color: #666; font-size: 14px; }
+        .mutedSmall { color: #666; font-size: 13px; margin-top: 6px; }
+        .error { margin-top: 8px; color: #c00; font-weight: 700; }
+
+        /* LUÔN chia 2 cột trên desktop */
+        .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+        @media (max-width: 980px) { .grid2 { grid-template-columns: 1fr; } }
+
+        .card { border: 1px solid #e6e6e6; border-radius: 14px; padding: 12px; background: #fff; }
+        .cardTitle { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-weight: 800; margin-bottom: 10px; }
+        .table { width: 100%; border-collapse: collapse; }
+        .table th { text-align: left; border-bottom: 1px solid #eee; padding: 10px 8px; font-size: 14px; }
+        .table td { border-bottom: 1px solid #f2f2f2; padding: 10px 8px; font-size: 14px; }
+        .bold { font-weight: 800; }
+
+        .badge { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 999px; font-weight: 800; font-size: 12px; border: 1px solid transparent; }
+        .badge-green { background: #eaffea; color: #0a7a0a; border-color: #95e095; }
+        .badge-red { background: #ffecec; color: #b30000; border-color: #ff9f9f; }
+        .badge-gray { background: #f1f1f1; color: #444; border-color: #ddd; }
+
+        .linePick input { width: 220px; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; }
+        .chips { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px; }
+        .chip { padding: 6px 10px; border-radius: 999px; border: 1px solid #cfcfcf; background: #fff; cursor: pointer; font-weight: 800; }
+        .chipActive { background: #111; color: #fff; border-color: #111; }
+
+        .dmRow { margin: 10px 0 6px; display: flex; gap: 14px; flex-wrap: wrap; }
+        .dmItem { font-weight: 800; }
+        .dmKey { color: #333; }
+        .dmVal { color: #111; }
       `}</style>
     </div>
   );
