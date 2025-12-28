@@ -1,27 +1,37 @@
 // app/api/check-kpi/route.js
 import { NextResponse } from "next/server";
-import {
-  readRange,
-  normalizeDDMMYYYY,
-  ddmmyyyySortKey,
-} from "../_lib/googleSheetsClient";
+import { findRangeByDate, readRange, toDdMmYyyy } from "../_lib/googleSheetsClient";
 
 export const runtime = "nodejs";
 
 function toNumberSafe(v) {
   if (v === null || v === undefined) return 0;
+  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
   const s = String(v).trim();
   if (!s) return 0;
-  // bỏ dấu % và dấu phẩy
-  const n = Number(s.replace(/%/g, "").replace(/,/g, ""));
+  const cleaned = s.replace(/,/g, "").replace("%", "");
+  const n = Number(cleaned);
   return Number.isFinite(n) ? n : 0;
 }
 
-function findHeaderIndex(headers, candidates) {
-  const up = headers.map((h) => String(h || "").trim().toUpperCase());
+// find header row by searching for "Chuyền" or "MH" etc.
+function findHeaderRowIndex(values) {
+  const maxScan = Math.min(values.length, 8);
+  for (let i = 0; i < maxScan; i++) {
+    const row = values[i] || [];
+    const joined = row.map(x => String(x || "").trim()).join(" | ").toLowerCase();
+    if (joined.includes("chuy") || joined.includes("mh") || joined.includes("dm/ng") || joined.includes("kiểm")) {
+      return i;
+    }
+  }
+  return 0;
+}
+
+function idxOfHeader(headers, candidates) {
+  const h = headers.map(x => String(x || "").trim().toLowerCase());
   for (const c of candidates) {
-    const idx = up.indexOf(c.toUpperCase());
-    if (idx >= 0) return idx;
+    const i = h.indexOf(String(c).trim().toLowerCase());
+    if (i >= 0) return i;
   }
   return -1;
 }
@@ -29,95 +39,78 @@ function findHeaderIndex(headers, candidates) {
 export async function GET(req) {
   try {
     const { searchParams } = new URL(req.url);
-    const dateParam = normalizeDDMMYYYY(searchParams.get("date") || "");
-    if (!dateParam) {
+    const dateRaw = searchParams.get("date") || "";
+    const date = toDdMmYyyy(dateRaw);
+
+    if (!date) {
       return NextResponse.json({ ok: false, error: "MISSING_DATE" }, { status: 400 });
     }
 
-    // 1) đọc CONFIG_KPI để map date -> range
-    const cfg = await readRange("CONFIG_KPI!A2:B", { valueRenderOption: "FORMATTED_VALUE" });
-
-    let foundRange = "";
-    const items = [];
-    for (const r of cfg) {
-      const d = normalizeDDMMYYYY(r?.[0] || "");
-      const range = (r?.[1] || "").trim();
-      if (d && range) items.push({ d, range });
-      if (d === dateParam && range) foundRange = range;
+    const range = await findRangeByDate(date);
+    if (!range) {
+      return NextResponse.json({ ok: false, error: "DATE_NOT_FOUND", date }, { status: 404 });
     }
 
-    if (!foundRange) {
-      // trả thêm list date để debug
-      items.sort((a, b) => ddmmyyyySortKey(a.d).localeCompare(ddmmyyyySortKey(b.d)));
-      return NextResponse.json({
-        ok: false,
-        error: "DATE_NOT_FOUND",
-        date: dateParam,
-        availableDates: items.map(x => x.d),
+    // Read KPI range as formatted strings (same as what you see in Sheet)
+    const values = await readRange(range, { valueRenderOption: "FORMATTED_VALUE" });
+
+    const headerRowIndex = findHeaderRowIndex(values);
+    const headers = (values[headerRowIndex] || []).map(x => String(x || "").trim());
+
+    const rows = values.slice(headerRowIndex + 1);
+
+    // locate needed cols
+    const idxLine = idxOfHeader(headers, ["Chuyền", "CHUYEN", "LINE"]);
+    const idxMH   = idxOfHeader(headers, ["MH", "MÃ HÀNG", "Mã hàng"]);
+    const idxDMN  = idxOfHeader(headers, ["DM", "DM/NGAY", "ĐM/NGÀY", "DM/NGÀY"]);
+    // last time column like "->16h30" or similar
+    let idxFinal = -1;
+    for (let i = headers.length - 1; i >= 0; i--) {
+      const t = headers[i].toLowerCase();
+      if (t.includes("16h30") || t.includes("->16")) { idxFinal = i; break; }
+    }
+
+    // Build summary lines for left table
+    const lines = [];
+    for (const r of rows) {
+      const line = idxLine >= 0 ? String(r?.[idxLine] || "").trim() : "";
+      if (!line) continue;
+
+      const mh = idxMH >= 0 ? String(r?.[idxMH] || "").trim() : "";
+      const dmNgay = idxDMN >= 0 ? toNumberSafe(r?.[idxDMN]) : 0;
+      const actual = idxFinal >= 0 ? toNumberSafe(r?.[idxFinal]) : 0;
+
+      const hsDat = dmNgay > 0 ? (actual / dmNgay) * 100 : 0;
+      const hsDm = 100;
+
+      lines.push({
+        line,
+        mh,
+        hs_dat: Number.isFinite(hsDat) ? +hsDat.toFixed(2) : 0,
+        hs_dm: hsDm,
+        status: hsDat >= 100 ? "ĐẠT" : "KHÔNG ĐẠT",
       });
     }
 
-    // 2) đọc KPI data
-    const values = await readRange(foundRange, { valueRenderOption: "FORMATTED_VALUE" });
-    if (!values.length) {
-      return NextResponse.json({ ok: true, date: dateParam, range: foundRange, values: [], lines: [] });
-    }
-
-    // 3) build meta + lines để UI render
-    const headers = values[0] || [];
-    const rows = values.slice(1);
-
-    const idxLine = 0; // cột A thường là C1/C2...
-    const idxMH = findHeaderIndex(headers, ["MH", "MÃ HÀNG", "MA HANG"]);
-    const idxDMNgay = findHeaderIndex(headers, ["DM/NGÀY", "DM/NGAY", "ĐM/NGÀY", "ĐM/NGAY"]);
-    // cột kết thúc thường là "->16h30" hoặc có "16H30"
-    let idxFinal = headers.findIndex(h => String(h || "").includes("16h30") || String(h || "").includes("16H30"));
-    if (idxFinal < 0) idxFinal = headers.length - 1;
-
-    const lines = rows
-      .map((r) => {
-        const line = String(r?.[idxLine] || "").trim();
-        if (!line) return null;
-
-        const mh = idxMH >= 0 ? String(r?.[idxMH] || "").trim() : "";
-
-        const dmNgay = idxDMNgay >= 0 ? toNumberSafe(r?.[idxDMNgay]) : 0;
-        const finalQty = toNumberSafe(r?.[idxFinal]);
-
-        const hs = dmNgay > 0 ? (finalQty / dmNgay) * 100 : 0;
-        const hsFixed = Number.isFinite(hs) ? Number(hs.toFixed(2)) : 0;
-
-        return {
-          line,                 // dùng cho dropdown chọn chuyền
-          mh,                   // mã hàng
-          hs_dat: hsFixed,      // % đạt (tính theo ->16h30 / DM/NGÀY)
-          hs_dm: 100,           // định mức 100%
-          status: hsFixed >= 100 ? "ĐẠT" : "KHÔNG ĐẠT",
-        };
-      })
-      .filter(Boolean);
-
-    // perLine: nếu UI bạn đang cần theo giờ, tạm để [] (UI vẫn render bảng bên trái được)
-    const perLine = [];
-
     return NextResponse.json({
       ok: true,
-      date: dateParam,
-      range: foundRange,
-
-      // ✅ giữ raw để debug
-      values,
-
-      // ✅ format cho dashboard
-      lines,
-      perLine,
+      date,
+      range,
+      headers,
+      values,     // raw table
+      lines,      // summarized for dashboard
       meta: {
-        headers,
-        headerRowIndex: 0,
-        idx: { idxLine, idxMH, idxDMNgay, idxFinal },
+        headerRowIndex,
+        idxLine,
+        idxMH,
+        idxDMNgay: idxDMN,
+        idxFinal,
       },
     });
   } catch (e) {
-    return NextResponse.json({ ok: false, error: String(e?.message || e) }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: "CHECK_KPI_ERROR", message: e?.message || String(e) },
+      { status: 500 }
+    );
   }
 }
