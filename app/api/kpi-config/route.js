@@ -1,52 +1,9 @@
-import { getValues, normalizeDateKey, dateStrToSerial } from "../_lib/googleSheetsClient";
+import { NextResponse } from "next/server";
+import { sheetsClient, mustEnv } from "../_lib/googleSheetsClient";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
-const CONFIG_SHEET = process.env.CONFIG_SHEET_NAME || "CONFIG_KPI"; // sheet tab
-
-export async function GET(req) {
-  try {
-    const { searchParams } = new URL(req.url);
-    const list = searchParams.get("list") === "1";
-
-    // Read A:B (DATE, RANGE)
-    const rows = await getValues(`${CONFIG_SHEET}!A:B`, {
-      valueRenderOption: "UNFORMATTED_VALUE", // allow serial too, we normalize
-    });
-
-    const map = {};
-    for (const r of rows) {
-      const rawDate = r?.[0];
-      const rawRange = r?.[1];
-
-      // skip header row
-      if (String(rawDate || "").toUpperCase().includes("DATE")) continue;
-
-      const dateKey = normalizeDateKey(rawDate);
-      const range = String(rawRange || "").trim();
-      if (!dateKey || !range) continue;
-
-      map[dateKey] = range;
-    }
-
-    // sort ASC so 23/12 before 24/12
-    const dates = rawDates
-    .map(normalizeDateCell)
-    .filter(Boolean);
-
-    if (list) {
-      return Response.json({ ok: true, dates });
-    }
-
-    return Response.json({ ok: true, dates, map });
-  } catch (e) {
-    return Response.json({ ok: false, error: String(e?.message || e) }, { status: 500 });
-  }
-}
+// ===== helpers =====
 function pad2(n) { return String(n).padStart(2, "0"); }
 
-// Google Sheets serial -> dd/mm/yyyy (UTC)
 function serialToDMY(serial) {
   const base = Date.UTC(1899, 11, 30);
   const ms = base + Number(serial) * 86400000;
@@ -56,9 +13,56 @@ function serialToDMY(serial) {
 
 function normalizeDateCell(v) {
   if (v === null || v === undefined) return "";
-  // nếu là số hoặc chuỗi toàn số -> coi là serial date
   if (typeof v === "number") return serialToDMY(v);
+
   const s = String(v).trim();
+  if (!s) return "";
+
+  // chuỗi toàn số => serial
   if (/^\d+$/.test(s)) return serialToDMY(Number(s));
-  return s; // đã là dd/mm/yyyy
+
+  return s; // dd/mm/yyyy
+}
+
+function dmyToKey(dmy) {
+  // "23/12/2025" -> "2025-12-23" để sort
+  const [dd, mm, yyyy] = dmy.split("/");
+  if (!dd || !mm || !yyyy) return "";
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+export async function GET(req) {
+  try {
+    const spreadsheetId = mustEnv("SPREADSHEET_ID", "GOOGLE_SHEET_ID");
+
+    // đọc CONFIG_KPI: cột A=DATE, B=RANGE, bắt đầu từ dòng 2
+    const sheets = sheetsClient();
+    const resp = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: "CONFIG_KPI!A2:B",
+      valueRenderOption: "UNFORMATTED_VALUE", // để lấy serial number nếu có
+    });
+
+    const rows = resp.data.values || [];
+
+    const items = rows
+      .map(r => ({
+        date: normalizeDateCell(r?.[0]),
+        range: (r?.[1] || "").toString().trim(),
+      }))
+      .filter(x => x.date && x.range); // phải có cả date + range
+
+    // sort tăng dần để 23 nằm trên 24
+    items.sort((a, b) => dmyToKey(a.date).localeCompare(dmyToKey(b.date)));
+
+    // list ngày
+    const dates = items.map(x => x.date);
+
+    return NextResponse.json({ ok: true, dates });
+  } catch (e) {
+    return NextResponse.json(
+      { ok: false, error: e?.message || String(e) },
+      { status: 500 }
+    );
+  }
 }
