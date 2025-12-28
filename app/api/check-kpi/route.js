@@ -1,261 +1,215 @@
 import { NextResponse } from "next/server";
-import { readRange } from "../_lib/googleSheetsClient";
+import { readSheetRange } from "../_lib/googleSheetsClient";
 
-export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const HS_TARGET = 0.9;
+const MARKS = ["->9h", "->10h", "->11h", "->12h30", "->13h30", "->14h30", "->15h30", "->16h30"];
 
-const MARK_CANON = ["->9h", "->10h", "->11h", "->12h30", "->13h30", "->14h30", "->15h30", "->16h30"];
-const MARK_HOURS = {
-  "->9h": 1,
-  "->10h": 2,
-  "->11h": 3,
-  "->12h30": 4,
-  "->13h30": 5,
-  "->14h30": 6,
-  "->15h30": 7,
-  "->16h30": 8,
-};
-
-function stripDiacritics(s) {
-  return s
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
+function norm(s) {
+  let x = (s ?? "").toString().trim();
+  if (!x) return "";
+  x = x.normalize("NFD").replace(/\p{Diacritic}/gu, "");
+  x = x.replace(/đ/g, "d").replace(/Đ/g, "D");
+  x = x.replace(/\s+/g, " ");
+  return x.toUpperCase();
 }
 
-function normText(v) {
-  if (v == null) return "";
-  return stripDiacritics(String(v))
-    .toUpperCase()
-    .replace(/\s+/g, "")   // bỏ space + xuống dòng
-    .replace(/–/g, "-")
-    .trim();
-}
+function toNum(v) {
+  if (v === null || v === undefined) return null;
+  let s = String(v).trim();
+  if (!s || s === "—" || s === "-" || s === "N/A") return null;
 
-function parseNumber(v) {
-  if (v == null) return NaN;
-  const s0 = String(v).trim();
-  if (!s0) return NaN;
-
-  // bỏ % nếu có
-  const s1 = s0.replace(/%/g, "").replace(/\s/g, "");
-
-  // xử lý kiểu VN: 1,08 hoặc 2.755
-  // nếu có cả . và , -> thường . là ngàn, , là thập phân
-  let s = s1;
-  if (s.includes(".") && s.includes(",")) {
-    s = s.replace(/\./g, "").replace(",", ".");
-  } else if (s.includes(",") && !s.includes(".")) {
-    s = s.replace(",", ".");
-  } else {
-    // có thể là 2.755 (ngàn) => bỏ dấu .
-    if (/^\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, "");
+  // percent
+  if (s.includes("%")) {
+    s = s.replace("%", "").trim();
+    s = s.replace(/\s+/g, "");
+    if (s.includes(",") && s.includes(".")) s = s.replace(/\./g, "").replace(",", ".");
+    else if (s.includes(",") && !s.includes(".")) s = s.replace(",", ".");
+    const n = Number(s);
+    return Number.isFinite(n) ? n / 100 : null;
   }
 
+  s = s.replace(/\s+/g, "");
+  // VN: 1,08 => 1.08 ; 1.234,5 => 1234.5
+  if (s.includes(",") && s.includes(".")) s = s.replace(/\./g, "").replace(",", ".");
+  else if (s.includes(",") && !s.includes(".")) s = s.replace(",", ".");
   const n = Number(s);
-  return Number.isFinite(n) ? n : NaN;
+  return Number.isFinite(n) ? n : null;
 }
 
-function findColByAny(values, keywords) {
-  // keywords: ["DM/NGAY", "DMNGAY", ...] đã norm sẵn
+function isLineName(x) {
+  const s = norm(x);
+  return /^(C\d+|CAT|KCS|HOAN TAT|NM)$/.test(s);
+}
+
+function findBestHeaderRow(values) {
+  // chọn row có nhiều keyword nhất
+  let best = 0;
+  let bestScore = -1;
+
   for (let r = 0; r < values.length; r++) {
     const row = values[r] || [];
+    const cells = row.map(norm);
+
+    let score = 0;
+    if (cells.some((c) => c.includes("CHUYEN") || c.includes("CHUYỀN"))) score += 2;
+    if (cells.some((c) => c.includes("DM/NGAY") || c.includes("DM NGAY") || c.includes("ĐM/NGÀY"))) score += 3;
+    if (cells.some((c) => c.includes("DM/H") || c === "H")) score += 3;
+    if (cells.some((c) => c.includes("SUAT") || c.includes("HIEU SUAT") || c.includes("HS"))) score += 2;
+    if (cells.some((c) => MARKS.map(norm).includes(c))) score += 4;
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = r;
+    }
+  }
+  return best;
+}
+
+function findCol(values, headerRow, regex) {
+  // scan 2 hàng: headerRow và headerRow+1 (vì sheet hay merge)
+  const rows = [values[headerRow] || [], values[headerRow + 1] || []];
+
+  for (let rr = 0; rr < rows.length; rr++) {
+    const row = rows[rr];
     for (let c = 0; c < row.length; c++) {
-      const t = normText(row[c]);
-      if (!t) continue;
-      for (const k of keywords) {
-        if (t.includes(k)) return c;
-      }
+      const cell = norm(row[c]);
+      if (regex.test(cell)) return c;
     }
   }
   return -1;
 }
 
-function findMarksRow(values) {
-  // tìm row có chứa ->9h hoặc ->10h
-  for (let r = 0; r < values.length; r++) {
-    const row = values[r] || [];
-    const joined = row.map(normText).join("|");
-    if (joined.includes("->9H") || joined.includes("->10H") || joined.includes("->11H")) return r;
-  }
-  return -1;
-}
-
-function buildMarkCols(values, marksRow) {
-  const row = values[marksRow] || [];
-  const map = {}; // canon -> colIndex
-  for (let c = 0; c < row.length; c++) {
-    const t = normText(row[c]);
-    if (!t) continue;
-
-    // nhận diện các mốc
-    // chuẩn hoá: ->12H30
-    if (t.startsWith("->")) {
-      // chuẩn hóa về dạng ->9h / ->12h30
-      const raw = t.replace("H", "h"); // t đang upper, nhưng ta chỉ cần map
-      // convert: "->12H30" => "->12h30"
-      const m = raw
-        .replace(/->/g, "->")
-        .replace(/H/g, "h")
-        .replace(/(\d+)H(\d+)/g, "$1h$2")
-        .replace(/(\d+)H/g, "$1h");
-
-      // đưa về canon gần nhất
-      for (const canon of MARK_CANON) {
-        if (normText(canon) === normText(m)) {
-          map[canon] = c;
+function findMarkCols(values, headerRow) {
+  const cols = {};
+  for (const m of MARKS) {
+    const mm = norm(m);
+    let found = -1;
+    for (const r of [headerRow, headerRow + 1]) {
+      const row = values[r] || [];
+      for (let c = 0; c < row.length; c++) {
+        if (norm(row[c]) === mm) {
+          found = c;
+          break;
         }
       }
+      if (found !== -1) break;
+    }
+    cols[m] = found;
+  }
+  return cols;
+}
+
+function findStartRow(values, afterRow, colLineGuess) {
+  // tìm dòng đầu tiên có C1/C2... ở cột gần colLineGuess nhất
+  for (let r = afterRow; r < values.length; r++) {
+    const row = values[r] || [];
+    // ưu tiên cột đoán
+    if (colLineGuess >= 0 && isLineName(row[colLineGuess])) return r;
+
+    // fallback: quét vài cột đầu
+    for (let c = 0; c < Math.min(row.length, 6); c++) {
+      if (isLineName(row[c])) return r;
     }
   }
-  return map;
-}
-
-function isLineNameCell(v) {
-  const t = normText(v);
-  if (!t) return false;
-
-  // C1..C10
-  if (/^C\d{1,2}$/.test(t)) return true;
-
-  // CẮT / KCS / HOÀN TẤT / NM
-  if (t === "CAT") return true;
-  if (t === "KCS") return true;
-  if (t === "HOANTAT") return true;
-  if (t === "NM") return true;
-
-  return false;
-}
-
-function statusHour(diff) {
-  if (!Number.isFinite(diff)) return "N/A";
-  if (diff > 0) return "VƯỢT";
-  if (diff === 0) return "ĐỦ";
-  return "THIẾU";
-}
-
-function statusDay(hs) {
-  if (!Number.isFinite(hs)) return "CHƯA CÓ";
-  return hs >= HS_TARGET ? "ĐẠT" : "CHƯA ĐẠT";
+  return afterRow + 1;
 }
 
 export async function GET(req) {
   try {
-    const spreadsheetId = process.env.GOOGLE_SHEET_ID;
-    if (!spreadsheetId) {
-      return NextResponse.json(
-        { status: "error", message: "Missing GOOGLE_SHEET_ID" },
-        { status: 500 }
-      );
-    }
-
     const { searchParams } = new URL(req.url);
-    const date = String(searchParams.get("date") || "").trim();
-    if (!date) {
-      return NextResponse.json(
-        { status: "error", message: "Missing date" },
-        { status: 400 }
-      );
-    }
+    const date = (searchParams.get("date") || "").trim();
+    if (!date) return NextResponse.json({ message: "Missing date" }, { status: 400 });
 
-    // đọc config
-    const cfg = await readRange(spreadsheetId, "CONFIG_KPI!A2:B");
-    let range = "";
-    for (const row of cfg) {
-      const d = String(row?.[0] || "").trim();
-      if (d === date) {
-        range = String(row?.[1] || "").trim();
-        break;
-      }
-    }
-    if (!range) {
-      return NextResponse.json(
-        { status: "error", message: `No RANGE for date ${date}` },
-        { status: 400 }
-      );
-    }
+    // đọc config để lấy RANGE theo date
+    const cfg = await readSheetRange("CONFIG_KPI!A2:B");
+    const map = new Map(
+      cfg
+        .map((r) => [(r?.[0] || "").toString().trim(), (r?.[1] || "").toString().trim()])
+        .filter(([d, range]) => d && range)
+    );
 
-    // đọc KPI range
-    const values = await readRange(spreadsheetId, range);
+    const rangeA1 = map.get(date);
+    if (!rangeA1) return NextResponse.json({ message: `Không tìm thấy RANGE cho ngày: ${date}` }, { status: 400 });
 
-    // tìm cột DM/NGÀY + DM/H (robust)
-    const colDmDay = findColByAny(values, ["DM/NGAY", "DMNGAY", "ĐM/NGAY", "ĐMNGAY"].map(normText));
-    const colDmHour = findColByAny(values, ["DM/H", "DMH", "ĐM/H", "ĐMH"].map(normText));
+    const values = await readSheetRange(rangeA1);
 
-    // tìm marks row + map các col mốc
-    const marksRow = findMarksRow(values);
-    const markCols = marksRow >= 0 ? buildMarkCols(values, marksRow) : {};
+    // ===== detect header + columns =====
+    const headerRow = findBestHeaderRow(values);
 
-    // nếu không đủ markCols, vẫn trả về để debug
+    const colLine = findCol(values, headerRow, /CHUYEN|CHUYỀN/);
+    const colDmDay = findCol(values, headerRow, /DM\/NGAY|DM NGAY|ĐM\/NGÀY|ĐM NGÀY/);
+    const colDmHour = findCol(values, headerRow, /DM\/H|ĐM\/H|DMH|^H$/);
+
+    const colHsDay = findCol(values, headerRow, /SUAT DAT TRONG|HIEU SUAT TRONG NGAY|HS DAT TRONG NGAY/);
+    const colHsTarget = findCol(values, headerRow, /DINH MUC TRONG|HS DINH MUC|SUAT DINH MUC/);
+
+    const markCols = findMarkCols(values, headerRow);
+
+    const startRow = findStartRow(values, headerRow + 1, colLine);
+
+    // ===== parse rows =====
     const lines = [];
 
-    // duyệt từng row tìm chuyền
-    for (let r = 0; r < values.length; r++) {
+    for (let r = startRow; r < values.length; r++) {
       const row = values[r] || [];
-      const nameRaw = row[0];
-      if (!isLineNameCell(nameRaw)) continue;
+      const lineCell = colLine >= 0 ? row[colLine] : row[0];
 
-      const lineName = String(nameRaw).trim();
-      const dmDay = colDmDay >= 0 ? parseNumber(row[colDmDay]) : NaN;
-      let dmHour = colDmHour >= 0 ? parseNumber(row[colDmHour]) : NaN;
-      if (!Number.isFinite(dmHour) && Number.isFinite(dmDay)) dmHour = dmDay / 8;
+      if (!lineCell && r > startRow) break; // hết bảng
+      if (!isLineName(lineCell)) continue;  // bỏ dòng không phải chuyền
 
+      const line = norm(lineCell).replace("CAT", "CÁT").replace("HOAN TAT", "HOÀN TẤT");
+
+      const dmDay = colDmDay >= 0 ? toNum(row[colDmDay]) : null;
+      const dmHour = colDmHour >= 0 ? toNum(row[colDmHour]) : null;
+
+      // lũy tiến theo giờ
       const hourly = {};
-      for (const m of MARK_CANON) {
+      for (const m of MARKS) {
         const c = markCols[m];
-        hourly[m] = c == null ? null : (Number.isFinite(parseNumber(row[c])) ? parseNumber(row[c]) : null);
+        hourly[m] = c >= 0 ? toNum(row[c]) : null;
       }
 
-      // HS ngày = lũy tiến tại ->16h30 / dmDay
-      const last = hourly["->16h30"];
-      const hs = Number.isFinite(dmDay) && Number.isFinite(last) ? last / dmDay : NaN;
+      // hiệu suất ngày (nếu có)
+      const hsDay = colHsDay >= 0 ? toNum(row[colHsDay]) : null;
+      const hsTarget = colHsTarget >= 0 ? toNum(row[colHsTarget]) : 0.9;
 
-      // tính dm lũy tiến + chênh theo từng mốc
-      const hourlyCompare = MARK_CANON.map((m) => {
-        const actual = hourly[m];
-        const h = MARK_HOURS[m];
-        const dmCum = Number.isFinite(dmHour) ? dmHour * h : null;
-        const diff = (Number.isFinite(actual) && Number.isFinite(dmCum)) ? (actual - dmCum) : NaN;
-        return {
-          mark: m,
-          actual,
-          dmCum,
-          diff: Number.isFinite(diff) ? diff : null,
-          status: statusHour(Number.isFinite(diff) ? diff : NaN),
-        };
-      });
+      // status HS
+      let hsStatus = "CHƯA CÓ";
+      if (typeof hsDay === "number" && isFinite(hsDay)) {
+        hsStatus = hsDay >= (hsTarget || 0.9) ? "ĐẠT" : "CHƯA ĐẠT";
+      }
 
       lines.push({
-        line: lineName,
-        dmDay: Number.isFinite(dmDay) ? dmDay : null,
-        dmHour: Number.isFinite(dmHour) ? dmHour : null,
-        hs: Number.isFinite(hs) ? hs : null,
-        hsTarget: HS_TARGET,
-        hsStatus: statusDay(hs),
-        hourlyCompare,
+        line,
+        dmDay: typeof dmDay === "number" ? dmDay : null,
+        dmHour: typeof dmHour === "number" ? dmHour : null,
+        hourly,
+        hsDay: typeof hsDay === "number" ? hsDay : null,
+        hsTarget: typeof hsTarget === "number" ? hsTarget : 0.9,
+        hsStatus,
       });
     }
 
     return NextResponse.json(
       {
-        status: "ok",
         date,
-        range,
-        debug: {
-          marksRow,
+        range: rangeA1,
+        meta: {
+          headerRow,
+          startRow,
+          colLine,
           colDmDay,
           colDmHour,
+          colHsDay,
+          colHsTarget,
           markCols,
         },
         lines,
       },
-      { headers: { "Cache-Control": "no-store" } }
+      { status: 200 }
     );
   } catch (e) {
-    return NextResponse.json(
-      { status: "error", message: e?.message || String(e) },
-      { status: 500 }
-    );
+    return NextResponse.json({ message: e?.message || String(e) }, { status: 500 });
   }
 }
