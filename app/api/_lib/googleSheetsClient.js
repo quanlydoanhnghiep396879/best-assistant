@@ -1,3 +1,4 @@
+
 import { google } from "googleapis";
 
 function mustEnv(name) {
@@ -7,7 +8,6 @@ function mustEnv(name) {
 }
 
 function loadServiceAccount() {
-  // Ưu tiên BASE64 để dễ set Vercel
   const b64 = process.env.GOOGLE_SERVICE_ACCOUNT_JSON_BASE64;
   if (b64) {
     const json = Buffer.from(b64, "base64").toString("utf8");
@@ -15,15 +15,12 @@ function loadServiceAccount() {
     if (obj.private_key) obj.private_key = obj.private_key.replace(/\\n/g, "\n");
     return obj;
   }
-
-  // Hoặc dùng raw JSON
   const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
   if (raw) {
     const obj = JSON.parse(raw);
     if (obj.private_key) obj.private_key = obj.private_key.replace(/\\n/g, "\n");
     return obj;
   }
-
   throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 or GOOGLE_SERVICE_ACCOUNT_JSON");
 }
 
