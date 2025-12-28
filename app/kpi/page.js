@@ -1,7 +1,7 @@
-export const dynamic = "force-dynamic";
-
 import KpiDashboardClient from "./KpiDashboardClient";
 
-export default function KPIPage() {
+export const dynamic = "force-dynamic";
+
+export default function Page() {
   return <KpiDashboardClient />;
 }

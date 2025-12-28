@@ -1,69 +1,49 @@
 import { google } from "googleapis";
 
-function loadServiceAccountFromEnv() {
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+function decodeServiceAccount() {
+  const jsonRaw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
   const b64 = process.env.GOOGLE_SERVICE_ACCOUNT_BASE64;
-  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
 
-  let jsonText = null;
-
-  if (b64 && String(b64).trim()) {
-    try {
-      jsonText = Buffer.from(String(b64).trim(), "base64").toString("utf8");
-    } catch (e) {
-      throw new Error("GOOGLE_SERVICE_ACCOUNT_BASE64 decode failed");
-    }
-  } else if (raw && String(raw).trim()) {
-    jsonText = String(raw).trim();
-  } else {
-    throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_BASE64");
+  if (jsonRaw && jsonRaw.trim()) {
+    return JSON.parse(jsonRaw);
   }
-
-  let cred;
-  try {
-    cred = JSON.parse(jsonText);
-  } catch (e) {
-    throw new Error("Service account JSON parse failed");
+  if (b64 && b64.trim()) {
+    const txt = Buffer.from(b64, "base64").toString("utf8");
+    return JSON.parse(txt);
   }
-
-  // Fix private_key \n
-  if (cred.private_key && typeof cred.private_key === "string") {
-    cred.private_key = cred.private_key.replace(/\\n/g, "\n");
-  }
-
-  return cred;
+  throw new Error(
+    "Missing GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_BASE64"
+  );
 }
 
-export function getSpreadsheetId() {
-  // hỗ trợ cả tên cũ nếu bạn lỡ set
-  const id = process.env.GOOGLE_SHEET_ID || process.env.GOOGLE_SHEETS_ID;
-  if (!id) throw new Error("Missing GOOGLE_SHEET_ID");
-  return id;
-}
+export function getSheetsClient() {
+  const creds = decodeServiceAccount();
 
-export async function getSheetsClient() {
-  const credentials = loadServiceAccountFromEnv();
+  // Fix private_key newline nếu env làm mất \n
+  if (typeof creds.private_key === "string" && creds.private_key.includes("\\n")) {
+    creds.private_key = creds.private_key.replace(/\\n/g, "\n");
+  }
+
+
   const auth = new google.auth.GoogleAuth({
-    credentials,
+    credentials: creds,
     scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
   });
 
-  const client = await auth.getClient();
-  return google.sheets({ version: "v4", auth: client });
+  return google.sheets({ version: "v4", auth });
 }
 
-export async function readRange(range, opts = {}) {
-  const spreadsheetId = getSpreadsheetId();
-  const sheets = await getSheetsClient();
-
-  const valueRenderOption = opts.valueRenderOption || "UNFORMATTED_VALUE"; // số/percent dạng số
-  const dateTimeRenderOption = opts.dateTimeRenderOption || "FORMATTED_STRING";
-
+export async function readRange(spreadsheetId, range) {
+  const sheets = getSheetsClient();
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range,
-    valueRenderOption,
-    dateTimeRenderOption,
+    valueRenderOption: "FORMATTED_VALUE",
+    dateTimeRenderOption: "FORMATTED_STRING",
   });
-
+  
   return res.data.values || [];
 }

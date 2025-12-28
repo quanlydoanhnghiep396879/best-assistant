@@ -2,229 +2,237 @@ import { NextResponse } from "next/server";
 import { readRange } from "../_lib/googleSheetsClient";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-const MARKS = ["->9h", "->10h", "->11h", "->12h30", "->13h30", "->14h30", "->15h30", "->16h30"];
-const MARK_HOURS = { "->9h": 1, "->10h": 2, "->11h": 3, "->12h30": 4, "->13h30": 5, "->14h30": 6, "->15h30": 7, "->16h30": 8 };
+const HS_TARGET = 0.9;
 
-function keyOf(v) {
-  return String(v ?? "")
+const MARK_CANON = ["->9h", "->10h", "->11h", "->12h30", "->13h30", "->14h30", "->15h30", "->16h30"];
+const MARK_HOURS = {
+  "->9h": 1,
+  "->10h": 2,
+  "->11h": 3,
+  "->12h30": 4,
+  "->13h30": 5,
+  "->14h30": 6,
+  "->15h30": 7,
+  "->16h30": 8,
+};
+
+function stripDiacritics(s) {
+  return s
     .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, "");
+    .replace(/[\u0300-\u036f]/g, "");
 }
 
-function isLineCode(v) {
-  const k = keyOf(v);
-  if (!k) return false;
-  if (/^c\d+$/.test(k)) return true;
-  if (k === "cat" || k === "kcs" || k === "hoantat" || k === "nm") return true;
+function normText(v) {
+  if (v == null) return "";
+  return stripDiacritics(String(v))
+    .toUpperCase()
+    .replace(/\s+/g, "")   // bỏ space + xuống dòng
+    .replace(/–/g, "-")
+    .trim();
+}
+
+function parseNumber(v) {
+  if (v == null) return NaN;
+  const s0 = String(v).trim();
+  if (!s0) return NaN;
+
+  // bỏ % nếu có
+  const s1 = s0.replace(/%/g, "").replace(/\s/g, "");
+
+  // xử lý kiểu VN: 1,08 hoặc 2.755
+  // nếu có cả . và , -> thường . là ngàn, , là thập phân
+  let s = s1;
+  if (s.includes(".") && s.includes(",")) {
+    s = s.replace(/\./g, "").replace(",", ".");
+  } else if (s.includes(",") && !s.includes(".")) {
+    s = s.replace(",", ".");
+  } else {
+    // có thể là 2.755 (ngàn) => bỏ dấu .
+    if (/^\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, "");
+  }
+
+  const n = Number(s);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+function findColByAny(values, keywords) {
+  // keywords: ["DM/NGAY", "DMNGAY", ...] đã norm sẵn
+  for (let r = 0; r < values.length; r++) {
+    const row = values[r] || [];
+    for (let c = 0; c < row.length; c++) {
+      const t = normText(row[c]);
+      if (!t) continue;
+      for (const k of keywords) {
+        if (t.includes(k)) return c;
+      }
+    }
+  }
+  return -1;
+}
+
+function findMarksRow(values) {
+  // tìm row có chứa ->9h hoặc ->10h
+  for (let r = 0; r < values.length; r++) {
+    const row = values[r] || [];
+    const joined = row.map(normText).join("|");
+    if (joined.includes("->9H") || joined.includes("->10H") || joined.includes("->11H")) return r;
+  }
+  return -1;
+}
+
+function buildMarkCols(values, marksRow) {
+  const row = values[marksRow] || [];
+  const map = {}; // canon -> colIndex
+  for (let c = 0; c < row.length; c++) {
+    const t = normText(row[c]);
+    if (!t) continue;
+
+    // nhận diện các mốc
+    // chuẩn hoá: ->12H30
+    if (t.startsWith("->")) {
+      // chuẩn hóa về dạng ->9h / ->12h30
+      const raw = t.replace("H", "h"); // t đang upper, nhưng ta chỉ cần map
+      // convert: "->12H30" => "->12h30"
+      const m = raw
+        .replace(/->/g, "->")
+        .replace(/H/g, "h")
+        .replace(/(\d+)H(\d+)/g, "$1h$2")
+        .replace(/(\d+)H/g, "$1h");
+
+      // đưa về canon gần nhất
+      for (const canon of MARK_CANON) {
+        if (normText(canon) === normText(m)) {
+          map[canon] = c;
+        }
+      }
+    }
+  }
+  return map;
+}
+
+function isLineNameCell(v) {
+  const t = normText(v);
+  if (!t) return false;
+
+  // C1..C10
+  if (/^C\d{1,2}$/.test(t)) return true;
+
+  // CẮT / KCS / HOÀN TẤT / NM
+  if (t === "CAT") return true;
+  if (t === "KCS") return true;
+  if (t === "HOANTAT") return true;
+  if (t === "NM") return true;
+
   return false;
 }
 
-function asNumber(v) {
-  if (v === null || v === undefined || v === "") return null;
-  if (typeof v === "number") return Number.isFinite(v) ? v : null;
-  const s = String(v).trim().replace(/\s+/g, "");
-  if (!s) return null;
-
-  // nếu dạng "2.755" (nghìn) => 2755
-  if (/^\d{1,3}(\.\d{3})+$/.test(s)) return Number(s.replace(/\./g, ""));
-  // nếu dạng "95,87" => 95.87
-  if (/^\d+,\d+$/.test(s)) return Number(s.replace(",", "."));
-
-  const n = Number(s);
-  return Number.isFinite(n) ? n : null;
+function statusHour(diff) {
+  if (!Number.isFinite(diff)) return "N/A";
+  if (diff > 0) return "VƯỢT";
+  if (diff === 0) return "ĐỦ";
+  return "THIẾU";
 }
 
-function asPercent(v) {
-  const n = asNumber(v);
-  if (n === null) return null;
-  // nếu sheet trả 0.9587 => OK
-  if (n >= 0 && n <= 1.5) return n;
-  // nếu trả 95.87 => /100
-  if (n > 1.5 && n <= 200) return n / 100;
-  return null;
-}
-
-function findHeaderRow(values) {
-  for (let r = 0; r < values.length; r++) {
-    const row = values[r] || [];
-    const keys = row.map(keyOf);
-    const hit = MARKS.some((m) => keys.includes(keyOf(m)));
-    if (hit) return r;
-  }
-  return -1;
-}
-
-function findColByIncludes(headerRow, includesKeys) {
-  for (let c = 0; c < headerRow.length; c++) {
-    const k = keyOf(headerRow[c]);
-    if (!k) continue;
-    if (includesKeys.some((x) => k.includes(x))) return c;
-  }
-  return -1;
-}
-
-function detectLineCol(values, headerRowIdx) {
-  const start = headerRowIdx + 1;
-  const end = Math.min(values.length, headerRowIdx + 40);
-
-  let maxCols = 0;
-  for (const r of values) maxCols = Math.max(maxCols, (r || []).length);
-
-  let best = 0;
-  let bestHits = 0;
-
-  for (let c = 0; c < maxCols; c++) {
-    let hits = 0;
-    for (let r = start; r < end; r++) {
-      if (isLineCode(values[r]?.[c])) hits++;
-    }
-    if (hits > bestHits) {
-      bestHits = hits;
-      best = c;
-    }
-  }
-  return bestHits >= 2 ? best : 0;
-}
-
-function buildStatusBadgeText(type, diff) {
-  // type: "hourly" or "day"
-  if (type === "hourly") {
-    if (diff === null) return "N/A";
-    if (diff < 0) return "THIẾU";
-    if (diff === 0) return "ĐỦ";
-    return "VƯỢT";
-  }
-  // day
-  if (diff === null) return "CHƯA CÓ";
-  if (diff >= 0) return "ĐẠT";
-  return "CHƯA ĐẠT";
+function statusDay(hs) {
+  if (!Number.isFinite(hs)) return "CHƯA CÓ";
+  return hs >= HS_TARGET ? "ĐẠT" : "CHƯA ĐẠT";
 }
 
 export async function GET(req) {
   try {
-    const { searchParams } = new URL(req.url);
-    const dateKey = (searchParams.get("date") || "").trim();
-    if (!dateKey) {
-      return NextResponse.json({ status: "error", message: "Missing date" }, { status: 400 });
+    const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+    if (!spreadsheetId) {
+      return NextResponse.json(
+        { status: "error", message: "Missing GOOGLE_SHEET_ID" },
+        { status: 500 }
+      );
     }
 
-    // đọc config để lấy range theo date
-    const cfgRows = await readRange("CONFIG_KPI!A2:B1000", { valueRenderOption: "FORMATTED_VALUE" });
+    const { searchParams } = new URL(req.url);
+    const date = String(searchParams.get("date") || "").trim();
+    if (!date) {
+      return NextResponse.json(
+        { status: "error", message: "Missing date" },
+        { status: 400 }
+      );
+    }
 
-    let range = null;
-    let dateLabel = null;
-    for (const r of cfgRows) {
-      const dl = String(r?.[0] ?? "").trim();
-      const rg = String(r?.[1] ?? "").trim();
-      if (!dl || !rg) continue;
-
-      const k = (() => {
-        const m = dl.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-        if (!m) return null;
-        return `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
-      })();
-
-      if (k === dateKey) {
-        range = rg;
-        dateLabel = dl;
+    // đọc config
+    const cfg = await readRange(spreadsheetId, "CONFIG_KPI!A2:B");
+    let range = "";
+    for (const row of cfg) {
+      const d = String(row?.[0] || "").trim();
+      if (d === date) {
+        range = String(row?.[1] || "").trim();
         break;
       }
     }
-
     if (!range) {
-      return NextResponse.json({ status: "error", message: "Không tìm thấy RANGE cho ngày này trong CONFIG_KPI" }, { status: 400 });
+      return NextResponse.json(
+        { status: "error", message: `No RANGE for date ${date}` },
+        { status: 400 }
+      );
     }
 
-    // đọc KPI range (raw number)
-    const values = await readRange(range, { valueRenderOption: "UNFORMATTED_VALUE" });
+    // đọc KPI range
+    const values = await readRange(spreadsheetId, range);
 
-    const headerRowIdx = findHeaderRow(values);
-    if (headerRowIdx < 0) {
-      return NextResponse.json({ status: "error", message: "Không tìm thấy header mốc giờ (->9h, ->10h...)" }, { status: 400 });
-    }
+    // tìm cột DM/NGÀY + DM/H (robust)
+    const colDmDay = findColByAny(values, ["DM/NGAY", "DMNGAY", "ĐM/NGAY", "ĐMNGAY"].map(normText));
+    const colDmHour = findColByAny(values, ["DM/H", "DMH", "ĐM/H", "ĐMH"].map(normText));
 
-    const header = values[headerRowIdx] || [];
-    const lineCol = detectLineCol(values, headerRowIdx);
+    // tìm marks row + map các col mốc
+    const marksRow = findMarksRow(values);
+    const markCols = marksRow >= 0 ? buildMarkCols(values, marksRow) : {};
 
-    const dmDayCol = findColByIncludes(header, ["dmngay", "d mngay", "dmngay"]); // normalize đã remove ký tự nên chỉ cần dmngay
-    const dmHourCol = findColByIncludes(header, ["dmh"]);
-    const hsActualCol =
-      findColByIncludes(header, ["suatdattrong"]) ??
-      findColByIncludes(header, ["hsuatdattrong"]) ??
-      findColByIncludes(header, ["hsuatdat"]);
-    const hsTargetCol =
-      findColByIncludes(header, ["dinhmuctrong"]) ??
-      findColByIncludes(header, ["hsdinhmuc"]) ??
-      findColByIncludes(header, ["dinhmuc"]);
-
-    // map mark -> col
-    const markCols = {};
-    for (let c = 0; c < header.length; c++) {
-      const hk = keyOf(header[c]);
-      for (const m of MARKS) {
-        if (hk === keyOf(m)) markCols[m] = c;
-      }
-    }
-
-    // build lines
-    const dupCount = new Map();
+    // nếu không đủ markCols, vẫn trả về để debug
     const lines = [];
 
-    for (let r = headerRowIdx + 1; r < values.length; r++) {
+    // duyệt từng row tìm chuyền
+    for (let r = 0; r < values.length; r++) {
       const row = values[r] || [];
-      const rawLine = row[lineCol];
-      if (!isLineCode(rawLine)) continue;
+      const nameRaw = row[0];
+      if (!isLineNameCell(nameRaw)) continue;
 
-      let line = String(rawLine).trim();
-      const baseKey = keyOf(line);
-      const n = (dupCount.get(baseKey) || 0) + 1;
-      dupCount.set(baseKey, n);
-      const lineLabel = n >= 2 ? `${line} (${n})` : line;
-
-      const dmDay = dmDayCol >= 0 ? asNumber(row[dmDayCol]) : null;
-      const dmHour = dmHourCol >= 0 ? asNumber(row[dmHourCol]) : null;
-
-      const hsDay = hsActualCol >= 0 ? asPercent(row[hsActualCol]) : null;
-      const hsTarget = hsTargetCol >= 0 ? asPercent(row[hsTargetCol]) : 0.9; // fallback 90%
-
-      const hsDiff = hsDay === null ? null : hsDay - (hsTarget ?? 0.9);
-      const hsStatus = buildStatusBadgeText("day", hsDiff);
-
-      const dmPerHour =
-        (dmHour !== null && dmHour > 0) ? dmHour :
-        (dmDay !== null && dmDay > 0) ? (dmDay / 8) :
-        null;
+      const lineName = String(nameRaw).trim();
+      const dmDay = colDmDay >= 0 ? parseNumber(row[colDmDay]) : NaN;
+      let dmHour = colDmHour >= 0 ? parseNumber(row[colDmHour]) : NaN;
+      if (!Number.isFinite(dmHour) && Number.isFinite(dmDay)) dmHour = dmDay / 8;
 
       const hourly = {};
-      const hourlyCompare = {};
-      for (const m of MARKS) {
-        const col = markCols[m];
-        const actual = (col !== undefined) ? asNumber(row[col]) : null;
-        hourly[m] = actual;
-
-        if (dmPerHour === null || actual === null) {
-          hourlyCompare[m] = { actual, target: null, diff: null, status: "N/A" };
-        } else {
-          const target = dmPerHour * (MARK_HOURS[m] || 0);
-          const diff = actual - target;
-          const status = buildStatusBadgeText("hourly", diff === null ? null : (diff === 0 ? 0 : diff));
-          hourlyCompare[m] = { actual, target, diff, status };
-        }
+      for (const m of MARK_CANON) {
+        const c = markCols[m];
+        hourly[m] = c == null ? null : (Number.isFinite(parseNumber(row[c])) ? parseNumber(row[c]) : null);
       }
 
+      // HS ngày = lũy tiến tại ->16h30 / dmDay
+      const last = hourly["->16h30"];
+      const hs = Number.isFinite(dmDay) && Number.isFinite(last) ? last / dmDay : NaN;
+
+      // tính dm lũy tiến + chênh theo từng mốc
+      const hourlyCompare = MARK_CANON.map((m) => {
+        const actual = hourly[m];
+        const h = MARK_HOURS[m];
+        const dmCum = Number.isFinite(dmHour) ? dmHour * h : null;
+        const diff = (Number.isFinite(actual) && Number.isFinite(dmCum)) ? (actual - dmCum) : NaN;
+        return {
+          mark: m,
+          actual,
+          dmCum,
+          diff: Number.isFinite(diff) ? diff : null,
+          status: statusHour(Number.isFinite(diff) ? diff : NaN),
+        };
+      });
+
       lines.push({
-        line,
-        lineLabel,
-        dmDay,
-        dmHour,
-        dmPerHour,
-        hsDay,
-        hsTarget: hsTarget ?? 0.9,
-        hsStatus,
-        hourly,
+        line: lineName,
+        dmDay: Number.isFinite(dmDay) ? dmDay : null,
+        dmHour: Number.isFinite(dmHour) ? dmHour : null,
+        hs: Number.isFinite(hs) ? hs : null,
+        hsTarget: HS_TARGET,
+        hsStatus: statusDay(hs),
         hourlyCompare,
       });
     }
@@ -232,19 +240,22 @@ export async function GET(req) {
     return NextResponse.json(
       {
         status: "ok",
-        dateKey,
-        dateLabel: dateLabel || dateKey,
+        date,
         range,
-        marks: MARKS,
+        debug: {
+          marksRow,
+          colDmDay,
+          colDmHour,
+          markCols,
+        },
         lines,
-        lastUpdated: new Date().toISOString(),
       },
       { headers: { "Cache-Control": "no-store" } }
     );
   } catch (e) {
     return NextResponse.json(
       { status: "error", message: e?.message || String(e) },
-      { status: 500, headers: { "Cache-Control": "no-store" } }
+      { status: 500 }
     );
   }
 }

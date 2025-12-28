@@ -2,70 +2,67 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-function fmtPercent(x) {
-  if (x === null || x === undefined) return "—";
-  const n = Number(x);
-  if (!Number.isFinite(n)) return "—";
-  return `${(n * 100).toFixed(2)}%`;
+function pct(v) {
+  if (v == null) return "—";
+  return (v * 100).toFixed(2) + "%";
 }
-function fmtNum(x) {
-  if (x === null || x === undefined) return "—";
-  const n = Number(x);
-  if (!Number.isFinite(n)) return "—";
-  // hiển thị kiểu VN
-  return n.toLocaleString("vi-VN");
+function fmtNum(v) {
+  if (v == null) return "—";
+  if (Number.isInteger(v)) return String(v);
+  return Number(v).toFixed(2);
 }
 
-function badgeClass(text) {
-  const t = String(text || "").toUpperCase();
-  if (["VƯỢT", "ĐỦ", "ĐẠT"].includes(t)) return "badge badge-green";
-  if (["THIẾU", "CHƯA ĐẠT", "CHƯA CÓ"].includes(t)) return "badge badge-red";
-  return "badge badge-gray";
+function badgeClass(status) {
+  const s = (status || "").toUpperCase();
+
+  // xanh
+  if (s === "VƯỢT" || s === "ĐỦ" || s === "ĐẠT") {
+    return "border border-green-200 bg-green-100 text-green-800";
+  }
+  // đỏ
+  if (s === "THIẾU" || s === "CHƯA ĐẠT" || s === "CHƯA CÓ") {
+    return "border border-red-200 bg-red-100 text-red-800";
+  }
+  // xám
+  return "border border-gray-200 bg-gray-100 text-gray-700";
 }
 
 export default function KpiDashboardClient() {
-  const [cfg, setCfg] = useState([]);
-  const [dateKey, setDateKey] = useState("");
+  const [dates, setDates] = useState([]);
+  const [selectedDate, setSelectedDate] = useState("");
+  const [auto, setAuto] = useState(true);
   const [loading, setLoading] = useState(false);
-  const [auto, setAuto] = useState(true); // mặc định 1 phút
   const [err, setErr] = useState("");
+
   const [data, setData] = useState(null);
+  const [lineSearch, setLineSearch] = useState("");
+  const [selectedLine, setSelectedLine] = useState("");
 
-  const [searchLine, setSearchLine] = useState("");
-  const [selectedLineLabel, setSelectedLineLabel] = useState("");
+  const lastUpdated = data?.fetchedAt;
 
-  // load config
-  useEffect(() => {
-    (async () => {
-      try {
-        setErr("");
-        const res = await fetch("/api/kpi-config", { cache: "no-store" });
-        const j = await res.json();
-        if (j.status !== "ok") throw new Error(j.message || "Load config failed");
-        setCfg(j.items || []);
-        if ((j.items || []).length) setDateKey(j.items[0].dateKey);
-      } catch (e) {
-        setErr(e?.message || String(e));
-      }
-    })();
-  }, []);
+  async function loadConfig() {
+    const res = await fetch("/api/kpi-config", { cache: "no-store" });
+    const j = await res.json();
+    if (j.status !== "ok") throw new Error(j.message || "Config error");
+    setDates(j.dates || []);
+    if (!selectedDate && j.dates?.length) setSelectedDate(j.dates[0]);
+  }
 
-  async function fetchData(nextDateKey = dateKey) {
-    if (!nextDateKey) return;
+  async function loadData(date) {
+    if (!date) return;
     setLoading(true);
+    setErr("");
     try {
-      setErr("");
-      const res = await fetch(`/api/check-kpi?date=${encodeURIComponent(nextDateKey)}`, {
-        cache: "no-store",
-        headers: { "Cache-Control": "no-cache" },
-      });
+      const res = await fetch(`/api/check-kpi?date=${encodeURIComponent(date)}`, { cache: "no-store" });
       const j = await res.json();
-      if (j.status !== "ok") throw new Error(j.message || "Load data failed");
+      if (j.status !== "ok") throw new Error(j.message || "Load KPI error");
+
+      j.fetchedAt = new Date().toLocaleString("vi-VN");
       setData(j);
 
       // chọn line mặc định
-      const first = (j.lines || [])[0];
-      if (first) setSelectedLineLabel(first.lineLabel);
+      const firstLine = j.lines?.[0]?.line || "";
+      if (!selectedLine) setSelectedLine(firstLine);
     } catch (e) {
       setErr(e?.message || String(e));
       setData(null);
@@ -74,216 +71,183 @@ export default function KpiDashboardClient() {
     }
   }
 
-  // auto refresh 1 phút
   useEffect(() => {
-    if (!auto) return;
-    const id = setInterval(() => {
-      fetchData(dateKey);
-    }, 60_000);
+    loadConfig().catch((e) => setErr(e?.message || String(e)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (selectedDate) loadData(selectedDate);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDate]);
+
+  useEffect(() => {
+    if (!auto || !selectedDate) return;
+    const id = setInterval(() => loadData(selectedDate), 60_000);
     return () => clearInterval(id);
-  }, [auto, dateKey]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auto, selectedDate]);
 
   const lines = data?.lines || [];
 
-  const filteredLineChips = useMemo(() => {
-    const q = searchLine.trim().toLowerCase();
+  const filteredLines = useMemo(() => {
+    const q = lineSearch.trim().toUpperCase();
     if (!q) return lines;
-    return lines.filter((x) => String(x.lineLabel).toLowerCase().includes(q));
-  }, [lines, searchLine]);
+    return lines.filter((x) => String(x.line).toUpperCase().includes(q));
+  }, [lines, lineSearch]);
 
-  const selectedLine = useMemo(() => {
-    return lines.find((x) => x.lineLabel === selectedLineLabel) || null;
-  }, [lines, selectedLineLabel]);
+  const currentLine = useMemo(() => {
+    return lines.find((x) => x.line === selectedLine) || null;
+  }, [lines, selectedLine]);
 
   return (
-    <div className="wrap">
-      <h1 className="title">KPI Dashboard</h1>
-      <div className="sub">Chọn ngày để xem so sánh lũy tiến theo giờ và hiệu suất ngày.</div>
+    <div className="p-6 max-w-7xl mx-auto">
+      <h1 className="text-3xl font-bold mb-3">KPI Dashboard</h1>
+      <p className="text-gray-600 mb-4">Chọn ngày để xem so sánh lũy tiến theo giờ và hiệu suất ngày.</p>
 
-      <div className="controls">
-        <div className="row">
-          <div className="field">
-            <div className="label">Ngày:</div>
-            <select value={dateKey} onChange={(e) => setDateKey(e.target.value)}>
-              {cfg.map((x) => (
-                <option key={x.dateKey} value={x.dateKey}>
-                  {x.dateLabel}
-                </option>
-              ))}
-            </select>
-          </div>
+      <div className="flex flex-wrap items-center gap-3 mb-4">
+        <label className="font-semibold">Ngày:</label>
+        <select
+          className="border rounded-lg px-3 py-2"
+          value={selectedDate}
+          onChange={(e) => setSelectedDate(e.target.value)}
+        >
+          <option value="">--</option>
+          {dates.map((d) => (
+            <option key={d} value={d}>{d}</option>
+          ))}
+        </select>
 
-          <button disabled={!dateKey || loading} onClick={() => fetchData(dateKey)}>
-            {loading ? "Đang tải..." : "Xem dữ liệu"}
-          </button>
+        <button
+          className="border rounded-lg px-4 py-2 bg-black text-white disabled:opacity-50"
+          onClick={() => loadData(selectedDate)}
+          disabled={!selectedDate || loading}
+        >
+          {loading ? "Đang tải..." : "Xem dữ liệu"}
+        </button>
 
-          <label className="chk">
-            <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
-            Tự cập nhật (1 phút)
-          </label>
+        <label className="flex items-center gap-2 ml-2">
+          <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
+          <span>Tự cập nhật (1 phút)</span>
+        </label>
 
-          <div className="muted">
-            {data?.lastUpdated ? `Cập nhật: ${new Date(data.lastUpdated).toLocaleString("vi-VN")}` : ""}
-          </div>
-        </div>
-
-        {err ? <div className="error">Lỗi: {err}</div> : null}
+        {lastUpdated && (
+          <div className="text-gray-500">Cập nhật: <b>{lastUpdated}</b></div>
+        )}
       </div>
 
-      {/* 2 bảng trái/phải */}
-      <div className="grid2">
-        {/* LEFT */}
-        <div className="card">
-          <div className="cardTitle">
-            <div>So sánh hiệu suất ngày</div>
-            <div className="mutedSmall">Mốc cuối: -&gt;16h30</div>
+      {err && <div className="text-red-600 font-semibold mb-4">Lỗi: {err}</div>}
+
+      {/* 2 cột ngang */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* LEFT: HS ngày */}
+        <div className="rounded-2xl border p-4 bg-white">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-xl font-bold">So sánh hiệu suất ngày</h2>
+            <div className="text-gray-500">Mốc cuối: -&gt;16h30</div>
           </div>
 
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Chuyền</th>
-                <th>HS đạt</th>
-                <th>HS định mức</th>
-                <th>Trạng thái</th>
-              </tr>
-            </thead>
-            <tbody>
-              {lines.map((x) => (
-                <tr key={x.lineLabel}>
-                  <td className="bold">{x.lineLabel}</td>
-                  <td>{fmtPercent(x.hsDay)}</td>
-                  <td>{fmtPercent(x.hsTarget)}</td>
-                  <td>
-                    <span className={badgeClass(x.hsStatus)}>{x.hsStatus}</span>
-                  </td>
-                </tr>
-              ))}
-              {!lines.length ? (
+          <div className="overflow-auto">
+            <table className="w-full text-sm">
+              <thead className="text-left border-b">
                 <tr>
-                  <td colSpan={4} className="mutedSmall">
-                    Chưa có dữ liệu.
-                  </td>
+                  <th className="py-2">Chuyền</th>
+                  <th>HS đạt</th>
+                  <th>HS định mức</th>
+                  <th>Trạng thái</th>
                 </tr>
-              ) : null}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {filteredLines.map((x) => (
+                  <tr key={x.line} className="border-b">
+                    <td className="py-2 font-semibold">{x.line}</td>
+                    <td>{pct(x.hs)}</td>
+                    <td>{pct(x.hsTarget)}</td>
+                    <td>
+                      <span className={`inline-flex px-3 py-1 rounded-full text-xs font-bold ${badgeClass(x.hsStatus)}`}>
+                        {x.hsStatus}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+                {!filteredLines.length && (
+                  <tr><td className="py-3 text-gray-500" colSpan={4}>Không có dữ liệu chuyền.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
 
-        {/* RIGHT */}
-        <div className="card">
-          <div className="cardTitle">
-            <div>So sánh lũy tiến theo giờ (chuyền: {selectedLine ? selectedLine.lineLabel : "—"})</div>
+        {/* RIGHT: Lũy tiến theo giờ */}
+        <div className="rounded-2xl border p-4 bg-white">
+          <h2 className="text-xl font-bold mb-3">
+            So sánh lũy tiến theo giờ (chuyền: <span className="text-black">{selectedLine || "—"}</span>)
+          </h2>
+
+          <input
+            className="border rounded-lg px-3 py-2 w-full mb-3"
+            placeholder="Tìm chuyền..."
+            value={lineSearch}
+            onChange={(e) => setLineSearch(e.target.value)}
+          />
+
+          <div className="flex flex-wrap gap-2 mb-3">
+            {filteredLines.map((x) => (
+              <button
+                key={x.line}
+                onClick={() => setSelectedLine(x.line)}
+                className={`px-3 py-1 rounded-full border text-sm font-semibold ${
+                  x.line === selectedLine ? "bg-black text-white" : "bg-white"
+                }`}
+              >
+                {x.line}
+              </button>
+            ))}
           </div>
 
-          <div className="linePick">
-            <input
-              value={searchLine}
-              onChange={(e) => setSearchLine(e.target.value)}
-              placeholder="Tìm chuyền..."
-            />
-            <div className="chips">
-              {filteredLineChips.map((x) => (
-                <button
-                  key={x.lineLabel}
-                  className={x.lineLabel === selectedLineLabel ? "chip chipActive" : "chip"}
-                  onClick={() => setSelectedLineLabel(x.lineLabel)}
-                >
-                  {x.lineLabel}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {selectedLine ? (
+          {!currentLine ? (
+            <div className="text-gray-500">Chưa chọn chuyền.</div>
+          ) : (
             <>
-              <div className="dmRow">
-                <div className="dmItem">
-                  <span className="dmKey">DM/H:</span> <span className="dmVal">{fmtNum(selectedLine.dmHour)}</span>
-                </div>
-                <div className="dmItem">
-                  <span className="dmKey">DM/NGÀY:</span> <span className="dmVal">{fmtNum(selectedLine.dmDay)}</span>
-                </div>
+              <div className="font-bold mb-3">
+                DM/H: {currentLine.dmHour ?? "—"} &nbsp; • &nbsp; DM/NGÀY: {currentLine.dmDay ?? "—"}
               </div>
 
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>Mốc</th>
-                    <th>Lũy tiến</th>
-                    <th>DM lũy tiến</th>
-                    <th>Chênh</th>
-                    <th>Trạng thái</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(data?.marks || []).map((m) => {
-                    const c = selectedLine.hourlyCompare?.[m];
-                    const diff = c?.diff;
-                    const status = c?.status || "N/A";
-                    return (
-                      <tr key={m}>
-                        <td>{m}</td>
-                        <td>{fmtNum(c?.actual)}</td>
-                        <td>{fmtNum(c?.target)}</td>
-                        <td>{diff === null || diff === undefined ? "—" : (diff >= 0 ? `+${fmtNum(diff)}` : fmtNum(diff))}</td>
+              <div className="overflow-auto">
+                <table className="w-full text-sm">
+                  <thead className="text-left border-b">
+                    <tr>
+                      <th className="py-2">Mốc</th>
+                      <th>Lũy tiến</th>
+                      <th>ĐM lũy tiến</th>
+                      <th>Chênh</th>
+                      <th>Trạng thái</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {currentLine.hourlyCompare.map((r) => (
+                      <tr key={r.mark} className="border-b">
+                        <td className="py-2">{r.mark}</td>
+                        <td>{r.actual ?? "—"}</td>
+                        <td>{r.dmCum == null ? "—" : fmtNum(r.dmCum)}</td>
+                        <td>{r.diff == null ? "—" : (r.diff >= 0 ? `+${fmtNum(r.diff)}` : fmtNum(r.diff))}</td>
                         <td>
-                          <span className={badgeClass(status)}>{status}</span>
+                          <span className={`inline-flex px-3 py-1 rounded-full text-xs font-bold ${badgeClass(r.status)}`}>
+                            {r.status}
+                          </span>
                         </td>
                       </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Nếu cần debug nhanh */}
+              {/* <pre className="text-xs text-gray-500 mt-3">{JSON.stringify(data?.debug, null, 2)}</pre> */}
             </>
-          ) : (
-            <div className="mutedSmall">Chưa chọn chuyền.</div>
           )}
         </div>
       </div>
-
-      <style jsx>{`
-        .wrap { padding: 18px; }
-        .title { font-size: 40px; margin: 0 0 6px; font-weight: 800; }
-        .sub { margin: 0 0 14px; color: #333; }
-        .controls { margin-bottom: 14px; }
-        .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-        .field { display: flex; align-items: center; gap: 8px; }
-        .label { font-weight: 700; }
-        select { padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; min-width: 170px; }
-        button { padding: 9px 14px; border-radius: 10px; border: 1px solid #111; background: #111; color: #fff; cursor: pointer; }
-        button:disabled { opacity: 0.5; cursor: not-allowed; }
-        .chk { display: flex; align-items: center; gap: 8px; }
-        .muted { color: #666; font-size: 14px; }
-        .mutedSmall { color: #666; font-size: 13px; margin-top: 6px; }
-        .error { margin-top: 8px; color: #c00; font-weight: 700; }
-
-        /* LUÔN chia 2 cột trên desktop */
-        .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
-        @media (max-width: 980px) { .grid2 { grid-template-columns: 1fr; } }
-
-        .card { border: 1px solid #e6e6e6; border-radius: 14px; padding: 12px; background: #fff; }
-        .cardTitle { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-weight: 800; margin-bottom: 10px; }
-        .table { width: 100%; border-collapse: collapse; }
-        .table th { text-align: left; border-bottom: 1px solid #eee; padding: 10px 8px; font-size: 14px; }
-        .table td { border-bottom: 1px solid #f2f2f2; padding: 10px 8px; font-size: 14px; }
-        .bold { font-weight: 800; }
-
-        .badge { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 999px; font-weight: 800; font-size: 12px; border: 1px solid transparent; }
-        .badge-green { background: #eaffea; color: #0a7a0a; border-color: #95e095; }
-        .badge-red { background: #ffecec; color: #b30000; border-color: #ff9f9f; }
-        .badge-gray { background: #f1f1f1; color: #444; border-color: #ddd; }
-
-        .linePick input { width: 220px; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; }
-        .chips { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px; }
-        .chip { padding: 6px 10px; border-radius: 999px; border: 1px solid #cfcfcf; background: #fff; cursor: pointer; font-weight: 800; }
-        .chipActive { background: #111; color: #fff; border-color: #111; }
-
-        .dmRow { margin: 10px 0 6px; display: flex; gap: 14px; flex-wrap: wrap; }
-        .dmItem { font-weight: 800; }
-        .dmKey { color: #333; }
-        .dmVal { color: #111; }
-      `}</style>
     </div>
   );
 }

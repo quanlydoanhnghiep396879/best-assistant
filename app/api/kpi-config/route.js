@@ -2,48 +2,58 @@ import { NextResponse } from "next/server";
 import { readRange } from "../_lib/googleSheetsClient";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-function toDateKey(dateText) {
-  // expect dd/MM/yyyy
-  const s = String(dateText || "").trim();
-  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (!m) return null;
-  const dd = m[1].padStart(2, "0");
-  const mm = m[2].padStart(2, "0");
-  const yy = m[3];
-  return `${yy}-${mm}-${dd}`;
+function excelSerialToDateString(serial) {
+  // Google sheet serial ~ Excel (1899-12-30)
+  const base = new Date(Date.UTC(1899, 11, 30));
+  const d = new Date(base.getTime() + Number(serial) * 86400000);
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const yyyy = d.getUTCFullYear();
+  return `${dd}/${mm}/${yyyy}`;
+}
+
+function normalizeDate(x) {
+  if (x == null) return "";
+  const s = String(x).trim();
+  if (!s) return "";
+  if (/^\d+(\.\d+)?$/.test(s)) return excelSerialToDateString(s);
+  // nếu đã là dd/mm/yyyy
+  return s;
 }
 
 export async function GET() {
   try {
-    // Lấy formatted để không bị 46014
-    const rows = await readRange("CONFIG_KPI!A2:B1000", {
-      valueRenderOption: "FORMATTED_VALUE",
-    });
-
-    const items = [];
-    for (const r of rows) {
-      const dateLabel = (r?.[0] ?? "").toString().trim();
-      const range = (r?.[1] ?? "").toString().trim();
-      if (!dateLabel || !range) continue;
-
-      const dateKey = toDateKey(dateLabel);
-      if (!dateKey) continue;
-
-      items.push({ dateKey, dateLabel, range });
+    const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+    if (!spreadsheetId) {
+      return NextResponse.json(
+        { status: "error", message: "Missing GOOGLE_SHEET_ID" },
+        { status: 500 }
+      );
     }
 
-    // sort mới nhất lên đầu
-    items.sort((a, b) => (a.dateKey < b.dateKey ? 1 : -1));
+    const values = await readRange(spreadsheetId, "CONFIG_KPI!A2:B");
+    const map = {};
+    const dates = [];
 
+    for (const row of values) {
+      const date = normalizeDate(row?.[0]);
+      const range = String(row?.[1] || "").trim();
+      if (!date || !range) continue;
+      map[date] = range;
+      dates.push(date);
+    }
+
+    
     return NextResponse.json(
-      { status: "ok", items },
+      { status: "ok", dates, map },
       { headers: { "Cache-Control": "no-store" } }
     );
   } catch (e) {
     return NextResponse.json(
       { status: "error", message: e?.message || String(e) },
-      { status: 500, headers: { "Cache-Control": "no-store" } }
+      { status: 500 }
     );
   }
 }
