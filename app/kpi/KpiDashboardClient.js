@@ -3,8 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 
 function fmtPercent(v) {
-  if (v === null || v === undefined) return "—";
-  return ${Number(v).toFixed(2)}%;
+  if (v === null || v === undefined || v === "") return "—";
+  return `${Number(v).toFixed(2)}%`;
 }
 
 export default function DashboardClient() {
@@ -30,7 +30,7 @@ export default function DashboardClient() {
     if (!d) return;
     setLoading(true);
     try {
-      const r = await fetch(/api/check-kpi?date=${encodeURIComponent(d)}, {
+      const r = await fetch(`/api/check-kpi?date=${encodeURIComponent(d)}`, {
         cache: "no-store",
       });
       const j = await r.json();
