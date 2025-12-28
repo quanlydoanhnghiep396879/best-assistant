@@ -1,47 +1,64 @@
-// app/api/kpi-config/route.js
-import { NextResponse } from "next/server";
-import { getValues } from "../_lib/googleSheetsClient";
+import { getValues, normalizeDateKey, dateStrToSerial } from "../_lib/googleSheetsClient";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-function parseVNDateToTime(s) {
-  const [d, m, y] = String(s || "").split("/").map(Number);
-  if (!d || !m || !y) return NaN;
-  return new Date(y, m - 1, d).getTime();
-}
+const CONFIG_SHEET = process.env.CONFIG_SHEET_NAME || "CONFIG_KPI"; // sheet tab
 
 export async function GET(req) {
   try {
     const { searchParams } = new URL(req.url);
-    const list = searchParams.get("list");
-    const date = searchParams.get("date");
+    const list = searchParams.get("list") === "1";
 
-    // ✅ CONFIG_KPI phải lấy FORMATTED_VALUE để không ra 46015
-    const rows = await getValues("CONFIG_KPI!A:B", "FORMATTED_VALUE");
+    // Read A:B (DATE, RANGE)
+    const rows = await getValues(`${CONFIG_SHEET}!A:B`, {
+      valueRenderOption: "UNFORMATTED_VALUE", // allow serial too, we normalize
+    });
 
-    const map = [];
-    for (let i = 1; i < rows.length; i++) {
-      const d = String(rows[i]?.[0] ?? "").trim();   // "23/12/2025"
-      const range = String(rows[i]?.[1] ?? "").trim();
-      if (!d || !range) continue;
-      map.push({ date: d, range });
+    const map = {};
+    for (const r of rows) {
+      const rawDate = r?.[0];
+      const rawRange = r?.[1];
+
+      // skip header row
+      if (String(rawDate || "").toUpperCase().includes("DATE")) continue;
+
+      const dateKey = normalizeDateKey(rawDate);
+      const range = String(rawRange || "").trim();
+      if (!dateKey || !range) continue;
+
+      map[dateKey] = range;
     }
 
-    if (list === "1") {
-      const dates = map
-        .map(x => x.date)
-        .sort((a, b) => parseVNDateToTime(a) - parseVNDateToTime(b)); // ✅ 23 trước 24
-      return NextResponse.json({ ok: true, dates });
+    // sort ASC so 23/12 before 24/12
+    const dates = rawDates
+    .map(normalizeDateCell)
+    .filter(Boolean);
+
+    if (list) {
+      return Response.json({ ok: true, dates });
     }
 
-    if (date) {
-      const found = map.find(x => x.date === date);
-      if (!found) return NextResponse.json({ ok: false, error: "DATE_NOT_FOUND" }, { status: 404 });
-      return NextResponse.json({ ok: true, date: found.date, range: found.range });
-    }
-
-    return NextResponse.json({ ok: true, map });
+    return Response.json({ ok: true, dates, map });
   } catch (e) {
-    return NextResponse.json({ ok: false, error: String(e?.message || e) }, { status: 500 });
+    return Response.json({ ok: false, error: String(e?.message || e) }, { status: 500 });
   }
+}
+function pad2(n) { return String(n).padStart(2, "0"); }
+
+// Google Sheets serial -> dd/mm/yyyy (UTC)
+function serialToDMY(serial) {
+  const base = Date.UTC(1899, 11, 30);
+  const ms = base + Number(serial) * 86400000;
+  const d = new Date(ms);
+  return `${pad2(d.getUTCDate())}/${pad2(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}`;
+}
+
+function normalizeDateCell(v) {
+  if (v === null || v === undefined) return "";
+  // nếu là số hoặc chuỗi toàn số -> coi là serial date
+  if (typeof v === "number") return serialToDMY(v);
+  const s = String(v).trim();
+  if (/^\d+$/.test(s)) return serialToDMY(Number(s));
+  return s; // đã là dd/mm/yyyy
 }
