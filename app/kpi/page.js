@@ -1,6 +1,6 @@
 // app/kpi/page.js
 import "./kpi.css";
-import DashboardClient from "./DashboardClient";
+import DashboardClient from "./KpiDashboardClient";
 
 export const dynamic = "force-dynamic";
 
