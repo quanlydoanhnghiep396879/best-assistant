@@ -1,179 +1,290 @@
-// app/api/check-kpi/route.js
-import { NextResponse } from "next/server";
-import { readSheetRange } from "../_lib/googleSheetsClient";
+"use client";
 
-export const dynamic = "force-dynamic";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-const CONFIG_SHEET = process.env.KPI_CONFIG_SHEET || "CONFIG_KPI";
-
-function stripDiacritics(s) {
-  return String(s || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
+function fmtPercent(frac) {
+  if (frac === null || frac === undefined) return "—";
+  const v = Number(frac);
+  if (!Number.isFinite(v)) return "—";
+  return (v * 100).toFixed(2) + "%"; // CHỈ nhân 100 1 lần
 }
 
-function norm(s) {
-  return stripDiacritics(s).trim().toUpperCase().replace(/\s+/g, "");
+function clsStatus(status) {
+  if (status === "ĐẠT") return "pill pill-ok";
+  if (status === "THIẾU" || status === "CHƯA ĐẠT") return "pill pill-bad";
+  if (status === "CHƯA CÓ") return "pill pill-na";
+  return "pill pill-na";
 }
 
-function toNumberSafe(v) {
-  if (v === null || v === undefined) return 0;
-  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
-  const t = String(v).trim();
-  if (!t) return 0;
-  const n = Number(t.replace(/,/g, ""));
-  return Number.isFinite(n) ? n : 0;
-}
+export default function KpiDashboardClient() {
+  const [dates, setDates] = useState([]);
+  const [date, setDate] = useState("");
+  const [auto, setAuto] = useState(true);
+  const [loading, setLoading] = useState(false);
 
-async function loadConfig(spreadsheetId) {
-  const values = await readSheetRange({
-    spreadsheetId,
-    range: `${CONFIG_SHEET}!A:Z`,
-  });
+  const [daily, setDaily] = useState(null); // from kpi-config
+  const [selectedChuyen, setSelectedChuyen] = useState("");
+  const [q, setQ] = useState("");
 
-  if (!values.length) return [];
+  const [detail, setDetail] = useState(null); // from check-kpi
 
-  const header = values[0] || [];
-  const colDate = header.findIndex((x) => norm(x) === "DATE");
-  const colRange = header.findIndex((x) => norm(x) === "RANGE");
+  const timerRef = useRef(null);
 
-  if (colDate < 0 || colRange < 0) {
-    throw new Error(`CONFIG_KPI thiếu header DATE/RANGE`);
-  }
-
-  const items = [];
-  for (let r = 1; r < values.length; r++) {
-    const row = values[r] || [];
-    const date = row[colDate];
-    const range = row[colRange];
-    if (!date || !range) continue;
-    items.push({ date: String(date), range: String(range) });
-  }
-  return items;
-}
-
-function detectHeaderRow(values) {
-  // dò 15 dòng đầu, dòng nào chứa nhiều "từ khóa" nhất thì coi là header
-  const maxScan = Math.min(values.length, 15);
-  let best = { idx: 0, score: -1 };
-
-  for (let i = 0; i < maxScan; i++) {
-    const row = values[i] || [];
-    let score = 0;
-
-    for (const cell of row) {
-      const c = norm(cell);
-      if (!c) continue;
-
-      if (c.includes("CHUYEN")) score += 3;
-      if (c === "MH" || c.includes("MAHANG")) score += 3;
-      if (c.includes("DM/NGAY") || c.includes("DMNGAY")) score += 3;
-      if (c.includes("DM/H") || c.includes("DMH")) score += 3;
-
-      if (c.includes("->")) score += 1; // mốc giờ
-      if (c.match(/^-\>?\d/)) score += 1;
+  async function loadDates() {
+    const res = await fetch("/api/kpi-config?list=1", { cache: "no-store" });
+    const js = await res.json();
+    if (js.ok) {
+      setDates(js.dates || []);
+      if (!date && js.dates?.length) setDate(js.dates[js.dates.length - 1]); // default latest
     }
-
-    if (score > best.score) best = { idx: i, score };
   }
 
-  return best.idx;
-}
+  async function loadDaily(d = date) {
+    if (!d) return;
+    setLoading(true);
+    try {
+      const res = await fetch("/api/kpi-config?date=" + encodeURIComponent(d), { cache: "no-store" });
+      const js = await res.json();
+      setDaily(js.ok ? js : null);
 
-function parseKpi(values) {
-  if (!values.length) return { lines: [], marks: [], cols: {} };
+      const first = js?.rows?.[0]?.chuyen || "";
+      setSelectedChuyen(first);
+      setDetail(null);
 
-  const headerRow = detectHeaderRow(values);
-  const header = values[headerRow] || [];
-  const headerNorm = header.map(norm);
-
-  const colLine =
-    headerNorm.findIndex((x) => x.includes("CHUYEN")) >= 0
-      ? headerNorm.findIndex((x) => x.includes("CHUYEN"))
-      : 0;
-
-  const colMaHang =
-    headerNorm.findIndex((x) => x === "MH") >= 0
-      ? headerNorm.findIndex((x) => x === "MH")
-      : headerNorm.findIndex((x) => x.includes("MAHANG"));
-
-  const colDmDay =
-    headerNorm.findIndex((x) => x.includes("DM/NGAY") || x.includes("DMNGAY"));
-
-  const colDmHour =
-    headerNorm.findIndex((x) => x.includes("DM/H") || x.includes("DMH"));
-
-  // marks: các cột chứa "->"
-  const marks = [];
-  const markCols = [];
-  header.forEach((cell, idx) => {
-    const raw = String(cell || "").trim();
-    const n = norm(raw);
-    if (!raw) return;
-    if (n.includes("->") || raw.includes("->")) {
-      marks.push(raw);
-      markCols.push(idx);
+      if (first) {
+        await loadDetail(d, first);
+      }
+    } finally {
+      setLoading(false);
     }
-  });
-
-  const lines = [];
-  for (let r = headerRow + 1; r < values.length; r++) {
-    const row = values[r] || [];
-
-    const line = String(row[colLine] || "").trim();
-    if (!line) continue;
-
-    // bỏ các dòng tổng nếu có
-    const nline = norm(line);
-    if (nline.includes("TOTAL")) continue;
-
-    const maHang = colMaHang >= 0 ? String(row[colMaHang] || "").trim() : "";
-
-    const dmDay = colDmDay >= 0 ? toNumberSafe(row[colDmDay]) : 0;
-    const dmHour = colDmHour >= 0 ? toNumberSafe(row[colDmHour]) : 0;
-
-    const hourly = {};
-    for (let i = 0; i < marks.length; i++) {
-      hourly[marks[i]] = toNumberSafe(row[markCols[i]]);
-    }
-
-    lines.push({ line, maHang, dmDay, dmHour, hourly });
   }
 
-  return {
-    lines,
-    marks,
-    cols: { headerRow, colLine, colMaHang, colDmDay, colDmHour },
-  };
-}
+  async function loadDetail(d = date, ch = selectedChuyen) {
+    if (!d || !ch) return;
+    const res = await fetch(
+      "/api/check-kpi?date=" + encodeURIComponent(d) + "&chuyen=" + encodeURIComponent(ch),
+      { cache: "no-store" }
+    );
+    const js = await res.json();
+    setDetail(js.ok ? js : null);
+  }
 
-export async function GET(req) {
-  try {
-    const spreadsheetId = process.env.KPI_SHEET_ID;
-    if (!spreadsheetId) throw new Error("Missing KPI_SHEET_ID");
+  useEffect(() => {
+    loadDates();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-    const { searchParams } = new URL(req.url);
-    const date = searchParams.get("date");
-    if (!date) throw new Error("Missing date");
+  useEffect(() => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    if (!auto) return;
+    timerRef.current = setInterval(() => {
+      if (date) loadDaily(date);
+    }, 60_000);
+    return () => timerRef.current && clearInterval(timerRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auto, date]);
 
-    const cfg = await loadConfig(spreadsheetId);
-    const found = cfg.find((x) => String(x.date).trim() === String(date).trim());
-    if (!found) throw new Error(`Không tìm thấy date=${date} trong CONFIG_KPI`);
-
-    const values = await readSheetRange({
-      spreadsheetId,
-      range: found.range,
+  const filteredRows = useMemo(() => {
+    const rows = daily?.rows || [];
+    const query = q.trim().toLowerCase();
+    if (!query) return rows;
+    return rows.filter((r) => {
+      return (
+        String(r.chuyen || "").toLowerCase().includes(query) ||
+        String(r.maHang || "").toLowerCase().includes(query)
+      );
     });
+  }, [daily, q]);
 
-    const parsed = parseKpi(values);
+  const selectedMaHang = useMemo(() => {
+    const rows = daily?.rows || [];
+    const found = rows.find((r) => String(r.chuyen).toUpperCase() === String(selectedChuyen).toUpperCase());
+    return found?.maHang || "—";
+  }, [daily, selectedChuyen]);
 
-    return NextResponse.json({
-      ok: true,
-      date,
-      range: found.range,
-      ...parsed,
-    });
-  } catch (e) {
-    return NextResponse.json({ ok: false, error: e.message || String(e) });
-  }
+  return (
+    <div className="kpi-wrap">
+      <div className="hero">
+        <div className="hero-title">KPI Dashboard</div>
+        <div className="hero-sub">Chọn ngày để xem so sánh lũy tiến theo giờ và hiệu suất ngày.</div>
+
+        <div className="toolbar">
+          <label className="field">
+            <span>Ngày:</span>
+            <select value={date} onChange={(e) => setDate(e.target.value)} className="select">
+              {dates.map((d) => (
+                <option key={d} value={d}>
+                  {d}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <button className="btn" onClick={() => loadDaily(date)} disabled={!date || loading}>
+            {loading ? "Đang tải..." : "Xem dữ liệu"}
+          </button>
+
+          <label className="chk">
+            <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
+            <span>Tự cập nhật (1 phút)</span>
+          </label>
+
+          <div className="muted">
+            {daily?.date ? (
+              <>
+                Range: <b>{daily.rangeA1}</b>
+              </>
+            ) : (
+              "—"
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="grid">
+        {/* LEFT */}
+        <section className="card">
+          <div className="card-hd">
+            <div>
+              <div className="card-title">So sánh hiệu suất ngày</div>
+              <div className="card-sub">Mốc cuối: {daily?.timeMarks?.slice(-1)?.[0] || "—"}</div>
+            </div>
+
+            <input
+              className="search"
+              placeholder="Tìm chuyền hoặc mã hàng..."
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
+          </div>
+
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Chuyền</th>
+                  <th>Mã hàng</th>
+                  <th>HS đạt</th>
+                  <th>HS định mức</th>
+                  <th>Trạng thái</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredRows.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="empty">
+                      Không có dữ liệu (bấm “Xem dữ liệu”)
+                    </td>
+                  </tr>
+                ) : (
+                  filteredRows.map((r) => {
+                    const active = String(r.chuyen).toUpperCase() === String(selectedChuyen).toUpperCase();
+                    return (
+                      <tr
+                        key={r.chuyen}
+                        className={active ? "row-active" : ""}
+                        onClick={async () => {
+                          setSelectedChuyen(r.chuyen);
+                          await loadDetail(date, r.chuyen);
+                        }}
+                      >
+                        <td className="mono">{r.chuyen}</td>
+                        <td className="mono">{r.maHang}</td>
+                        <td>{fmtPercent(r.hsDat)}</td>
+                        <td>{fmtPercent(r.hsDinhMuc)}</td>
+                        <td>
+                          <span className={clsStatus(r.status)}>{r.status}</span>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        {/* RIGHT */}
+        <section className="card">
+          <div className="card-hd">
+            <div>
+              <div className="card-title">
+                So sánh lũy tiến theo giờ (chuyền: <span className="mono">{selectedChuyen || "—"}</span>)
+              </div>
+              <div className="card-sub">
+                Mã hàng: <b className="mono">{selectedMaHang}</b>
+              </div>
+            </div>
+
+            <div className="chips">
+              {(daily?.rows || []).map((r) => (
+                <button
+                  key={r.chuyen}
+                  className={
+                    String(r.chuyen).toUpperCase() === String(selectedChuyen).toUpperCase()
+                      ? "chip chip-on"
+                      : "chip"
+                  }
+                  onClick={async () => {
+                    setSelectedChuyen(r.chuyen);
+                    await loadDetail(date, r.chuyen);
+                  }}
+                >
+                  {r.chuyen}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="kpi-mini">
+            <div className="mini">
+              <div className="mini-lb">DM/H</div>
+              <div className="mini-val">{detail?.dmH ?? "—"}</div>
+            </div>
+            <div className="mini">
+              <div className="mini-lb">DM/NGÀY</div>
+              <div className="mini-val">{detail?.dmNgay ?? "—"}</div>
+            </div>
+          </div>
+
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Mốc</th>
+                  <th>Lũy tiến</th>
+                  <th>DM lũy tiến</th>
+                  <th>Chênh</th>
+                  <th>Trạng thái</th>
+                </tr>
+              </thead>
+              <tbody>
+                {!detail?.steps?.length ? (
+                  <tr>
+                    <td colSpan={5} className="empty">
+                      Chưa chọn chuyền / không có dữ liệu
+                    </td>
+                  </tr>
+                ) : (
+                  detail.steps.map((s) => (
+                    <tr key={s.moc}>
+                      <td className="mono">{s.moc}</td>
+                      <td>{s.luyTien ?? "—"}</td>
+                      <td>{s.dmLuyTien ?? "—"}</td>
+                      <td className={typeof s.chenh === "number" ? (s.chenh >= 0 ? "ok" : "bad") : ""}>
+                        {s.chenh ?? "—"}
+                      </td>
+                      <td>
+                        <span className={clsStatus(s.status === "THIẾU" ? "CHƯA ĐẠT" : s.status)}>{s.status}</span>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </div>
+  );
 }

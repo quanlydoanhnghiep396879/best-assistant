@@ -1,34 +1,40 @@
-// app/api/_lib/googleSheetsClient.js
 import { google } from "googleapis";
 
 function mustEnv(name) {
   const v = process.env[name];
-  if (!v) throw new Error(Missing ${name});
+  if (!v) throw new Error(`Missing env: ${name}`);
   return v;
 }
 
 function loadServiceAccount() {
-  // ưu tiên GOOGLE_SERVICE_ACCOUNT_JSON_B64
-  const b64 =
-    process.env.GOOGLE_SERVICE_ACCOUNT_JSON_B64 ||
-    process.env.GOOGLE_SERVICE_ACCOUNT_KEY_B64;
-
-  if (!b64) throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON_B64");
-
-  const jsonStr = Buffer.from(b64, "base64").toString("utf8");
-  const sa = JSON.parse(jsonStr);
-
-  // sửa newline private_key nếu bị mất \n
-  if (sa.private_key && typeof sa.private_key === "string") {
-    sa.private_key = sa.private_key.replace(/\\n/g, "\n");
+  // Ưu tiên BASE64 để dễ set Vercel
+  const b64 = process.env.GOOGLE_SERVICE_ACCOUNT_JSON_BASE64;
+  if (b64) {
+    const json = Buffer.from(b64, "base64").toString("utf8");
+    const obj = JSON.parse(json);
+    if (obj.private_key) obj.private_key = obj.private_key.replace(/\\n/g, "\n");
+    return obj;
   }
-  return sa;
+
+  // Hoặc dùng raw JSON
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  if (raw) {
+    const obj = JSON.parse(raw);
+    if (obj.private_key) obj.private_key = obj.private_key.replace(/\\n/g, "\n");
+    return obj;
+  }
+
+  throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 or GOOGLE_SERVICE_ACCOUNT_JSON");
 }
 
-let cached = null;
+let _sheets = null;
 
-export async function getSheetsClient() {
-  if (cached) return cached;
+export function getSpreadsheetId() {
+  return mustEnv("GOOGLE_SHEET_ID");
+}
+
+export async function getSheets() {
+  if (_sheets) return _sheets;
 
   const sa = loadServiceAccount();
   const auth = new google.auth.JWT({
@@ -37,25 +43,34 @@ export async function getSheetsClient() {
     scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
   });
 
-  const sheets = google.sheets({ version: "v4", auth });
-  cached = { sheets, clientEmail: sa.client_email };
-  return cached;
+  _sheets = google.sheets({ version: "v4", auth });
+  return _sheets;
 }
 
-export async function readValues(rangeA1, spreadsheetId = null) {
-  const sid =
-    spreadsheetId ||
-    process.env.GOOGLE_SHEET_ID ||
-    process.env.GOOGLE_SHEETS_ID;
+export async function readRangeFormatted(rangeA1) {
+  const sheets = await getSheets();
+  const spreadsheetId = getSpreadsheetId();
 
-  if (!sid) throw new Error("Missing GOOGLE_SHEET_ID");
-
-  const { sheets } = await getSheetsClient();
   const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: sid,
+    spreadsheetId,
     range: rangeA1,
-    valueRenderOption: "UNFORMATTED_VALUE",
+    majorDimension: "ROWS",
+    valueRenderOption: "FORMATTED_VALUE",
     dateTimeRenderOption: "FORMATTED_STRING",
+  });
+
+  return res.data.values || [];
+}
+
+export async function readRangeRaw(rangeA1) {
+  const sheets = await getSheets();
+  const spreadsheetId = getSpreadsheetId();
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: rangeA1,
+    majorDimension: "ROWS",
+    valueRenderOption: "UNFORMATTED_VALUE",
   });
 
   return res.data.values || [];
