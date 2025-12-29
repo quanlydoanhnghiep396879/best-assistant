@@ -8,19 +8,45 @@ export function requireEnv(name) {
   return v;
 }
 
-function decodePrivateKeyFromEnv() {
+function normalizePem(pem) {
+  let s = String(pem).trim();
+
+  // bỏ dấu nháy nếu lỡ copy dính "...."
+  s = s.replace(/^"(.*)"$/s, "$1").replace(/^'(.*)'$/s, "$1");
+
+  // nếu đang là dạng có \n
+  s = s.replace(/\\n/g, "\n");
+
+  return s.trim();
+}
+
+// Ưu tiên: nếu env chứa PEM trực tiếp -> dùng luôn
+// Nếu không có PEM -> coi là base64 và decode
+function getPrivateKeyPem() {
   const raw = requireEnv("GOOGLE_PRIVATE_KEY_BASE64");
 
-  // base64 đôi khi có xuống dòng/spaces → bỏ hết whitespace
+  // Nếu bạn vô tình dán PEM thẳng vào biến BASE64, vẫn xử lý được
+  if (raw.includes("BEGIN") && raw.includes("PRIVATE KEY")) {
+    const pem = normalizePem(raw);
+    if (!pem.includes("BEGIN") || !pem.includes("END")) {
+      throw new Error("Private key PEM không hợp lệ");
+    }
+    return pem;
+  }
+
+  // base64
   const b64 = raw.replace(/\s+/g, "");
-
   let pem = Buffer.from(b64, "base64").toString("utf8");
+  pem = normalizePem(pem);
 
-  // đề phòng bạn đã lưu dạng có \\n
-  pem = pem.replace(/\\n/g, "\n");
-
-  // check nhanh format
+  // Google JWT thường cần PKCS8: -----BEGIN PRIVATE KEY-----
   if (!pem.includes("BEGIN PRIVATE KEY") || !pem.includes("END PRIVATE KEY")) {
+    // Nếu ra RSA PRIVATE KEY (PKCS1) thì OpenSSL3 hay lỗi
+    if (pem.includes("BEGIN RSA PRIVATE KEY")) {
+      throw new Error(
+        "Key đang là 'BEGIN RSA PRIVATE KEY' (PKCS1). Hãy đổi sang PKCS8 'BEGIN PRIVATE KEY' rồi base64 lại."
+      );
+    }
     throw new Error("GOOGLE_PRIVATE_KEY_BASE64 decode ra không phải PEM PRIVATE KEY hợp lệ");
   }
 
@@ -30,9 +56,8 @@ function decodePrivateKeyFromEnv() {
 export async function getSheetsClient() {
   if (_sheets) return _sheets;
 
-  // Nhớ: env name phải khớp đúng cái bạn set trên Vercel
   const clientEmail = requireEnv("GOOGLE_SERVICE_ACCOUNT_EMAIL");
-  const privateKey = decodePrivateKeyFromEnv();
+  const privateKey = getPrivateKeyPem();
 
   const auth = new google.auth.JWT({
     email: clientEmail,
@@ -40,9 +65,8 @@ export async function getSheetsClient() {
     scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
   });
 
-  const sheets = google.sheets({ version: "v4", auth });
-  _sheets = sheets;
-  return sheets;
+  _sheets = google.sheets({ version: "v4", auth });
+  return _sheets;
 }
 
 export async function readRangeA1(a1Range, opts = {}) {
@@ -57,12 +81,4 @@ export async function readRangeA1(a1Range, opts = {}) {
   });
 
   return res.data.values || [];
-}
-
-// Parse dd/mm/yyyy
-export function parseVNDateToTime(s) {
-  if (!s) return 0;
-  const [dd, mm, yyyy] = String(s).split("/").map((x) => parseInt(x, 10));
-  if (!dd || !mm || !yyyy) return 0;
-  return new Date(yyyy, mm - 1, dd).getTime();
 }
