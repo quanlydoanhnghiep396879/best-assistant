@@ -8,12 +8,31 @@ export function requireEnv(name) {
   return v;
 }
 
+function decodePrivateKeyFromEnv() {
+  const raw = requireEnv("GOOGLE_PRIVATE_KEY_BASE64");
+
+  // base64 đôi khi có xuống dòng/spaces → bỏ hết whitespace
+  const b64 = raw.replace(/\s+/g, "");
+
+  let pem = Buffer.from(b64, "base64").toString("utf8");
+
+  // đề phòng bạn đã lưu dạng có \\n
+  pem = pem.replace(/\\n/g, "\n");
+
+  // check nhanh format
+  if (!pem.includes("BEGIN PRIVATE KEY") || !pem.includes("END PRIVATE KEY")) {
+    throw new Error("GOOGLE_PRIVATE_KEY_BASE64 decode ra không phải PEM PRIVATE KEY hợp lệ");
+  }
+
+  return pem;
+}
+
 export async function getSheetsClient() {
   if (_sheets) return _sheets;
 
+  // Nhớ: env name phải khớp đúng cái bạn set trên Vercel
   const clientEmail = requireEnv("GOOGLE_SERVICE_ACCOUNT_EMAIL");
-  const privateKeyRaw = requireEnv("GOOGLE_PRIVATE_KEY_BASE64");
-  const privateKey = privateKeyRaw.replace(/\\n/g, "\n");
+  const privateKey = decodePrivateKeyFromEnv();
 
   const auth = new google.auth.JWT({
     email: clientEmail,
@@ -33,7 +52,6 @@ export async function readRangeA1(a1Range, opts = {}) {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range: a1Range,
-    // Quan trọng: lấy dạng hiển thị để DATE ra "23/12/2025" thay vì 46014
     valueRenderOption: opts.valueRenderOption || "FORMATTED_VALUE",
     dateTimeRenderOption: opts.dateTimeRenderOption || "FORMATTED_STRING",
   });
