@@ -2,62 +2,68 @@ import { google } from "googleapis";
 
 let _sheets = null;
 
+/** Lấy env bắt buộc */
 export function requireEnv(name) {
   const v = process.env[name];
   if (!v) throw new Error(`Missing env: ${name}`);
   return v;
 }
 
-function normalizePem(pem) {
-  let s = String(pem).trim();
-
-  // bỏ dấu nháy nếu lỡ copy dính "...."
-  s = s.replace(/^"(.*)"$/s, "$1").replace(/^'(.*)'$/s, "$1");
-
-  // nếu đang là dạng có \n
-  s = s.replace(/\\n/g, "\n");
-
-  return s.trim();
+/** Lấy env theo nhiều tên (đỡ bị lệch tên biến) */
+function requireEnvAny(names) {
+  for (const n of names) {
+    const v = process.env[n];
+    if (v) return v;
+  }
+  throw new Error(`Missing env: ${names.join(" or ")}`);
 }
 
-// Ưu tiên: nếu env chứa PEM trực tiếp -> dùng luôn
-// Nếu không có PEM -> coi là base64 và decode
-function getPrivateKeyPem() {
-  const raw = requireEnv("GOOGLE_PRIVATE_KEY_BASE64");
-
-  // Nếu bạn vô tình dán PEM thẳng vào biến BASE64, vẫn xử lý được
-  if (raw.includes("BEGIN") && raw.includes("PRIVATE KEY")) {
-    const pem = normalizePem(raw);
-    if (!pem.includes("BEGIN") || !pem.includes("END")) {
-      throw new Error("Private key PEM không hợp lệ");
-    }
-    return pem;
+/** Chuẩn hoá private key (base64 hoặc raw) về PEM hợp lệ */
+function loadPrivateKeyPem() {
+  // Ưu tiên base64
+  const b64 = process.env.GOOGLE_PRIVATE_KEY_BASE64 || process.env.GOOGLE_SERVICE_ACCOUNT_BASE64;
+  if (b64) {
+    const pem = Buffer.from(b64, "base64").toString("utf8");
+    return sanitizePem(pem);
   }
 
-  // base64
-  const b64 = raw.replace(/\s+/g, "");
-  let pem = Buffer.from(b64, "base64").toString("utf8");
-  pem = normalizePem(pem);
+  // Fallback raw PEM
+  const raw = process.env.GOOGLE_PRIVATE_KEY || process.env.GOOGLE_PRIVATE_KEY_PEM;
+  if (raw) return sanitizePem(raw);
 
-  // Google JWT thường cần PKCS8: -----BEGIN PRIVATE KEY-----
-  if (!pem.includes("BEGIN PRIVATE KEY") || !pem.includes("END PRIVATE KEY")) {
-    // Nếu ra RSA PRIVATE KEY (PKCS1) thì OpenSSL3 hay lỗi
-    if (pem.includes("BEGIN RSA PRIVATE KEY")) {
-      throw new Error(
-        "Key đang là 'BEGIN RSA PRIVATE KEY' (PKCS1). Hãy đổi sang PKCS8 'BEGIN PRIVATE KEY' rồi base64 lại."
-      );
-    }
-    throw new Error("GOOGLE_PRIVATE_KEY_BASE64 decode ra không phải PEM PRIVATE KEY hợp lệ");
+  throw new Error(
+    "Missing env: GOOGLE_PRIVATE_KEY_BASE64 (recommended) or GOOGLE_PRIVATE_KEY"
+  );
+}
+
+/** Loại bỏ nháy, sửa \\n thành \n, trim... */
+function sanitizePem(s) {
+  let out = String(s).trim();
+
+  // Nếu ai đó lỡ copy có dấu " ở đầu/cuối
+  if (
+    (out.startsWith('"') && out.endsWith('"')) ||
+    (out.startsWith("'") && out.endsWith("'"))
+  ) {
+    out = out.slice(1, -1);
   }
 
-  return pem;
+  // Vercel thường lưu \n dạng chuỗi -> chuyển thành newline thật
+  out = out.replace(/\\n/g, "\n").trim();
+
+  return out;
 }
 
 export async function getSheetsClient() {
   if (_sheets) return _sheets;
 
-  const clientEmail = requireEnv("GOOGLE_SERVICE_ACCOUNT_EMAIL");
-  const privateKey = getPrivateKeyPem();
+  // hỗ trợ cả 2 kiểu đặt tên email
+  const clientEmail = requireEnvAny([
+    "GOOGLE_SERVICE_ACCOUNT_EMAIL",
+    "GOOGLE_CLIENT_EMAIL",
+  ]);
+
+  const privateKey = loadPrivateKeyPem();
 
   const auth = new google.auth.JWT({
     email: clientEmail,
@@ -65,13 +71,17 @@ export async function getSheetsClient() {
     scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
   });
 
-  _sheets = google.sheets({ version: "v4", auth });
-  return _sheets;
+  // Gọi authorize để phát hiện lỗi key ngay tại đây (dễ debug)
+  await auth.authorize();
+
+  const sheets = google.sheets({ version: "v4", auth });
+  _sheets = sheets;
+  return sheets;
 }
 
 export async function readRangeA1(a1Range, opts = {}) {
   const sheets = await getSheetsClient();
-  const spreadsheetId = requireEnv("GOOGLE_SHEET_ID");
+  const spreadsheetId = requireEnvAny(["GOOGLE_SHEET_ID", "GOOGLE_SPREADSHEET_ID"]);
 
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
@@ -81,4 +91,12 @@ export async function readRangeA1(a1Range, opts = {}) {
   });
 
   return res.data.values || [];
+}
+
+// Parse dd/mm/yyyy -> time
+export function parseVNDateToTime(s) {
+  if (!s) return 0;
+  const [dd, mm, yyyy] = String(s).split("/").map((x) => parseInt(x, 10));
+  if (!dd || !mm || !yyyy) return 0;
+  return new Date(yyyy, mm - 1, dd).getTime();
 }
