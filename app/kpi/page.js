@@ -1,13 +1,7 @@
 // app/kpi/page.js
-import "./kpi.css";
-import DashboardClient from "./KpiDashboardClient";
 
-export const dynamic = "force-dynamic";
+import KpiDashboardClient from "./KpiDashboardClient";
 
-export default function KPIPage() {
-  return (
-    <div className="kpiRoot">
-      <DashboardClient />
-    </div>
-  );
+export default function Page() {
+  return <KpiDashboardClient />;
 }

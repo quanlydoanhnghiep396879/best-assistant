@@ -2,281 +2,310 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-function fmtPercent(v) {
-  if (v === null || v === undefined || v === "") return "—";
-  return `${Number(v).toFixed(2)}%`;
-}
-
-export default function DashboardClient() {
+export default function KpiDashboardClient() {
   const [dates, setDates] = useState([]);
   const [date, setDate] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [auto, setAuto] = useState(true);
+  const [lines, setLines] = useState([]);
+  const [meta, setMeta] = useState(null);
 
-  const [rows, setRows] = useState([]); // lines data
-  const [selectedLine, setSelectedLine] = useState("");
+  const [loadingConfig, setLoadingConfig] = useState(false);
+  const [loadingData, setLoadingData] = useState(false);
+
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [filterStatus, setFilterStatus] = useState("ALL"); // ALL | DAT | KHONGDAT
   const [q, setQ] = useState("");
 
-  async function loadDates() {
-    const r = await fetch("/api/kpi-config?list=1", { cache: "no-store" });
+  const [err, setErr] = useState("");
+
+  // ===== helper fetch JSON =====
+  async function fetchJson(url) {
+    const r = await fetch(url, { cache: "no-store" });
     const j = await r.json();
-    if (j.ok) {
-      setDates(j.dates || []);
-      if (!date && j.dates?.length) setDate(j.dates[j.dates.length - 1]); // lấy ngày mới nhất
-    }
+    return j;
   }
 
-  async function loadData(d) {
-    if (!d) return;
-    setLoading(true);
+  // ===== 1) Load danh sách ngày =====
+  async function loadDates() {
     try {
-      const r = await fetch(`/api/check-kpi?date=${encodeURIComponent(d)}`, {
-        cache: "no-store",
-      });
-      const j = await r.json();
-      if (j.ok) {
-        setRows(j.lines || []);
-        if (!selectedLine && j.lines?.length) setSelectedLine(j.lines[0].line);
-      } else {
-        setRows([]);
-        console.error(j.error);
-      }
+      setErr("");
+      setLoadingConfig(true);
+      const j = await fetchJson("/api/kpi-config?list=1");
+
+      if (!j?.ok) throw new Error(j?.message || j?.error || "KPI_CONFIG_ERROR");
+
+      const ds = Array.isArray(j.dates) ? j.dates : [];
+      setDates(ds);
+
+      // auto chọn ngày đầu tiên nếu chưa chọn
+      if (!date && ds.length) setDate(ds[0]);
+    } catch (e) {
+      setErr(String(e?.message || e));
+      setDates([]);
     } finally {
-      setLoading(false);
+      setLoadingConfig(false);
     }
   }
 
+  // ===== 2) Load dữ liệu KPI theo ngày =====
+  async function loadKpi(selectedDate) {
+    if (!selectedDate) return;
+    try {
+      setErr("");
+      setLoadingData(true);
+
+      const j = await fetchJson(`/api/check-kpi?date=${encodeURIComponent(selectedDate)}`);
+
+      if (!j?.ok) throw new Error(j?.message || j?.error || "CHECK_KPI_ERROR");
+
+      setLines(Array.isArray(j.lines) ? j.lines : []);
+      setMeta(j.meta || null);
+    } catch (e) {
+      setErr(String(e?.message || e));
+      setLines([]);
+      setMeta(null);
+    } finally {
+      setLoadingData(false);
+    }
+  }
+
+  // load config 1 lần khi mở trang
   useEffect(() => {
     loadDates();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // khi đổi ngày -> load KPI
   useEffect(() => {
     if (!date) return;
-    loadData(date);
+    loadKpi(date);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [date]);
 
+  // auto refresh mỗi 60s
   useEffect(() => {
-    if (!auto || !date) return;
-    const t = setInterval(() => loadData(date), 60_000);
-    return () => clearInterval(t);
+    if (!autoRefresh || !date) return;
+    const id = setInterval(() => {
+      loadKpi(date);
+    }, 60_000);
+    return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auto, date]);
+  }, [autoRefresh, date]);
 
+  // ===== thống kê =====
+  const stats = useMemo(() => {
+    let dat = 0;
+    let khong = 0;
+    for (const x of lines) {
+      if (x?.status === "ĐẠT") dat++;
+      else if (x?.status === "KHÔNG ĐẠT") khong++;
+    }
+    return { total: lines.length, dat, khong };
+  }, [lines]);
+
+  // ===== filter/search =====
   const filtered = useMemo(() => {
-    const s = q.trim().toLowerCase();
-    if (!s) return rows;
-    return rows.filter(
-      (x) =>
-        x.line.toLowerCase().includes(s) ||
-        (x.mh || "").toLowerCase().includes(s)
-    );
-  }, [rows, q]);
+    const keyword = q.trim().toLowerCase();
 
-  const current = useMemo(() => {
-    return rows.find((x) => x.line === selectedLine) || null;
-  }, [rows, selectedLine]);
+    return lines.filter((x) => {
+      if (!x) return false;
+
+      if (filterStatus === "DAT" && x.status !== "ĐẠT") return false;
+      if (filterStatus === "KHONGDAT" && x.status !== "KHÔNG ĐẠT") return false;
+
+      if (!keyword) return true;
+
+      const s = `${x.line || ""} ${x.mh || ""} ${x.status || ""}`.toLowerCase();
+      return s.includes(keyword);
+    });
+  }, [lines, filterStatus, q]);
 
   return (
-    <div className="kpiWrap">
-      <div className="kpiHeader">
+    <div style={{ padding: 16, maxWidth: 1200, margin: "0 auto" }}>
+      <h2 style={{ marginBottom: 12 }}>KPI Dashboard</h2>
+
+      {/* Lỗi */}
+      {err && (
+        <div style={{ background: "#ffe7e7", border: "1px solid #ffb3b3", padding: 10, borderRadius: 8, marginBottom: 12 }}>
+          <b>Lỗi:</b> {err}
+          <div style={{ marginTop: 8, fontSize: 13, opacity: 0.85 }}>
+            Gợi ý: mở thử <code>/api/check-kpi?date=...</code> để xem JSON có <code>ok:true</code> và <code>lines</code> không.
+          </div>
+        </div>
+      )}
+
+      {/* Control bar */}
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
         <div>
-          <div className="kpiTitle">KPI Dashboard</div>
-          <div className="kpiSub">
-            Chọn ngày để xem so sánh lũy tiến theo giờ và hiệu suất ngày.
-          </div>
-        </div>
-
-        <div className="kpiControls">
-          <label className="ctl">
-            <span>Ngày:</span>
-            <select
-              className="select"
-              value={date}
-              onChange={(e) => setDate(e.target.value)}
-            >
-              {dates.map((d) => (
-                <option key={d} value={d}>
-                  {d}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <button className="btn" onClick={() => loadData(date)}>
-            {loading ? "Đang tải..." : "Xem dữ liệu"}
-          </button>
-
-          <label className="ctl chk">
-            <input
-              type="checkbox"
-              checked={auto}
-              onChange={(e) => setAuto(e.target.checked)}
-            />
-            <span>Tự cập nhật (1 phút)</span>
-          </label>
-        </div>
-      </div>
-
-      <div className="grid">
-        {/* LEFT: Daily */}
-        <div className="card">
-          <div className="cardTitle">So sánh hiệu suất ngày</div>
-          <div className="hint">Mốc cuối: -&gt;16h30</div>
-
-          <div className="tableWrap">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Chuyền</th>
-                  <th>Mã hàng</th>
-                  <th>HS đạt</th>
-                  <th>HS định mức</th>
-                  <th>Trạng thái</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="empty">
-                      Chưa có dữ liệu (bấm “Xem dữ liệu”)
-                    </td>
-                  </tr>
-                ) : (
-                  filtered.map((r) => {
-                    const ok = r.statusDay === "ĐẠT";
-                    const bad = r.statusDay === "KHÔNG ĐẠT";
-                    return (
-                      <tr
-                        key={r.line}
-                        className={r.line === selectedLine ? "rowActive" : ""}
-                        onClick={() => setSelectedLine(r.line)}
-                      >
-                        <td className="mono">{r.line}</td>
-                        <td className="mono">{r.mh || "—"}</td>
-                        <td>{fmtPercent(r.hs)}</td>
-                        <td>{fmtPercent(r.hsTarget)}</td>
-                        <td>
-                          <span
-                            className={
-                              ok
-                                ? "pill ok"
-                                : bad
-                                ? "pill bad"
-                                : "pill na"
-                            }
-                          >
-                            {r.statusDay}
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        {/* RIGHT: Hourly */}
-        <div className="card">
-          <div className="cardTop">
-            <div>
-              <div className="cardTitle">
-                So sánh lũy tiến theo giờ (chuyền:{" "}
-                <span className="accent">{selectedLine || "—"}</span>)
-              </div>
-              <div className="hint">
-                Mã hàng: <span className="mono">{current?.mh || "—"}</span>
-              </div>
-            </div>
-
-            <input
-              className="search"
-              placeholder="Tìm chuyền hoặc mã hàng..."
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-            />
-          </div>
-
-          <div className="lineBar">
-            {rows.map((x) => (
-              <button
-                key={x.line}
-                className={
-                  "chip " + (x.line === selectedLine ? "chipActive" : "")
-                }
-                onClick={() => setSelectedLine(x.line)}
-              >
-                {x.line}
-              </button>
+          <div style={{ fontSize: 12, opacity: 0.8 }}>Ngày</div>
+          <select
+            value={date}
+            onChange={(e) => setDate(e.target.value)}
+            disabled={loadingConfig || dates.length === 0}
+            style={{ padding: 8, minWidth: 180 }}
+          >
+            {dates.map((d) => (
+              <option key={d} value={d}>{d}</option>
             ))}
-          </div>
+          </select>
+        </div>
 
-          <div className="kpiStats">
-            <div className="stat">
-              <div className="statLabel">ĐM/H</div>
-              <div className="statValue">{current?.dmH ?? "—"}</div>
-            </div>
-            <div className="stat">
-              <div className="statLabel">ĐM/NGÀY</div>
-              <div className="statValue">{current?.dmNgay ?? "—"}</div>
-            </div>
-          </div>
+        <div>
+          <div style={{ fontSize: 12, opacity: 0.8 }}>Lọc trạng thái</div>
+          <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} style={{ padding: 8, minWidth: 160 }}>
+            <option value="ALL">Tất cả</option>
+            <option value="DAT">ĐẠT</option>
+            <option value="KHONGDAT">KHÔNG ĐẠT</option>
+          </select>
+        </div>
 
-          <div className="tableWrap">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Mốc</th>
-                  <th>Lũy tiến</th>
-                  <th>ĐM lũy tiến</th>
-                  <th>Chênh</th>
-                  <th>Trạng thái</th>
+        <div style={{ flex: 1, minWidth: 240 }}>
+          <div style={{ fontSize: 12, opacity: 0.8 }}>Tìm (chuyền / MH)</div>
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="VD: C1 / 088AG / Baby Carrier..."
+            style={{ width: "100%", padding: 8 }}
+          />
+        </div>
+
+        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} />
+          Tự cập nhật (1 phút)
+        </label>
+
+        <button
+          onClick={() => loadKpi(date)}
+          disabled={!date || loadingData}
+          style={{ padding: "8px 12px", cursor: "pointer" }}
+        >
+          {loadingData ? "Đang tải..." : "Refresh"}
+        </button>
+
+        <button
+          onClick={() => loadDates()}
+          disabled={loadingConfig}
+          style={{ padding: "8px 12px", cursor: "pointer" }}
+        >
+          {loadingConfig ? "Đang tải..." : "Reload ngày"}
+        </button>
+      </div>
+
+      {/* Stats */}
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+        <StatCard title="Tổng dòng" value={stats.total} />
+        <StatCard title="ĐẠT" value={stats.dat} />
+        <StatCard title="KHÔNG ĐẠT" value={stats.khong} />
+        <StatCard title="Đang hiển thị" value={filtered.length} />
+      </div>
+
+      {/* Table */}
+      <div style={{ border: "1px solid #ddd", borderRadius: 10, overflow: "hidden" }}>
+        <div style={{ padding: 10, background: "#f7f7f7", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <b>Bảng KPI</b>
+          <span style={{ fontSize: 12, opacity: 0.8 }}>
+            {date ? `Ngày: ${date}` : "Chưa chọn ngày"}
+          </span>
+        </div>
+
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <Th>Chuyền</Th>
+                <Th>MH</Th>
+                <Th>AFTER 16H30</Th>
+                <Th>DM/NGÀY</Th>
+                <Th>%</Th>
+                <Th>Trạng thái</Th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {filtered.map((x, i) => (
+                <tr key={`${x.line}-${i}`} style={{ borderTop: "1px solid #eee" }}>
+                  <Td>{x.line}</Td>
+                  <Td>{x.mh}</Td>
+                  <Td>{fmtNum(x.hs_dat)}</Td>
+                  <Td>{fmtNum(x.hs_dm)}</Td>
+                  <Td>{fmtNum(x.percent)}</Td>
+                  <Td>
+                    <span
+                      style={{
+                        padding: "4px 8px",
+                        borderRadius: 999,
+                        fontSize: 12,
+                        border: "1px solid #ddd",
+                        background: x.status === "ĐẠT" ? "#e8fff0" : "#fff2e8",
+                      }}
+                    >
+                      {x.status}
+                    </span>
+                  </Td>
                 </tr>
-              </thead>
-              <tbody>
-                {!current ? (
-                  <tr>
-                    <td colSpan={5} className="empty">
-                      Chưa chọn chuyền
-                    </td>
-                  </tr>
-                ) : (
-                  current.perHour.map((p) => (
-                    <tr key={p.moc}>
-                      <td className="mono">{p.moc}</td>
-                      <td>{p.luy ?? "—"}</td>
-                      <td>{p.dmLuy ?? "—"}</td>
-                      <td>{p.chenh ?? "—"}</td>
-                      <td>
-                        <span
-                          className={
-                            p.status === "ĐẠT"
-                              ? "pill ok"
-                              : p.status === "CHƯA ĐẠT"
-                              ? "pill bad"
-                              : "pill na"
-                          }
-                        >
-                          {p.status}
-                        </span>
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+              ))}
 
-          <div className="footNote">
-            {current?.statusDay === "ĐẠT"
-              ? "✅ Đủ / đạt hiển thị xanh"
-              : "❌ Thiếu / không đạt hiển thị đỏ"}
-          </div>
+              {!loadingData && filtered.length === 0 && (
+                <tr>
+                  <Td colSpan={6} style={{ textAlign: "center", padding: 18, opacity: 0.75 }}>
+                    Không có dữ liệu để hiển thị.
+                  </Td>
+                </tr>
+              )}
+
+              {loadingData && (
+                <tr>
+                  <Td colSpan={6} style={{ textAlign: "center", padding: 18, opacity: 0.75 }}>
+                    Đang tải dữ liệu...
+                  </Td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
+
+      {/* Debug meta (ẩn/hiện nếu bạn muốn) */}
+      {meta && (
+        <details style={{ marginTop: 12 }}>
+          <summary style={{ cursor: "pointer" }}>Debug (meta)</summary>
+          <pre style={{ whiteSpace: "pre-wrap", background: "#111", color: "#0f0", padding: 12, borderRadius: 8 }}>
+            {JSON.stringify(meta, null, 2)}
+          </pre>
+        </details>
+      )}
     </div>
   );
+}
+
+// ===== UI helpers =====
+function StatCard({ title, value }) {
+  return (
+    <div style={{ border: "1px solid #ddd", borderRadius: 10, padding: 12, minWidth: 140 }}>
+      <div style={{ fontSize: 12, opacity: 0.8 }}>{title}</div>
+      <div style={{ fontSize: 22, fontWeight: 700 }}>{value}</div>
+    </div>
+  );
+}
+
+function Th({ children }) {
+  return (
+    <th style={{ textAlign: "left", padding: 10, fontSize: 12, opacity: 0.85, background: "#fafafa" }}>
+      {children}
+    </th>
+  );
+}
+
+function Td({ children, ...props }) {
+  return (
+    <td style={{ padding: 10, fontSize: 14 }} {...props}>
+      {children}
+    </td>
+  );
+}
+
+function fmtNum(v) {
+  if (v === null || v === undefined) return "";
+  const n = Number(v);
+  if (!Number.isFinite(n)) return String(v);
+  return n.toLocaleString("vi-VN");
 }

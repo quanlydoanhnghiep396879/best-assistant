@@ -8,85 +8,57 @@ function requireEnv(name) {
   return v;
 }
 
-function pickEnv(...names) {
-  for (const n of names) {
-    const v = process.env[n];
-    if (v && String(v).trim() !== "") return { name: n, value: v };
+function getServiceAccount() {
+  // Ưu tiên: base64 của toàn bộ JSON service account
+  const b64 = process.env.GOOGLE_SERVICE_ACCOUNT_BASE64;
+  if (b64) {
+    const jsonText = Buffer.from(b64, "base64").toString("utf8");
+    const sa = JSON.parse(jsonText);
+
+    if (!sa.client_email) throw new Error("Service account JSON missing client_email");
+    if (!sa.private_key) throw new Error("Service account JSON missing private_key");
+
+    // Vercel đôi khi lưu \n thành \\n
+    sa.private_key = String(sa.private_key).replace(/\\n/g, "\n").trim();
+    return sa;
   }
-  throw new Error(`Missing env: ${names.join(" or ")}`);
-}
 
-function decodeMaybeBase64ToUtf8(s) {
-  const t = String(s).trim();
+  // Fallback nếu bạn muốn giữ kiểu cũ
+  const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+  const privateKeyB64 = process.env.GOOGLE_PRIVATE_KEY_BASE64;
 
-  // Nếu đã là JSON hoặc PEM thì trả luôn
-  if (t.startsWith("{") || t.includes("BEGIN PRIVATE KEY") || t.includes("BEGIN RSA PRIVATE KEY")) {
-    return t;
+  if (clientEmail && privateKeyB64) {
+    const key = Buffer.from(privateKeyB64, "base64").toString("utf8").replace(/\\n/g, "\n").trim();
+    return { client_email: clientEmail, private_key: key };
   }
 
-  // Còn lại: coi như base64
-  return Buffer.from(t, "base64").toString("utf8");
-}
-
-function normalizePrivateKey(pemOrRaw) {
-  return String(pemOrRaw)
-    .replace(/\r/g, "")        // bỏ CR
-    .replace(/\\n/g, "\n")     // chuyển '\n' thành newline thật
-    .trim();
+  throw new Error("Missing env: GOOGLE_SERVICE_ACCOUNT_BASE64 (recommended)");
 }
 
 export async function getSheetsClient() {
   if (_sheets) return _sheets;
 
-  // --- Ưu tiên: dùng service account JSON (base64 hoặc json text) ---
-  const saEnv =
-    process.env.GOOGLE_SERVICE_ACCOUNT_BASE64 ||
-    process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  const sa = getServiceAccount();
 
-  let clientEmail = "";
-  let privateKey = "";
-
-  if (saEnv) {
-    const jsonText = decodeMaybeBase64ToUtf8(saEnv);
-    const creds = JSON.parse(jsonText);
-
-    clientEmail = String(creds.client_email || "").trim();
-    privateKey = normalizePrivateKey(creds.private_key || "");
-
-    if (!clientEmail) throw new Error("Service account JSON missing client_email");
-    if (!privateKey) throw new Error("Service account JSON missing private_key");
-  } else {
-    // --- Fallback: tách riêng email + key ---
-    const emailPick = pickEnv("GOOGLE_SERVICE_ACCOUNT_EMAIL", "GOOGLE_CLIENT_EMAIL");
-    const keyPick = pickEnv("GOOGLE_PRIVATE_KEY_BASE64", "GOOGLE_PRIVATE_KEY");
-
-    clientEmail = String(emailPick.value).trim();
-
-    const keyText = decodeMaybeBase64ToUtf8(keyPick.value);
-    privateKey = normalizePrivateKey(keyText);
-  }
-
-  // Check PEM header
-  if (!privateKey.includes("BEGIN")) {
-    throw new Error("Private key decoded but missing PEM header (BEGIN ... PRIVATE KEY). Check env value.");
+  // kiểm tra nhanh PEM
+  if (!sa.private_key.includes("BEGIN PRIVATE KEY")) {
+    throw new Error("Invalid private_key: not a PEM key (BEGIN PRIVATE KEY not found)");
   }
 
   const auth = new google.auth.JWT({
-    email: clientEmail,
-    key: privateKey,
+    email: sa.client_email,
+    key: sa.private_key,
     scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
   });
 
-  // force check key now (để bắt lỗi rõ ràng)
-  await auth.authorize();
-
-  _sheets = google.sheets({ version: "v4", auth });
-  return _sheets;
+  const sheets = google.sheets({ version: "v4", auth });
+  _sheets = sheets;
+  return sheets;
 }
 
 export async function readRangeA1(a1Range, opts = {}) {
   const sheets = await getSheetsClient();
-  const spreadsheetId = requireEnv("GOOGLE_SHEET_ID").trim();
+  const spreadsheetId = requireEnv("GOOGLE_SHEET_ID");
 
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
