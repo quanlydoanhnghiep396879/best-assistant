@@ -11,7 +11,7 @@ export function requireEnv(name) {
 export async function getSheetsClient() {
   if (_sheets) return _sheets;
 
-  const clientEmail = requireEnv("GOOGLE_CLIENT_EMAIL");
+  const clientEmail = requireEnv("GOOGLE_SERVICE_ACCOUNT_EMAIL");
   const privateKeyRaw = requireEnv("GOOGLE_PRIVATE_KEY");
   const privateKey = privateKeyRaw.replace(/\\n/g, "\n");
 
