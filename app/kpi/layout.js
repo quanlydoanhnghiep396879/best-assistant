@@ -1,5 +1,15 @@
+// app/kpi/layout.js
 import "./kpi.css";
 
-export default function KpiLayout({ children }) {
-    return children;
+export const metadata = {
+  title: "Best Assistant",
+  description: "KPI Dashboard",
+};
+
+export default function RootLayout({ children }) {
+  return (
+    <html lang="vi">
+      <body>{children}</body>
+    </html>
+  );
 }

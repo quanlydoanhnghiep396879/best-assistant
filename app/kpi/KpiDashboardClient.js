@@ -1,311 +1,336 @@
+// app/kpi/KpiDashboardClient.js
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 
-export default function KpiDashboardClient() {
-  const [dates, setDates] = useState([]);
-  const [date, setDate] = useState("");
-  const [lines, setLines] = useState([]);
-  const [meta, setMeta] = useState(null);
+function norm(s) {
+  return String(s ?? "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, " ")
+    .replace(/[._-]/g, "");
+}
 
-  const [loadingConfig, setLoadingConfig] = useState(false);
-  const [loadingData, setLoadingData] = useState(false);
+// parse số rất “trâu” cho dữ liệu Sheets (có , . % …)
+function toNumberSafe(v) {
+  if (v === null || v === undefined) return 0;
+  let t = String(v).trim();
+  if (!t) return 0;
 
-  const [autoRefresh, setAutoRefresh] = useState(true);
-  const [filterStatus, setFilterStatus] = useState("ALL"); // ALL | DAT | KHONGDAT
-  const [q, setQ] = useState("");
+  // bỏ % và khoảng trắng
+  t = t.replace(/%/g, "").replace(/\s+/g, "");
 
+  // dấu gạch / text đặc biệt
+  if (t === "-" || t.toLowerCase() === "null") return 0;
+
+  // 1) dạng 1.234,56 (VN) => 1234.56
+  if (/^-?\d{1,3}(\.\d{3})+(,\d+)?$/.test(t)) {
+    t = t.replace(/\./g, "").replace(",", ".");
+    const n = Number(t);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  // 2) dạng 1,234.56 (US) => 1234.56
+  if (/^-?\d{1,3}(,\d{3})+(\.\d+)?$/.test(t)) {
+    t = t.replace(/,/g, "");
+    const n = Number(t);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  // 3) fallback: bỏ dấu phẩy ngăn nghìn
+  t = t.replace(/,/g, "");
+  const n = Number(t);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function findIdx(headers, candidates) {
+  const h = headers.map(norm);
+  for (const c of candidates) {
+    const idx = h.findIndex((x) => x.includes(norm(c)));
+    if (idx >= 0) return idx;
+  }
+  return -1;
+}
+
+function isHourCol(h) {
+  const s = String(h || "").trim();
+  // ví dụ: ">9h ->10h", "->11h", "->12h30", ...
+  return /->|→/.test(s) || /\b\d{1,2}h(\d{1,2})?\b/i.test(s);
+}
+
+export default function KpiDashboardClient({ initialQuery }) {
+  const router = useRouter();
+
+  const [date, setDate] = useState(initialQuery?.date || "");
+  const [status, setStatus] = useState(initialQuery?.status || "all");
+  const [q, setQ] = useState(initialQuery?.q || "");
+  const [auto, setAuto] = useState(Boolean(initialQuery?.auto ?? true));
+
+  const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
+  const [data, setData] = useState(null);
 
-  // ===== helper fetch JSON =====
-  async function fetchJson(url) {
-    const r = await fetch(url, { cache: "no-store" });
-    const j = await r.json();
-    return j;
-  }
+  // đồng bộ query lên URL (để bạn share link vẫn đúng)
+  useEffect(() => {
+    const sp = new URLSearchParams();
+    if (date) sp.set("date", date);
+    if (status && status !== "all") sp.set("status", status);
+    if (q) sp.set("q", q);
+    sp.set("auto", auto ? "1" : "0");
+    router.replace(`/kpi?${sp.toString()}`, { scroll: false });
+  }, [date, status, q, auto, router]);
 
-  // ===== 1) Load danh sách ngày =====
-  async function loadDates() {
+  async function fetchKpi(d) {
+    setLoading(true);
+    setErr("");
     try {
-      setErr("");
-      setLoadingConfig(true);
-      const j = await fetchJson("/api/kpi-config?list=1");
-
-      if (!j?.ok) throw new Error(j?.message || j?.error || "KPI_CONFIG_ERROR");
-
-      const ds = Array.isArray(j.dates) ? j.dates : [];
-      setDates(ds);
-
-      // auto chọn ngày đầu tiên nếu chưa chọn
-      if (!date && ds.length) setDate(ds[0]);
+      const res = await fetch(`/api/check-kpi?date=${encodeURIComponent(d)}`, {
+        cache: "no-store",
+      });
+      const json = await res.json();
+      if (!json?.ok) throw new Error(json?.message || "CHECK_KPI_ERROR");
+      setData(json);
     } catch (e) {
+      setData(null);
       setErr(String(e?.message || e));
-      setDates([]);
     } finally {
-      setLoadingConfig(false);
+      setLoading(false);
     }
   }
 
-  // ===== 2) Load dữ liệu KPI theo ngày =====
-  async function loadKpi(selectedDate) {
-    if (!selectedDate) return;
-    try {
-      setErr("");
-      setLoadingData(true);
-
-      const j = await fetchJson(`/api/check-kpi?date=${encodeURIComponent(selectedDate)}`);
-
-      if (!j?.ok) throw new Error(j?.message || j?.error || "CHECK_KPI_ERROR");
-
-      setLines(Array.isArray(j.lines) ? j.lines : []);
-      setMeta(j.meta || null);
-    } catch (e) {
-      setErr(String(e?.message || e));
-      setLines([]);
-      setMeta(null);
-    } finally {
-      setLoadingData(false);
-    }
-  }
-
-  // load config 1 lần khi mở trang
+  // load lần đầu + khi đổi ngày
   useEffect(() => {
-    loadDates();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // khi đổi ngày -> load KPI
-  useEffect(() => {
-    if (!date) return;
-    loadKpi(date);
+    if (date) fetchKpi(date);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [date]);
 
-  // auto refresh mỗi 60s
+  // auto refresh 1 phút
   useEffect(() => {
-    if (!autoRefresh || !date) return;
-    const id = setInterval(() => {
-      loadKpi(date);
+    if (!auto) return;
+    const t = setInterval(() => {
+      if (date) fetchKpi(date);
     }, 60_000);
-    return () => clearInterval(id);
+    return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoRefresh, date]);
+  }, [auto, date]);
 
-  // ===== thống kê =====
-  const stats = useMemo(() => {
-    let dat = 0;
-    let khong = 0;
-    for (const x of lines) {
-      if (x?.status === "ĐẠT") dat++;
-      else if (x?.status === "KHÔNG ĐẠT") khong++;
-    }
-    return { total: lines.length, dat, khong };
-  }, [lines]);
-
-  // ===== filter/search =====
-  const filtered = useMemo(() => {
+  const lines = useMemo(() => {
+    const arr = data?.lines || [];
     const keyword = q.trim().toLowerCase();
 
-    return lines.filter((x) => {
-      if (!x) return false;
+    let out = arr;
 
-      if (filterStatus === "DAT" && x.status !== "ĐẠT") return false;
-      if (filterStatus === "KHONGDAT" && x.status !== "KHÔNG ĐẠT") return false;
+    if (status === "dat") out = out.filter(x => x.status === "ĐẠT");
+    if (status === "kdat") out = out.filter(x => x.status !== "ĐẠT");
 
-      if (!keyword) return true;
+    if (keyword) {
+      out = out.filter(x =>
+        String(x.line || "").toLowerCase().includes(keyword) ||
+        String(x.mh || "").toLowerCase().includes(keyword)
+      );
+    }
 
-      const s = `${x.line || ""} ${x.mh || ""} ${x.status || ""}`.toLowerCase();
-      return s.includes(keyword);
+    return out;
+  }, [data, q, status]);
+
+  const stats = useMemo(() => {
+    const total = lines.length;
+    const dat = lines.filter(x => x.status === "ĐẠT").length;
+    const kdat = total - dat;
+    return { total, dat, kdat, showing: total };
+  }, [lines]);
+
+  // ====== tạo bảng “KIỂM ĐẠT luỹ tiến” từ values/raw headers (nếu sheet có cột giờ) ======
+  const luyTien = useMemo(() => {
+    const values = data?.values;
+    if (!Array.isArray(values) || values.length < 2) return null;
+
+    const headers = values[0] || [];
+    const rows = values.slice(1);
+
+    const hourIdxs = [];
+    headers.forEach((h, i) => {
+      if (isHourCol(h)) hourIdxs.push(i);
     });
-  }, [lines, filterStatus, q]);
+
+    if (hourIdxs.length === 0) return null;
+
+    const idxLine = 0; // cột A
+    const idxDMNgay = findIdx(headers, ["DM/NGAY", "ĐM/NGÀY", "DINH MUC NGAY", "DM NGAY"]);
+
+    const items = rows
+      .map(r => {
+        const line = String(r[idxLine] ?? "").trim();
+        if (!line) return null;
+
+        const dm = idxDMNgay >= 0 ? toNumberSafe(r[idxDMNgay]) : 0;
+
+        let sum = 0;
+        const cols = hourIdxs.map(ix => {
+          const v = toNumberSafe(r[ix]);
+          sum += v;
+          return { label: String(headers[ix] ?? ""), v, cum: sum };
+        });
+
+        return { line, dm, cols };
+      })
+      .filter(Boolean);
+
+    return { headers, hourIdxs, items };
+  }, [data]);
 
   return (
-    <div style={{ padding: 16, maxWidth: 1200, margin: "0 auto" }}>
-      <h2 style={{ marginBottom: 12 }}>KPI Dashboard</h2>
+    <div className="kpi-wrap">
+      <h1 className="kpi-title">KPI Dashboard</h1>
 
-      {/* Lỗi */}
-      {err && (
-        <div style={{ background: "#ffe7e7", border: "1px solid #ffb3b3", padding: 10, borderRadius: 8, marginBottom: 12 }}>
+      {err ? (
+        <div className="kpi-error">
           <b>Lỗi:</b> {err}
-          <div style={{ marginTop: 8, fontSize: 13, opacity: 0.85 }}>
+          <div className="kpi-hint">
             Gợi ý: mở thử <code>/api/check-kpi?date=...</code> để xem JSON có <code>ok:true</code> và <code>lines</code> không.
           </div>
         </div>
-      )}
+      ) : null}
 
-      {/* Control bar */}
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
-        <div>
-          <div style={{ fontSize: 12, opacity: 0.8 }}>Ngày</div>
-          <select
+      <div className="kpi-toolbar">
+        <label className="kpi-field">
+          <div className="kpi-label">Ngày</div>
+          <input
+            className="kpi-input"
             value={date}
             onChange={(e) => setDate(e.target.value)}
-            disabled={loadingConfig || dates.length === 0}
-            style={{ padding: 8, minWidth: 180 }}
-          >
-            {dates.map((d) => (
-              <option key={d} value={d}>{d}</option>
-            ))}
-          </select>
-        </div>
+            placeholder="DD/MM/YYYY"
+          />
+        </label>
 
-        <div>
-          <div style={{ fontSize: 12, opacity: 0.8 }}>Lọc trạng thái</div>
-          <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} style={{ padding: 8, minWidth: 160 }}>
-            <option value="ALL">Tất cả</option>
-            <option value="DAT">ĐẠT</option>
-            <option value="KHONGDAT">KHÔNG ĐẠT</option>
+        <label className="kpi-field">
+          <div className="kpi-label">Lọc trạng thái</div>
+          <select className="kpi-input" value={status} onChange={(e) => setStatus(e.target.value)}>
+            <option value="all">Tất cả</option>
+            <option value="dat">ĐẠT</option>
+            <option value="kdat">KHÔNG ĐẠT</option>
           </select>
-        </div>
+        </label>
 
-        <div style={{ flex: 1, minWidth: 240 }}>
-          <div style={{ fontSize: 12, opacity: 0.8 }}>Tìm (chuyền / MH)</div>
+        <label className="kpi-field kpi-field-grow">
+          <div className="kpi-label">Tìm (chuyền / MH)</div>
           <input
+            className="kpi-input"
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder="VD: C1 / 088AG / Baby Carrier..."
-            style={{ width: "100%", padding: 8 }}
           />
-        </div>
-
-        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} />
-          Tự cập nhật (1 phút)
         </label>
 
-        <button
-          onClick={() => loadKpi(date)}
-          disabled={!date || loadingData}
-          style={{ padding: "8px 12px", cursor: "pointer" }}
-        >
-          {loadingData ? "Đang tải..." : "Refresh"}
-        </button>
+        <label className="kpi-check">
+          <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
+          <span>Tự cập nhật (1 phút)</span>
+        </label>
 
-        <button
-          onClick={() => loadDates()}
-          disabled={loadingConfig}
-          style={{ padding: "8px 12px", cursor: "pointer" }}
-        >
-          {loadingConfig ? "Đang tải..." : "Reload ngày"}
+        <button className="kpi-btn" onClick={() => fetchKpi(date)} disabled={loading}>
+          {loading ? "Loading..." : "Refresh"}
         </button>
       </div>
 
-      {/* Stats */}
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
-        <StatCard title="Tổng dòng" value={stats.total} />
-        <StatCard title="ĐẠT" value={stats.dat} />
-        <StatCard title="KHÔNG ĐẠT" value={stats.khong} />
-        <StatCard title="Đang hiển thị" value={filtered.length} />
+      <div className="kpi-cards">
+        <div className="kpi-card"><div className="kpi-card-title">Tổng dòng</div><div className="kpi-card-val">{stats.total}</div></div>
+        <div className="kpi-card kpi-card-ok"><div className="kpi-card-title">ĐẠT</div><div className="kpi-card-val">{stats.dat}</div></div>
+        <div className="kpi-card kpi-card-bad"><div className="kpi-card-title">KHÔNG ĐẠT</div><div className="kpi-card-val">{stats.kdat}</div></div>
+        <div className="kpi-card"><div className="kpi-card-title">Đang hiển thị</div><div className="kpi-card-val">{stats.showing}</div></div>
       </div>
 
-      {/* Table */}
-      <div style={{ border: "1px solid #ddd", borderRadius: 10, overflow: "hidden" }}>
-        <div style={{ padding: 10, background: "#f7f7f7", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <b>Bảng KPI</b>
-          <span style={{ fontSize: 12, opacity: 0.8 }}>
-            {date ? `Ngày: ${date}` : "Chưa chọn ngày"}
-          </span>
-        </div>
+      <h2 className="kpi-subtitle">Bảng KPI</h2>
 
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
+      <div className="kpi-table-wrap">
+        <table className="kpi-table">
+          <thead>
+            <tr>
+              <th>Chuyền</th>
+              <th>MH</th>
+              <th className="kpi-num">AFTER 16H30</th>
+              <th className="kpi-num">DM/NGÀY</th>
+              <th className="kpi-num">%</th>
+              <th>Trạng thái</th>
+            </tr>
+          </thead>
+          <tbody>
+            {lines.length === 0 ? (
               <tr>
-                <Th>Chuyền</Th>
-                <Th>MH</Th>
-                <Th>AFTER 16H30</Th>
-                <Th>DM/NGÀY</Th>
-                <Th>%</Th>
-                <Th>Trạng thái</Th>
+                <td colSpan={6} className="kpi-empty">
+                  {loading ? "Đang tải..." : "Không có dữ liệu để hiển thị."}
+                </td>
               </tr>
-            </thead>
-
-            <tbody>
-              {filtered.map((x, i) => (
-                <tr key={`${x.line}-${i}`} style={{ borderTop: "1px solid #eee" }}>
-                  <Td>{x.line}</Td>
-                  <Td>{x.mh}</Td>
-                  <Td>{fmtNum(x.hs_dat)}</Td>
-                  <Td>{fmtNum(x.hs_dm)}</Td>
-                  <Td>{fmtNum(x.percent)}</Td>
-                  <Td>
-                    <span
-                      style={{
-                        padding: "4px 8px",
-                        borderRadius: 999,
-                        fontSize: 12,
-                        border: "1px solid #ddd",
-                        background: x.status === "ĐẠT" ? "#e8fff0" : "#fff2e8",
-                      }}
-                    >
-                      {x.status}
-                    </span>
-                  </Td>
-                </tr>
-              ))}
-
-              {!loadingData && filtered.length === 0 && (
-                <tr>
-                  <Td colSpan={6} style={{ textAlign: "center", padding: 18, opacity: 0.75 }}>
-                    Không có dữ liệu để hiển thị.
-                  </Td>
-                </tr>
-              )}
-
-              {loadingData && (
-                <tr>
-                  <Td colSpan={6} style={{ textAlign: "center", padding: 18, opacity: 0.75 }}>
-                    Đang tải dữ liệu...
-                  </Td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+            ) : (
+              lines.map((x, i) => {
+                const ok = x.status === "ĐẠT";
+                return (
+                  <tr key={i} className={ok ? "row-ok" : "row-bad"}>
+                    <td>{x.line}</td>
+                    <td>{x.mh}</td>
+                    <td className="kpi-num">{x.hs_dat}</td>
+                    <td className="kpi-num">{x.hs_dm}</td>
+                    <td className="kpi-num">{x.percent}</td>
+                    <td>
+                      <span className={ok ? "badge badge-ok" : "badge badge-bad"}>
+                        {x.status}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
       </div>
 
-      {/* Debug meta (ẩn/hiện nếu bạn muốn) */}
-      {meta && (
-        <details style={{ marginTop: 12 }}>
-          <summary style={{ cursor: "pointer" }}>Debug (meta)</summary>
-          <pre style={{ whiteSpace: "pre-wrap", background: "#111", color: "#0f0", padding: 12, borderRadius: 8 }}>
-            {JSON.stringify(meta, null, 2)}
-          </pre>
+      {/* ===== Bảng kiểm đạt luỹ tiến (nếu có cột giờ) ===== */}
+      {luyTien ? (
+        <>
+          <h2 className="kpi-subtitle">Kiểm đạt luỹ tiến (theo các cột giờ trong Sheet)</h2>
+          <div className="kpi-table-wrap">
+            <table className="kpi-table">
+              <thead>
+                <tr>
+                  <th>Chuyền</th>
+                  {luyTien.hourIdxs.map((ix) => (
+                    <th key={ix} className="kpi-num">{String(luyTien.headers[ix] || "")}</th>
+                  ))}
+                  <th className="kpi-num">Luỹ tiến</th>
+                  <th className="kpi-num">% vs DM/NGÀY</th>
+                </tr>
+              </thead>
+              <tbody>
+                {luyTien.items.map((it, idx) => {
+                  const last = it.cols[it.cols.length - 1];
+                  const cum = last?.cum ?? 0;
+                  const pct = it.dm > 0 ? (cum / it.dm) * 100 : 0;
+                  const ok = pct >= 100;
+
+                  return (
+                    <tr key={idx} className={ok ? "row-ok" : "row-bad"}>
+                      <td>{it.line}</td>
+                      {it.cols.map((c, j) => (
+                        <td key={j} className="kpi-num">{c.cum}</td>
+                      ))}
+                      <td className="kpi-num"><b>{cum}</b></td>
+                      <td className="kpi-num">{Number(pct.toFixed(2))}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ) : null}
+
+      {/* Debug */}
+      {data?.meta ? (
+        <details className="kpi-debug">
+          <summary>Debug (meta)</summary>
+          <pre>{JSON.stringify(data.meta, null, 2)}</pre>
         </details>
-      )}
+      ) : null}
     </div>
   );
-}
-
-// ===== UI helpers =====
-function StatCard({ title, value }) {
-  return (
-    <div style={{ border: "1px solid #ddd", borderRadius: 10, padding: 12, minWidth: 140 }}>
-      <div style={{ fontSize: 12, opacity: 0.8 }}>{title}</div>
-      <div style={{ fontSize: 22, fontWeight: 700 }}>{value}</div>
-    </div>
-  );
-}
-
-function Th({ children }) {
-  return (
-    <th style={{ textAlign: "left", padding: 10, fontSize: 12, opacity: 0.85, background: "#fafafa" }}>
-      {children}
-    </th>
-  );
-}
-
-function Td({ children, ...props }) {
-  return (
-    <td style={{ padding: 10, fontSize: 14 }} {...props}>
-      {children}
-    </td>
-  );
-}
-
-function fmtNum(v) {
-  if (v === null || v === undefined) return "";
-  const n = Number(v);
-  if (!Number.isFinite(n)) return String(v);
-  return n.toLocaleString("vi-VN");
 }
