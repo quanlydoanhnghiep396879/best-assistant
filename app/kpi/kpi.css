@@ -1,43 +1,46 @@
+:root{
+  --ok-bg:#e7f7ee;
+  --ok-bd:#9ad7b4;
+  --bad-bg:#fdecec;
+  --bad-bd:#f4a3a3;
+  --muted:#666;
+}
 
-You sent
-/* app/kpi/kpi.css */
-.kpi-wrap { padding: 18px; max-width: 1200px; margin: 0 auto; font-family: system-ui, Arial; }
-.kpi-title { margin: 6px 0 14px; }
-.kpi-subtitle { margin: 18px 0 10px; }
+.kpiWrap{ padding:16px; font-family: system-ui, Arial; }
+.kpiTitle{ font-size:28px; font-weight:800; margin:0 0 12px; }
 
-.kpi-error { background: #ffd9df; border: 1px solid #ff9aa8; padding: 10px 12px; border-radius: 8px; margin-bottom: 12px; }
-.kpi-hint { margin-top: 6px; opacity: .85; font-size: 13px; }
+.kpiBar{ display:flex; gap:12px; flex-wrap:wrap; align-items:end; margin:12px 0 12px; }
+.kpiBar label{ font-size:13px; color:var(--muted); display:block; margin-bottom:6px; }
+.kpiBar input, .kpiBar select{
+  height:36px; padding:6px 10px; border:1px solid #ddd; border-radius:8px; min-width:220px;
+}
 
-.kpi-toolbar { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; margin: 10px 0 12px; }
-.kpi-field { display: flex; flex-direction: column; gap: 6px; }
-.kpi-field-grow { flex: 1; min-width: 260px; }
-.kpi-label { font-size: 12px; opacity: .75; }
-.kpi-input { padding: 8px 10px; border: 1px solid #d0d0d0; border-radius: 8px; min-width: 160px; }
-.kpi-check { display: flex; gap: 8px; align-items: center; padding-bottom: 8px; }
+.kpiCards{ display:flex; gap:12px; flex-wrap:wrap; margin:10px 0 14px; }
+.card{ border:1px solid #e6e6e6; border-radius:12px; padding:10px 12px; min-width:160px; }
+.card .t{ font-size:12px; color:var(--muted); }
+.card .v{ font-size:26px; font-weight:800; margin-top:4px; }
 
-.kpi-btn { padding: 9px 12px; border-radius: 8px; border: 1px solid #c8c8c8; cursor: pointer; background: #f5f5f5; }
-.kpi-btn:disabled { opacity: .6; cursor: not-allowed; }
+.tableWrap{ border:1px solid #e6e6e6; border-radius:12px; overflow:auto; }
+table{ border-collapse:collapse; width:100%; min-width:900px; }
+th, td{ border-bottom:1px solid #eee; padding:10px 10px; text-align:left; font-size:14px; }
+th{ background:#fafafa; position:sticky; top:0; z-index:1; }
 
-.kpi-cards { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 10px; margin: 10px 0 14px; }
-.kpi-card { border: 1px solid #e0e0e0; border-radius: 10px; padding: 10px 12px; background: #fff; }
-.kpi-card-title { font-size: 12px; opacity: .75; }
-.kpi-card-val { font-size: 24px; font-weight: 700; margin-top: 6px; }
-.kpi-card-ok { border-color: #8ad6a3; }
-.kpi-card-bad { border-color: #ff9aa8; }
+.badge{
+  display:inline-block; padding:4px 10px; border-radius:999px; font-weight:700; font-size:12px;
+  border:1px solid #ddd;
+}
+.badge.ok{ background:var(--ok-bg); border-color:var(--ok-bd); }
+.badge.bad{ background:var(--bad-bg); border-color:var(--bad-bd); }
 
-.kpi-table-wrap { border: 1px solid #e6e6e6; border-radius: 10px; overflow: auto; background: #fff; }
-.kpi-table { width: 100%; border-collapse: collapse; min-width: 860px; }
-.kpi-table th, .kpi-table td { padding: 10px 10px; border-bottom: 1px solid #eee; text-align: left; }
-.kpi-table thead th { background: #fafafa; position: sticky; top: 0; z-index: 1; }
-.kpi-num { text-align: right !important; }
-.kpi-empty { text-align: center; padding: 18px !important; opacity: .8; }
+tr.rowOk{ background: #f3fff7; }
+tr.rowBad{ background: #fff6f6; }
 
-.row-ok { background: #f0fff4; }
-.row-bad { background: #fff1f3; }
+.subTitle{ margin:18px 0 10px; font-weight:800; font-size:18px; }
+.smallMuted{ color:var(--muted); font-size:12px; }
 
-.badge { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 12px; border: 1px solid transparent; }
-.badge-ok { background: #e9fff0; border-color: #8ad6a3; }
-.badge-bad { background: #ffe7ec; border-color: #ff9aa8; }
-
-.kpi-debug { margin-top: 12px; }
-.kpi-debug pre { background: #0b1020; color: #d6e1ff; padding: 12px; border-radius: 10px; overflow: auto; }
+.hourCell{
+  font-size:12px;
+  white-space:nowrap;
+}
+.hourOk{ background:var(--ok-bg); }
+.hourBad{ background:var(--bad-bg); }

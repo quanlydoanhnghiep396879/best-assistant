@@ -1,323 +1,228 @@
-// app/kpi/KpiDashboardClient.js
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
 
-function norm(s) {
-  return String(s ?? "")
-    .trim()
-    .toUpperCase()
-    .replace(/\s+/g, " ")
-    .replace(/[._-]/g, "");
-}
-
-// parse số rất “trâu” cho dữ liệu Sheets (có , . % …)
-function toNumberSafe(v) {
-  if (v === null || v === undefined) return 0;
-  let t = String(v).trim();
-  if (!t) return 0;
-
-  // bỏ % và khoảng trắng
-  t = t.replace(/%/g, "").replace(/\s+/g, "");
-
-  // dấu gạch / text đặc biệt
-  if (t === "-" || t.toLowerCase() === "null") return 0;
-
-  // 1) dạng 1.234,56 (VN) => 1234.56
-  if (/^-?\d{1,3}(\.\d{3})+(,\d+)?$/.test(t)) {
-    t = t.replace(/\./g, "").replace(",", ".");
-    const n = Number(t);
-    return Number.isFinite(n) ? n : 0;
-  }
-
-  // 2) dạng 1,234.56 (US) => 1234.56
-  if (/^-?\d{1,3}(,\d{3})+(\.\d+)?$/.test(t)) {
-    t = t.replace(/,/g, "");
-    const n = Number(t);
-    return Number.isFinite(n) ? n : 0;
-  }
-
-  // 3) fallback: bỏ dấu phẩy ngăn nghìn
-  t = t.replace(/,/g, "");
-  const n = Number(t);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function findIdx(headers, candidates) {
-  const h = headers.map(norm);
-  for (const c of candidates) {
-    const idx = h.findIndex((x) => x.includes(norm(c)));
-    if (idx >= 0) return idx;
-  }
-  return -1;
-}
-
-function isHourCol(h) {
-  const s = String(h || "").trim();
-  // ví dụ: ">9h ->10h", "->11h", "->12h30", ...
-  return /->|→/.test(s) || /\b\d{1,2}h(\d{1,2})?\b/i.test(s);
+function safeDate(d) {
+  // nhận DD/MM/YYYY
+  if (!d) return "";
+  const s = String(d).trim();
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) return s;
+  return s;
 }
 
 export default function KpiDashboardClient({ initialQuery }) {
-  const router = useRouter();
-
-  const [date, setDate] = useState(initialQuery?.date || "");
+  const [date, setDate] = useState(safeDate(initialQuery?.date || ""));
   const [status, setStatus] = useState(initialQuery?.status || "all");
   const [q, setQ] = useState(initialQuery?.q || "");
-  const [auto, setAuto] = useState(Boolean(initialQuery?.auto ?? true));
-
+  const [auto, setAuto] = useState(initialQuery?.auto !== "0");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
   const [data, setData] = useState(null);
 
-  // đồng bộ query lên URL (để bạn share link vẫn đúng)
-  useEffect(() => {
-    const sp = new URLSearchParams();
-    if (date) sp.set("date", date);
-    if (status && status !== "all") sp.set("status", status);
-    if (q) sp.set("q", q);
-    sp.set("auto", auto ? "1" : "0");
-    router.replace(`/kpi?${sp.toString()}`, { scroll: false });
-  }, [date, status, q, auto, router]);
-
-  async function fetchKpi(d) {
-    setLoading(true);
-    setErr("");
+  async function load() {
     try {
-      const res = await fetch(`/api/check-kpi?date=${encodeURIComponent(d)}`, {
+      setLoading(true);
+      setErr("");
+
+      const qs = new URLSearchParams();
+      if (date) qs.set("date", date);
+
+      const res = await fetch(`/api/check-kpi?${qs.toString()}`, {
         cache: "no-store",
       });
       const json = await res.json();
-      if (!json?.ok) throw new Error(json?.message || "CHECK_KPI_ERROR");
-      setData(json);
+
+      if (!json?.ok) {
+        setErr(json?.message || "CHECK_KPI_ERROR");
+        setData(null);
+      } else {
+        setData(json);
+      }
     } catch (e) {
-      setData(null);
       setErr(String(e?.message || e));
+      setData(null);
     } finally {
       setLoading(false);
     }
   }
 
-  // load lần đầu + khi đổi ngày
-  useEffect(() => {
-    if (date) fetchKpi(date);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [date]);
+  useEffect(() => { load(); }, []); // initial
 
-  // auto refresh 1 phút
   useEffect(() => {
     if (!auto) return;
-    const t = setInterval(() => {
-      if (date) fetchKpi(date);
-    }, 60_000);
+    const t = setInterval(() => load(), 60_000);
     return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auto, date]);
 
-  const lines = useMemo(() => {
-    const arr = data?.lines || [];
-    const keyword = q.trim().toLowerCase();
+  const filtered = useMemo(() => {
+    const lines = data?.lines || [];
+    const qq = q.trim().toLowerCase();
+    return lines.filter((r) => {
+      const okStatus =
+        status === "all" ? true :
+        status === "ok" ? r.status === "ĐẠT" :
+        r.status === "KHÔNG ĐẠT";
 
-    let out = arr;
+      const okQ = !qq
+        ? true
+        : (String(r.line || "").toLowerCase().includes(qq) ||
+           String(r.mh || "").toLowerCase().includes(qq));
 
-    if (status === "dat") out = out.filter(x => x.status === "ĐẠT");
-    if (status === "kdat") out = out.filter(x => x.status !== "ĐẠT");
-
-    if (keyword) {
-      out = out.filter(x =>
-        String(x.line || "").toLowerCase().includes(keyword) ||
-        String(x.mh || "").toLowerCase().includes(keyword)
-      );
-    }
-
-    return out;
-  }, [data, q, status]);
+      return okStatus && okQ;
+    });
+  }, [data, status, q]);
 
   const stats = useMemo(() => {
-    const total = lines.length;
-    const dat = lines.filter(x => x.status === "ĐẠT").length;
-    const kdat = total - dat;
-    return { total, dat, kdat, showing: total };
-  }, [lines]);
+    const all = filtered.length;
+    const ok = filtered.filter((x) => x.status === "ĐẠT").length;
+    const bad = all - ok;
+    return { all, ok, bad, showing: all };
+  }, [filtered]);
 
-  // ====== tạo bảng “KIỂM ĐẠT luỹ tiến” từ values/raw headers (nếu sheet có cột giờ) ======
-  const luyTien = useMemo(() => {
-    const values = data?.values;
-    if (!Array.isArray(values) || values.length < 2) return null;
-
-    const headers = values[0] || [];
-    const rows = values.slice(1);
-
-    const hourIdxs = [];
-    headers.forEach((h, i) => {
-      if (isHourCol(h)) hourIdxs.push(i);
-    });
-
-    if (hourIdxs.length === 0) return null;
-
-    const idxLine = 0; // cột A
-    const idxDMNgay = findIdx(headers, ["DM/NGAY", "ĐM/NGÀY", "DINH MUC NGAY", "DM NGAY"]);
-
-    const items = rows
-      .map(r => {
-        const line = String(r[idxLine] ?? "").trim();
-        if (!line) return null;
-
-        const dm = idxDMNgay >= 0 ? toNumberSafe(r[idxDMNgay]) : 0;
-
-        let sum = 0;
-        const cols = hourIdxs.map(ix => {
-          const v = toNumberSafe(r[ix]);
-          sum += v;
-          return { label: String(headers[ix] ?? ""), v, cum: sum };
-        });
-
-        return { line, dm, cols };
-      })
-      .filter(Boolean);
-
-    return { headers, hourIdxs, items };
-  }, [data]);
+  const hasHours = useMemo(() => {
+    return (filtered[0]?.hours?.length || 0) > 0;
+  }, [filtered]);
 
   return (
-    <div className="kpi-wrap">
-      <h1 className="kpi-title">KPI Dashboard</h1>
+    <div className="kpiWrap">
+      <h1 className="kpiTitle">KPI Dashboard</h1>
 
       {err ? (
-        <div className="kpi-error">
+        <div style={{
+          background:"#fdecec", border:"1px solid #f4a3a3",
+          padding:"10px 12px", borderRadius:12, marginBottom:12
+        }}>
           <b>Lỗi:</b> {err}
-          <div className="kpi-hint">
-            Gợi ý: mở thử <code>/api/check-kpi?date=...</code> để xem JSON có <code>ok:true</code> và <code>lines</code> không.
+          <div className="smallMuted" style={{ marginTop:6 }}>
+            Gợi ý: mở <code>/api/check-kpi?date=...</code> xem JSON ok:true không.
           </div>
         </div>
       ) : null}
 
-      <div className="kpi-toolbar">
-        <label className="kpi-field">
-          <div className="kpi-label">Ngày</div>
+      <div className="kpiBar">
+        <div>
+          <label>Ngày</label>
           <input
-            className="kpi-input"
             value={date}
             onChange={(e) => setDate(e.target.value)}
             placeholder="DD/MM/YYYY"
           />
-        </label>
+        </div>
 
-        <label className="kpi-field">
-          <div className="kpi-label">Lọc trạng thái</div>
-          <select className="kpi-input" value={status} onChange={(e) => setStatus(e.target.value)}>
+        <div>
+          <label>Lọc trạng thái</label>
+          <select value={status} onChange={(e) => setStatus(e.target.value)}>
             <option value="all">Tất cả</option>
-            <option value="dat">ĐẠT</option>
-            <option value="kdat">KHÔNG ĐẠT</option>
+            <option value="ok">ĐẠT</option>
+            <option value="bad">KHÔNG ĐẠT</option>
           </select>
-        </label>
+        </div>
 
-        <label className="kpi-field kpi-field-grow">
-          <div className="kpi-label">Tìm (chuyền / MH)</div>
+        <div>
+          <label>Tìm (chuyền / MH)</label>
           <input
-            className="kpi-input"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="VD: C1 / 088AG / Baby Carrier..."
+            placeholder="VD: C1 / 088AG ..."
           />
-        </label>
+        </div>
 
-        <label className="kpi-check">
-          <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
-          <span>Tự cập nhật (1 phút)</span>
-        </label>
+        <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+          <label style={{ margin:0 }}>
+            <input
+              type="checkbox"
+              checked={auto}
+              onChange={(e) => setAuto(e.target.checked)}
+            />{" "}
+            Tự cập nhật (1 phút)
+          </label>
 
-        <button className="kpi-btn" onClick={() => fetchKpi(date)} disabled={loading}>
-          {loading ? "Loading..." : "Refresh"}
-        </button>
+          <button
+            onClick={load}
+            style={{ height:36, padding:"0 14px", borderRadius:10, border:"1px solid #ddd" }}
+            disabled={loading}
+          >
+            {loading ? "Đang tải..." : "Refresh"}
+          </button>
+        </div>
       </div>
 
-      <div className="kpi-cards">
-        <div className="kpi-card"><div className="kpi-card-title">Tổng dòng</div><div className="kpi-card-val">{stats.total}</div></div>
-        <div className="kpi-card kpi-card-ok"><div className="kpi-card-title">ĐẠT</div><div className="kpi-card-val">{stats.dat}</div></div>
-        <div className="kpi-card kpi-card-bad"><div className="kpi-card-title">KHÔNG ĐẠT</div><div className="kpi-card-val">{stats.kdat}</div></div>
-        <div className="kpi-card"><div className="kpi-card-title">Đang hiển thị</div><div className="kpi-card-val">{stats.showing}</div></div>
+      <div className="kpiCards">
+        <div className="card"><div className="t">Tổng dòng</div><div className="v">{stats.all}</div></div>
+        <div className="card"><div className="t">ĐẠT</div><div className="v">{stats.ok}</div></div>
+        <div className="card"><div className="t">KHÔNG ĐẠT</div><div className="v">{stats.bad}</div></div>
+        <div className="card"><div className="t">Đang hiển thị</div><div className="v">{stats.showing}</div></div>
       </div>
 
-      <h2 className="kpi-subtitle">Bảng KPI</h2>
-
-      <div className="kpi-table-wrap">
-        <table className="kpi-table">
+      <div className="subTitle">Bảng KPI</div>
+      <div className="tableWrap">
+        <table>
           <thead>
             <tr>
               <th>Chuyền</th>
               <th>MH</th>
-              <th className="kpi-num">AFTER 16H30</th>
-              <th className="kpi-num">DM/NGÀY</th>
-              <th className="kpi-num">%</th>
+              <th>AFTER 16H30</th>
+              <th>DM/NGÀY</th>
+              <th>%</th>
               <th>Trạng thái</th>
             </tr>
           </thead>
           <tbody>
-            {lines.length === 0 ? (
-              <tr>
-                <td colSpan={6} className="kpi-empty">
-                  {loading ? "Đang tải..." : "Không có dữ liệu để hiển thị."}
+            {filtered.map((r, i) => (
+              <tr key={i} className={r.status === "ĐẠT" ? "rowOk" : "rowBad"}>
+                <td>{r.line}</td>
+                <td>{r.mh}</td>
+                <td>{r.hs_dat}</td>
+                <td>{r.hs_dm}</td>
+                <td>{r.percent}</td>
+                <td>
+                  <span className={"badge " + (r.status === "ĐẠT" ? "ok" : "bad")}>
+                    {r.status}
+                  </span>
                 </td>
               </tr>
-            ) : (
-              lines.map((x, i) => {
-                const ok = x.status === "ĐẠT";
-                return (
-                  <tr key={i} className={ok ? "row-ok" : "row-bad"}>
-                    <td>{x.line}</td>
-                    <td>{x.mh}</td>
-                    <td className="kpi-num">{x.hs_dat}</td>
-                    <td className="kpi-num">{x.hs_dm}</td>
-                    <td className="kpi-num">{x.percent}</td>
-                    <td>
-                      <span className={ok ? "badge badge-ok" : "badge badge-bad"}>
-                        {x.status}
-                      </span>
-                    </td>
-                  </tr>
-                );
-              })
-            )}
+            ))}
+            {!filtered.length ? (
+              <tr><td colSpan={6} style={{ color:"#777", padding:14 }}>Không có dữ liệu để hiển thị.</td></tr>
+            ) : null}
           </tbody>
         </table>
       </div>
 
-      {/* ===== Bảng kiểm đạt luỹ tiến (nếu có cột giờ) ===== */}
-      {luyTien ? (
+      {hasHours ? (
         <>
-          <h2 className="kpi-subtitle">Kiểm đạt luỹ tiến (theo các cột giờ trong Sheet)</h2>
-          <div className="kpi-table-wrap">
-            <table className="kpi-table">
+          <div className="subTitle">So sánh định mức giờ (lũy tiến)</div>
+          <div className="smallMuted" style={{ marginBottom:8 }}>
+            Target lũy tiến = DM/NGÀY chia đều theo số mốc giờ (dựa trên các cột “=&gt;9h, =&gt;10h...” trong sheet).
+          </div>
+
+          <div className="tableWrap">
+            <table style={{ minWidth: 1200 }}>
               <thead>
                 <tr>
                   <th>Chuyền</th>
-                  {luyTien.hourIdxs.map((ix) => (
-                    <th key={ix} className="kpi-num">{String(luyTien.headers[ix] || "")}</th>
+                  <th>MH</th>
+                  {(filtered[0]?.hours || []).map((h, idx) => (
+                    <th key={idx}>{h.label}</th>
                   ))}
-                  <th className="kpi-num">Luỹ tiến</th>
-                  <th className="kpi-num">% vs DM/NGÀY</th>
                 </tr>
               </thead>
               <tbody>
-                {luyTien.items.map((it, idx) => {
-                  const last = it.cols[it.cols.length - 1];
-                  const cum = last?.cum ?? 0;
-                  const pct = it.dm > 0 ? (cum / it.dm) * 100 : 0;
-                  const ok = pct >= 100;
-
-                  return (
-                    <tr key={idx} className={ok ? "row-ok" : "row-bad"}>
-                      <td>{it.line}</td>
-                      {it.cols.map((c, j) => (
-                        <td key={j} className="kpi-num">{c.cum}</td>
-                      ))}
-                      <td className="kpi-num"><b>{cum}</b></td>
-                      <td className="kpi-num">{Number(pct.toFixed(2))}</td>
-                    </tr>
-                  );
-                })}
+                {filtered.map((r, i) => (
+                  <tr key={i}>
+                    <td>{r.line}</td>
+                    <td>{r.mh}</td>
+                    {r.hours.map((h, idx) => (
+                      <td
+                        key={idx}
+                        className={"hourCell " + (h.ok ? "hourOk" : "hourBad")}
+                      >
+                        <div><b>{h.actual}</b></div>
+                        <div className="smallMuted">target: {h.target}</div>
+                      </td>
+                    ))}
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
@@ -326,9 +231,11 @@ export default function KpiDashboardClient({ initialQuery }) {
 
       {/* Debug */}
       {data?.meta ? (
-        <details className="kpi-debug">
+        <details style={{ marginTop: 14 }}>
           <summary>Debug (meta)</summary>
-          <pre>{JSON.stringify(data.meta, null, 2)}</pre>
+          <pre style={{ whiteSpace:"pre-wrap", fontSize:12 }}>
+            {JSON.stringify(data.meta, null, 2)}
+          </pre>
         </details>
       ) : null}
     </div>
