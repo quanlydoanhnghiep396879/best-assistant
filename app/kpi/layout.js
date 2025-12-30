@@ -1,3 +1,4 @@
+// app/kpi/layout.js
 import "./kpi.css";
 
 export const metadata = {

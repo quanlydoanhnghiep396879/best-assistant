@@ -1,16 +1,16 @@
+// app/kpi/page.js
 import KpiDashboardClient from "./KpiDashboardClient";
 
-export default function KPIPage({ searchParams }) {
-  const sp = searchParams || {};
+export const dynamic = "force-dynamic"; // tránh cache khi đổi query / auto refresh
 
-  // URL query bạn dùng: ?date=23/12/2025&status=all&q=c1&auto=1
+export default function KPIPage({ searchParams }) {
   const initialQuery = {
-    date: typeof sp.date === "string" ? sp.date : "",
-    status: typeof sp.status === "string" ? sp.status : "all",
-    q: typeof sp.q === "string" ? sp.q : "",
-    auto: typeof sp.auto === "string" ? sp.auto : "1",
-    line: typeof sp.line === "string" ? sp.line : "all", // filter cho bảng lũy tiến
-    hour: typeof sp.hour === "string" ? sp.hour : "AUTO", // mốc giờ (AUTO = lấy mốc cuối)
+    date: searchParams?.date ?? "",
+    status: searchParams?.status ?? "all", // all | ok | fail
+    q: searchParams?.q ?? "",
+    auto: searchParams?.auto ?? "1", // "1" bật, "0" tắt
+    line: searchParams?.line ?? "all",
+    hour: searchParams?.hour ?? "", // ví dụ "16:30"
   };
 
   return <KpiDashboardClient initialQuery={initialQuery} />;
