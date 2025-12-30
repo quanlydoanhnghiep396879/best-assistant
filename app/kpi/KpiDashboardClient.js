@@ -1,118 +1,96 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import styles from "./kpi.module.css";
 
-/* ===================== Helpers ===================== */
-function pad2(n) {
-  return String(n).padStart(2, "0");
-}
-
-function todayVN() {
-  const d = new Date();
-  return `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${d.getFullYear()}`;
-}
-
-// yyyy-mm-dd (input date) -> dd/mm/yyyy
-function isoToVN(iso) {
-  if (!iso || typeof iso !== "string") return "";
-  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) return "";
+function toDDMMYYYY(yyyy_mm_dd) {
+  if (!yyyy_mm_dd) return "";
+  const m = String(yyyy_mm_dd).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return yyyy_mm_dd;
   return `${m[3]}/${m[2]}/${m[1]}`;
 }
 
-// dd/mm/yyyy -> yyyy-mm-dd
-function vnToISO(vn) {
-  if (!vn || typeof vn !== "string") return "";
-  const m = vn.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-  if (!m) return "";
-  return `${m[3]}-${m[2]}-${m[1]}`;
-}
-
-function safeStr(x) {
-  return String(x ?? "").trim();
-}
-
-function normalizeText(s) {
-  return safeStr(s).toLowerCase();
-}
-
-function formatNumber(n) {
-  const x = Number(n);
-  if (!Number.isFinite(x)) return "0";
-  // giữ số nguyên nếu là integer, không thì 2 số lẻ
-  if (Math.abs(x - Math.round(x)) < 1e-9) return String(Math.round(x));
-  return x.toFixed(2);
+function normalizePercent(p) {
+  const n = Number(p);
+  if (!Number.isFinite(n)) return 0;
+  // nếu API trả 0.95 => coi là 95%
+  if (n <= 1.5) return n * 100;
+  return n;
 }
 
 function cls(...arr) {
   return arr.filter(Boolean).join(" ");
 }
 
-/* ===================== Component ===================== */
 export default function KpiDashboardClient({ initialQuery }) {
-  // query state
-  const [dateVN, setDateVN] = useState(() => {
-    // ưu tiên date từ URL (dd/mm/yyyy hoặc yyyy-mm-dd)
-    const fromUrl = safeStr(initialQuery?.date);
-    if (/^\d{2}\/\d{2}\/\d{4}$/.test(fromUrl)) return fromUrl;
-    if (/^\d{4}-\d{2}-\d{2}$/.test(fromUrl)) return isoToVN(fromUrl) || todayVN();
-    return todayVN();
-  });
+  const router = useRouter();
+  const pathname = usePathname();
+  const sp = useSearchParams();
 
-  const [status, setStatus] = useState(() => safeStr(initialQuery?.status) || "all");
-  const [q, setQ] = useState(() => safeStr(initialQuery?.q) || "");
-  const [auto, setAuto] = useState(() => (safeStr(initialQuery?.auto) === "0" ? false : true));
+  // ===== state filters =====
+  const [date, setDate] = useState(initialQuery?.date || "");
+  const [status, setStatus] = useState(initialQuery?.status || "all"); // all | ok | ko
+  const [q, setQ] = useState(initialQuery?.q || "");
+  const [auto, setAuto] = useState(initialQuery?.auto !== "0"); // boolean
 
-  // hour table line picker (riêng)
-  const [linePick, setLinePick] = useState("ALL");
+  // bảng lũy tiến: chọn chuyền + chọn mốc giờ
+  const [linePick, setLinePick] = useState("all");
+  const [hourPick, setHourPick] = useState(""); // key hour trong meta.hourCols (vd "H0900" hoặc "09:00")
 
-  // data
+  // ===== data =====
   const [loading, setLoading] = useState(false);
-  const [errorMsg, setErrorMsg] = useState("");
+  const [err, setErr] = useState("");
   const [data, setData] = useState(null);
 
   const timerRef = useRef(null);
 
-  // sync URL (để share link)
+  // ===== sync URL (giữ searchParams như bạn muốn) =====
   useEffect(() => {
-    const params = new URLSearchParams();
-    if (dateVN) params.set("date", dateVN);
-    if (status && status !== "all") params.set("status", status);
+    const params = new URLSearchParams(sp?.toString() || "");
+    if (date) params.set("date", date);
+    else params.delete("date");
+
+    params.set("status", status || "all");
     if (q) params.set("q", q);
+    else params.delete("q");
+
     params.set("auto", auto ? "1" : "0");
-    const url = `/kpi?${params.toString()}`;
-    window.history.replaceState(null, "", url);
-  }, [dateVN, status, q, auto]);
 
-  async function fetchKpi() {
+    const url = `${pathname}?${params.toString()}`;
+    router.replace(url, { scroll: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [date, status, q, auto]);
+
+  async function fetchKpi(signal) {
+    setLoading(true);
+    setErr("");
     try {
-      setLoading(true);
-      setErrorMsg("");
+      // API của bạn đang dùng: /api/check-kpi?date=dd/mm/yyyy
+      // Dashboard dùng input date yyyy-mm-dd => convert qua dd/mm/yyyy
+      const d = date ? toDDMMYYYY(date) : "";
+      const url = `/api/check-kpi${d ? `?date=${encodeURIComponent(d)}` : ""}`;
+      const res = await fetch(url, { signal, cache: "no-store" });
+      const js = await res.json().catch(() => ({}));
 
-      const url = `/api/check-kpi?date=${encodeURIComponent(dateVN)}`;
-      const res = await fetch(url, { cache: "no-store" });
-      const json = await res.json();
-
-      if (!json?.ok) {
-        setData(null);
-        setErrorMsg(json?.message || "Lỗi không xác định từ API");
-        return;
+      if (!res.ok || js?.ok === false) {
+        throw new Error(js?.message || js?.error || HTTP `${res.status}`);
       }
-
-      setData(json);
+      setData(js);
     } catch (e) {
-      setData(null);
-      setErrorMsg(String(e?.message || e));
+      if (e?.name !== "AbortError") setErr(String(e?.message || e));
     } finally {
       setLoading(false);
     }
   }
 
-  // first load + when date changes
+  // load first + when date changes
   useEffect(() => {
-    fetchKpi();
+    const ac = new AbortController();
+    fetchKpi(ac.signal);
+    return () => ac.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dateVN]);
+  }, [date]);
 
   // auto refresh
   useEffect(() => {
@@ -120,353 +98,401 @@ export default function KpiDashboardClient({ initialQuery }) {
     if (!auto) return;
 
     timerRef.current = setInterval(() => {
-      fetchKpi();
-    }, 60 * 1000);
+      const ac = new AbortController();
+      fetchKpi(ac.signal);
+      setTimeout(() => ac.abort(), 25000);
+    }, 60_000);
 
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
-      timerRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auto, dateVN]);
+  }, [auto, date]);
 
-  // performance rows (bảng 1)
-  const perfRows = useMemo(() => {
-    const rows = Array.isArray(data?.lines) ? data.lines : [];
-    const qq = normalizeText(q);
+  // ===== derived =====
+  const meta = data?.meta || {};
+  const hourCols = meta?.hourCols || []; // [{key,label,idx,...}] nếu API có
+  const linesRaw = Array.isArray(data?.lines) ? data.lines : [];
 
-    return rows.filter((r) => {
-      const st = safeStr(r?.status); // "ĐẠT" / "KHÔNG ĐẠT"
-      const passStatus =
-        status === "all" ? true : status === "dat" ? st === "ĐẠT" : st === "KHÔNG ĐẠT";
-
-      const hay = normalizeText(`${r?.line} ${r?.mh}`);
-      const passQ = qq ? hay.includes(qq) : true;
-
-      return passStatus && passQ;
-    });
-  }, [data, status, q]);
-
-  // hour rows (bảng 2)
-  const hourRows = useMemo(() => {
-    const rows = Array.isArray(data?.lines) ? data.lines : [];
-    let out = rows.filter((r) => Array.isArray(r?.hours) && r.hours.length > 0);
-
-    // lọc theo search q (chung)
-    const qq = normalizeText(q);
-    if (qq) out = out.filter((r) => normalizeText(`${r?.line} ${r?.mh}`).includes(qq));
-
-    // lọc riêng theo dropdown linePick
-    if (linePick !== "ALL") out = out.filter((r) => safeStr(r?.line) === linePick);
-
-    return out;
-  }, [data, q, linePick]);
-
-  // hour columns from meta (giữ đúng thứ tự)
-  const hourCols = useMemo(() => {
-    const cols = data?.meta?.hourCols;
-    if (Array.isArray(cols) && cols.length) {
-      // lấy label + key theo route trả về
-      return cols
-        .filter((c) => c && c.idx >= 0)
-        .map((c) => ({ key: c.key, label: c.label, k: c.k }));
+  // default hourPick = last hour col
+  useEffect(() => {
+    if (!hourPick && hourCols.length) {
+      setHourPick(hourCols[hourCols.length - 1].key || hourCols[hourCols.length - 1].label);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hourCols?.length]);
 
-    // fallback theo keys chuẩn route mình đã đưa
-    return [
-      { key: "H09", label: "09:00", k: 1 },
-      { key: "H10", label: "10:00", k: 2 },
-      { key: "H11", label: "11:00", k: 3 },
-      { key: "H1230", label: "12:30", k: 4 },
-      { key: "H1330", label: "13:30", k: 5 },
-      { key: "H1430", label: "14:30", k: 6 },
-      { key: "H1530", label: "15:30", k: 7 },
-      { key: "H1630", label: "16:30", k: 8 },
-    ];
-  }, [data]);
-
-  // counts
-  const stats = useMemo(() => {
-    const rows = perfRows;
-    const total = rows.length;
-    const dat = rows.filter((x) => safeStr(x?.status) === "ĐẠT").length;
-    const kdat = rows.filter((x) => safeStr(x?.status) === "KHÔNG ĐẠT").length;
-    return { total, dat, kdat, showing: total };
-  }, [perfRows]);
-
-  // options for linePick dropdown
   const lineOptions = useMemo(() => {
-    const rows = Array.isArray(data?.lines) ? data.lines : [];
-    const set = new Set(rows.map((x) => safeStr(x?.line)).filter(Boolean));
-    return ["ALL", ...Array.from(set)];
-  }, [data]);
-
-  // debug: vì sao không hiện số liệu?
-  // -> thường do API trả target = 0. Mình show warning nếu phát hiện.
-  const hasZeroTarget = useMemo(() => {
-    const rows = Array.isArray(data?.lines) ? data.lines : [];
-    for (const r of rows) {
-      if (!Array.isArray(r?.hours)) continue;
-      for (const h of r.hours) {
-        if (Number(h?.target) === 0) return true;
-      }
+    const opts = [];
+    for (const r of linesRaw) {
+      const v = (r?.line || "").toString().trim();
+      if (!v) continue;
+      opts.push(v);
     }
-    return false;
-  }, [data]);
+    return ["all", ...Array.from(new Set(opts))];
+  }, [linesRaw]);
+
+  const filteredPerf = useMemo(() => {
+    const qq = q.trim().toLowerCase();
+
+    return linesRaw.filter((r) => {
+      const st = (r?.status || "").toString().toLowerCase(); // "đạt"/"không đạt"
+      const isOk = st.includes("đạt") && !st.includes("không");
+      const okFilter =
+        status === "all" ? true : status === "ok" ? isOk : status === "ko" ? !isOk : true;
+
+      const text = `${r?.line || ""} ${r?.mh || ""}`.toLowerCase();
+      const qFilter = !qq ? true : text.includes(qq);
+
+      return okFilter && qFilter;
+    });
+  }, [linesRaw, status, q]);
+
+  const perfStats = useMemo(() => {
+    let total = filteredPerf.length;
+    let ok = 0;
+    let ko = 0;
+    for (const r of filteredPerf) {
+      const st = (r?.status || "").toString().toLowerCase();
+      const isOk = st.includes("đạt") && !st.includes("không");
+      if (isOk) ok++;
+      else ko++;
+    }
+    return { total, ok, ko, showing: total };
+  }, [filteredPerf]);
+
+  const perfRows = useMemo(() => {
+    return filteredPerf.map((r) => {
+      const after = Number(r?.hs_dat || 0);
+      const dmNgay = Number(r?.hs_dm || 0);
+      const p = normalizePercent(r?.percent || 0);
+      const isDat = p >= 100;
+
+      return {
+        line: r?.line || "",
+        mh: r?.mh || "",
+        after,
+        dmNgay,
+        percent: p,
+        statusText: isDat ? "ĐẠT" : "KHÔNG ĐẠT",
+        statusClass: isDat ? styles.badgeOk : styles.badgeKo,
+      };
+    });
+  }, [filteredPerf]);
+
+  // ===== lũy tiến table (theo mốc giờ chọn) =====
+  const hourKeyToLabel = useMemo(() => {
+    const map = new Map();
+    for (const h of hourCols) map.set(h.key, h.label);
+    return map;
+  }, [hourCols]);
+
+  const cumuRows = useMemo(() => {
+    const pick = (linePick || "all").toLowerCase();
+
+    return linesRaw
+      .filter((r) => {
+        if (pick === "all") return true;
+        return String(r?.line || "").toLowerCase() === pick;
+      })
+      .map((r) => {
+        // API bạn đang trả: r.hours = [{label, actual, target, ok, key?}]
+        const hours = Array.isArray(r?.hours) ? r.hours : [];
+
+        // tìm theo key trước, không có thì theo label
+        const h =
+          hours.find((x) => String(x?.key || "") === String(hourPick)) ||
+          hours.find((x) => String(x?.label || "") === String(hourPick)) ||
+          null;
+
+        const actual = Number(h?.actual || 0);
+        const target = Number(h?.target || 0);
+        const delta = actual - target;
+
+        let st = "THIẾU";
+        let stClass = styles.badgeKo;
+        if (target === 0) {
+          st = "—";
+          stClass = styles.badgeNeutral;
+        } else if (delta === 0) {
+          st = "ĐỦ";
+          stClass = styles.badgeOk;
+        } else if (delta > 0) {
+          st = "VƯỢT";
+          stClass = styles.badgeOk;
+        }
+
+        return {
+          line: r?.line || "",
+          mh: r?.mh || "",
+          actual,
+          target,
+          delta,
+          status: st,
+          statusClass: stClass,
+        };
+      });
+  }, [linesRaw, linePick, hourPick]);
+
+  const currentDateLabel = useMemo(() => {
+    if (!date) return data?.date || "";
+    return toDDMMYYYY(date);
+  }, [date, data?.date]);
 
   return (
-    <div className="kpi-app">
-      <div className="kpi-wrap">
-        <header className="kpi-header">
-          <div className="kpi-title">
-            <div className="kpi-title__main">KPI Dashboard</div>
-            <div className="kpi-title__sub">Tech theme • Dark • Auto update</div>
+    <div className={styles.page}>
+      <div className={styles.header}>
+        <div>
+          <div className={styles.title}>KPI Dashboard</div>
+          <div className={styles.subtitle}>Tech theme • Dark • Auto update</div>
+        </div>
+
+        <button
+          className={styles.btn}
+          onClick={() => {
+            const ac = new AbortController();
+            fetchKpi(ac.signal);
+            setTimeout(() => ac.abort(), 25000);
+          }}
+        >
+          Refresh
+        </button>
+      </div>
+
+      {/* FILTERS */}
+      <div className={styles.card}>
+        <div className={styles.cardTitle}>Bộ lọc</div>
+
+        <div className={styles.filters}>
+          <label className={styles.field}>
+            <span>Ngày</span>
+            <input
+              type="date"
+              value={date}
+              onChange={(e) => setDate(e.target.value)}
+              className={styles.input}
+            />
+            <small className={styles.muted}>Đang xem: {currentDateLabel || "—"}</small>
+          </label>
+
+          <label className={styles.field}>
+            <span>Lọc trạng thái</span>
+            <select value={status} onChange={(e) => setStatus(e.target.value)} className={styles.input}>
+              <option value="all">Tất cả</option>
+              <option value="ok">ĐẠT</option>
+              <option value="ko">KHÔNG ĐẠT</option>
+            </select>
+          </label>
+
+          <label className={styles.field}>
+            <span>Tìm (chuyền / MH)</span>
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="VD: C1 / 088AG / Baby Carrier..."
+              className={styles.input}
+            />
+          </label>
+
+          <label className={styles.checkWrap}>
+            <span>Tự cập nhật</span>
+            <div className={styles.checkRow}>
+              <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
+              <span className={styles.muted}>1 phút</span>
+            </div>
+          </label>
+        </div>
+
+        {/* stats */}
+        <div className={styles.stats}>
+          <div className={styles.stat}>
+            <div className={styles.statLabel}>Tổng dòng</div>
+            <div className={styles.statValue}>{perfStats.total}</div>
           </div>
-
-          <div className="kpi-actions">
-            <button className="btn" onClick={fetchKpi} disabled={loading}>
-              {loading ? "Đang tải..." : "Refresh"}
-            </button>
+          <div className={cls(styles.stat, styles.statOk)}>
+            <div className={styles.statLabel}>ĐẠT</div>
+            <div className={styles.statValue}>{perfStats.ok}</div>
           </div>
-        </header>
-
-        {errorMsg ? (
-          <div className="alert alert--error">
-            <div className="alert__title">Lỗi</div>
-            <div className="alert__body">{errorMsg}</div>
-            <div className="alert__hint">
-              Gợi ý: mở <code>/api/check-kpi?date=...</code> xem JSON có <code>ok:true</code> và{" "}
-              <code>target &gt; 0</code> không.
-            </div>
+          <div className={cls(styles.stat, styles.statKo)}>
+            <div className={styles.statLabel}>KHÔNG ĐẠT</div>
+            <div className={styles.statValue}>{perfStats.ko}</div>
           </div>
-        ) : null}
-
-        {hasZeroTarget ? (
-          <div className="alert alert--warn">
-            <div className="alert__title">Cảnh báo</div>
-            <div className="alert__body">
-              API đang trả về <b>target = 0</b> (ĐM giờ/ĐM ngày bị đọc sai) ⇒ bảng lũy tiến sẽ không tô màu đúng.
-              Bạn hãy chắc chắn file <code>route.js</code> đã fix DM/H + merge header 2 dòng.
-            </div>
+          <div className={styles.stat}>
+            <div className={styles.statLabel}>Đang hiển thị</div>
+            <div className={styles.statValue}>{perfStats.showing}</div>
           </div>
-        ) : null}
+        </div>
 
-        {/* Filters */}
-        <section className="panel">
-          <div className="panel-title">Bộ lọc</div>
-
-          <div className="filters">
-            <div className="field">
-              <label>Ngày</label>
-              <input
-                type="date"
-                value={vnToISO(dateVN)}
-                onChange={(e) => {
-                  const vn = isoToVN(e.target.value);
-                  if (vn) setDateVN(vn);
-                }}
-              />
-              <div className="hint">Đang xem: {dateVN}</div>
-            </div>
-
-            <div className="field">
-              <label>Lọc trạng thái</label>
-              <select value={status} onChange={(e) => setStatus(e.target.value)}>
-                <option value="all">Tất cả</option>
-                <option value="dat">ĐẠT</option>
-                <option value="kdat">KHÔNG ĐẠT</option>
-              </select>
-            </div>
-
-            <div className="field grow">
-              <label>Tìm (chuyền / MH)</label>
-              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="VD: C1 / 088AG" />
-            </div>
-
-            <div className="field">
-              <label>Tự cập nhật</label>
-              <div className="row">
-                <input
-                  id="auto"
-                  type="checkbox"
-                  checked={auto}
-                  onChange={(e) => setAuto(e.target.checked)}
-                />
-                <label htmlFor="auto" className="checkbox-label">
-                  1 phút
-                </label>
-              </div>
-            </div>
-          </div>
-
-          <div className="cards">
-            <div className="card">
-              <div className="card__label">Tổng dòng</div>
-              <div className="card__value">{stats.total}</div>
-            </div>
-            <div className="card card--ok">
-              <div className="card__label">ĐẠT</div>
-              <div className="card__value">{stats.dat}</div>
-            </div>
-            <div className="card card--bad">
-              <div className="card__label">KHÔNG ĐẠT</div>
-              <div className="card__value">{stats.kdat}</div>
-            </div>
-            <div className="card">
-              <div className="card__label">Đang hiển thị</div>
-              <div className="card__value">{stats.showing}</div>
+        {loading && <div className={styles.notice}>Đang tải dữ liệu…</div>}
+        {err && (
+          <div className={styles.error}>
+            <b>Lỗi:</b> {err}
+            <div className={styles.muted}>
+              Gợi ý: mở <code>/api/check-kpi?date=dd/mm/yyyy</code> để kiểm tra JSON <code>ok:true</code> và{" "}
+              <code>lines</code> có dữ liệu.
             </div>
           </div>
-        </section>
+        )}
+      </div>
 
-        {/* Two tables side-by-side */}
-        <section className="grid2">
-          {/* ===== Table 1: Performance ===== */}
-          <div className="panel">
-            <div className="panel-title">Hiệu suất trong ngày vs Định mức (kèm mã hàng)</div>
+      {/* TWO TABLES SIDE BY SIDE */}
+      <div className={styles.grid2}>
+        {/* PERFORMANCE TABLE */}
+        <div className={styles.card}>
+          <div className={styles.cardTitle}>Hiệu suất trong ngày vs Định mức (kèm mã hàng)</div>
 
-            <div className="table-wrap">
-              <table className="tbl">
-                <thead>
+          <div className={styles.tableWrap}>
+            <table className={styles.table}>
+              <thead>
+                <tr>
+                  <th>Chuyền</th>
+                  <th>MH</th>
+                  <th className={styles.right}>AFTER 16H30</th>
+                  <th className={styles.right}>DM/NGÀY</th>
+                  <th className={styles.right}>%</th>
+                  <th>Trạng thái</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {!perfRows.length ? (
                   <tr>
-                    <th>Chuyền</th>
-                    <th>MH</th>
-                    <th>AFTER 16H30</th>
-                    <th>DM/NGÀY</th>
-                    <th>%</th>
-                    <th>Trạng thái</th>
+                    <td colSpan={6} className={styles.empty}>
+                      Không có dữ liệu để hiển thị.
+                    </td>
                   </tr>
-                </thead>
-                <tbody>
-                  {perfRows.length === 0 ? (
-                    <tr>
-                      <td colSpan={6} className="empty">
-                        Không có dữ liệu để hiển thị.
+                ) : (
+                  perfRows.map((r, idx) => (
+                    <tr key={`${r.line}-${idx}`}>
+                      <td className={styles.mono}>{r.line}</td>
+                      <td>{r.mh}</td>
+                      <td className={cls(styles.right, styles.mono)}>{r.after}</td>
+                      <td className={cls(styles.right, styles.mono)}>{r.dmNgay}</td>
+                      <td className={cls(styles.right, styles.mono)}>{r.percent.toFixed(2)}%</td>
+                      <td>
+                        <span className={cls(styles.badge, r.statusClass)}>{r.statusText}</span>
                       </td>
                     </tr>
-                  ) : (
-                    perfRows.map((r) => {
-                      const st = safeStr(r?.status);
-                      const percent = Number(r?.percent) || 0;
-
-                      const statusClass =
-                        st === "ĐẠT" ? "pill pill--ok" : "pill pill--bad";
-
-                      const rowClass =
-                        st === "ĐẠT" ? "row-ok" : "row-bad";
-
-                      return (
-                        <tr key={`${r.line}-${r.mh}`} className={rowClass}>
-                          <td className="mono">{safeStr(r.line)}</td>
-                          <td className="mono">{safeStr(r.mh)}</td>
-                          <td className="num">{formatNumber(r.hs_dat)}</td>
-                          <td className="num">{formatNumber(r.hs_dm)}</td>
-                          <td className="num">{percent.toFixed(2)}%</td>
-                          <td>
-                            <span className={statusClass}>{st || "-"}</span>
-                          </td>
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </div>
+                  ))
+                )}
+              </tbody>
+            </table>
           </div>
 
-          {/* ===== Table 2: Hourly cumulative ===== */}
-          <div className="panel">
-            <div className="panel-title">
-              <div className="title-row">
-                <span>So sánh số lượng kiểm đạt lũy tiến vs định mức giờ</span>
+          <div className={styles.hint}>
+            Quy tắc: <b>≥ 100%</b> → <span className={cls(styles.badge, styles.badgeOk)}>ĐẠT</span>,{" "}
+            <b>&lt; 100%</b> → <span className={cls(styles.badge, styles.badgeKo)}>KHÔNG ĐẠT</span>.
+          </div>
+        </div>
 
-                <div className="title-row__right">
-                  <span className="mini-label">Chọn chuyền:</span>
-                  <select value={linePick} onChange={(e) => setLinePick(e.target.value)}>
-                    {lineOptions.map((v) => (
-                      <option key={v} value={v}>
-                        {v === "ALL" ? "Tất cả" : v}
+        {/* CUMULATIVE TABLE */}
+        <div className={styles.card}>
+          <div className={styles.cardTitleRow}>
+            <div className={styles.cardTitle}>So sánh số lượng kiểm đạt lũy tiến vs định mức giờ</div>
+
+            <div className={styles.inlineControls}>
+              <label className={styles.inlineField}>
+                <span>Chọn chuyền</span>
+                <select
+                  value={linePick}
+                  onChange={(e) => setLinePick(e.target.value)}
+                  className={styles.inputSm}
+                >
+                  {lineOptions.map((x) => (
+                    <option key={x} value={x}>
+                      {x === "all" ? "Tất cả" : x}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className={styles.inlineField}>
+                <span>Mốc giờ</span>
+                <select value={hourPick} onChange={(e) => setHourPick(e.target.value)} className={styles.inputSm}>
+                  {hourCols.length ? (
+                    hourCols.map((h) => (
+                      <option key={h.key || h.label} value={h.key || h.label}>
+                        {h.label}
                       </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
+                    ))
+                  ) : (
+                    <option value="">(chưa có hourCols từ API)</option>
+                  )}
+                </select>
+              </label>
             </div>
+          </div>
 
-            <div className="legend">
-              <span className="tag tag--ok">ĐỦ</span>
-              <span className="tag tag--ok">VƯỢT</span>
-              <span className="tag tag--bad">THIẾU</span>
-            </div>
+          <div className={styles.legend}>
+            <span className={cls(styles.badge, styles.badgeOk)}>ĐỦ</span>
+            <span className={cls(styles.badge, styles.badgeOk)}>VƯỢT</span>
+            <span className={cls(styles.badge, styles.badgeKo)}>THIẾU</span>
+          </div>
 
-            <div className="table-wrap">
-              <table className="tbl tbl--tight">
-                <thead>
+          {/* summary table by selected hour */}
+          <div className={styles.tableWrap}>
+            <table className={styles.table}>
+              <thead>
+                <tr>
+                  <th>Chuyền</th>
+                  <th>MH</th>
+                  <th className={styles.right}>Lũy tiến</th>
+                  <th className={styles.right}>ĐM giờ</th>
+                  <th className={styles.right}>Chênh</th>
+                  <th>Trạng thái</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {!cumuRows.length ? (
                   <tr>
-                    <th>Chuyền</th>
-                    <th>MH</th>
-                    {hourCols.map((c) => (
-                      <th key={c.key} className="center">
-                        {c.label}
-                      </th>
-                    ))}
+                    <td colSpan={6} className={styles.empty}>
+                      Không có dữ liệu lũy tiến để hiển thị.
+                    </td>
                   </tr>
-                </thead>
-
-                <tbody>
-                  {hourRows.length === 0 ? (
-                    <tr>
-                      <td colSpan={2 + hourCols.length} className="empty">
-                        Không có dữ liệu lũy tiến để hiển thị.
+                ) : (
+                  cumuRows.map((r, idx) => (
+                    <tr key={`${r.line}-${idx}`}>
+                      <td className={styles.mono}>{r.line}</td>
+                      <td>{r.mh}</td>
+                      <td className={cls(styles.right, styles.mono)}>{r.actual}</td>
+                      <td className={cls(styles.right, styles.mono)}>{r.target}</td>
+                      <td className={cls(styles.right, styles.mono, r.delta < 0 ? styles.neg : r.delta > 0 ? styles.pos : "")}>
+                        {r.target === 0 ? "—" : (r.delta > 0 ? +`${r.delta}` : `${r.delta}`)}
+                      </td>
+                      <td>
+                        <span className={cls(styles.badge, r.statusClass)}>{r.status}</span>
                       </td>
                     </tr>
-                  ) : (
-                    hourRows.map((r) => {
-                      // map hours by key
-                      const map = new Map();
-                      for (const h of r.hours || []) map.set(h.key, h);
-
-                      return (
-                        <tr key={`hour-${r.line}-${r.mh}`}>
-                          <td className="mono">{safeStr(r.line)}</td>
-                          <td className="mono">{safeStr(r.mh)}</td>
-
-                          {hourCols.map((c) => {
-                            const h = map.get(c.key);
-                            const actual = Number(h?.actual) || 0;
-                            const target = Number(h?.target) || 0;
-                            const level = safeStr(h?.level); // ĐỦ / VƯỢT / THIẾU / NO_TARGET
-
-                            let cellClass = "cell";
-                            if (target <= 0) cellClass = "cell cell--na";
-                            else if (level === "THIẾU") cellClass = "cell cell--bad";
-                            else if (level === "ĐỦ") cellClass = "cell cell--ok";
-                            else if (level === "VƯỢT") cellClass = "cell cell--ok";
-                            else cellClass = "cell";
-
-                            return (
-                              <td key={`${r.line}-${c.key}`} className={cellClass}>
-                                <div className="cell__top">{formatNumber(actual)}</div>
-                                <div className="cell__sub">
-                                  target {target > 0 ? formatNumber(target) : "0"}
-                                </div>
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </div>
-
-            <details className="debug">
-              <summary>Debug (meta)</summary>
-              <pre>{JSON.stringify(data?.meta || {}, null, 2)}</pre>
-            </details>
+                  ))
+                )}
+              </tbody>
+            </table>
           </div>
-        </section>
+
+          {/* mini debug */}
+          <details className={styles.details}>
+            <summary>Debug (meta)</summary>
+            <pre className={styles.pre}>
+{JSON.stringify(
+  {
+    date: data?.date,
+    range: data?.range,
+    hourCols: hourCols.map((h) => ({ key: h.key, label: h.label, idx: h.idx })),
+    linePick,
+    hourPickLabel: hourKeyToLabel.get(hourPick) || hourPick,
+  },
+  null,
+  2
+)}
+            </pre>
+          </details>
+        </div>
+      </div>
+
+      <div className={styles.footerNote}>
+        Nếu bảng lũy tiến ra toàn <b>0</b> nhưng Google Sheet có số → 99% là API đang trả <code>target</code> sai (đọc nhầm
+        cột/nhầm range). Dashboard đã ok, cần sửa lại API để lấy đúng “ĐM giờ”.
       </div>
     </div>
   );
