@@ -37,6 +37,7 @@ function findIdx(headers, candidates) {
 export async function GET(req) {
   try {
     // ✅ luôn đúng trên mọi runtime (không dùng req.nextUrl)
+    const url = new URL(req.url);
     const { searchParams } = new URL(req.url);
     const date = searchParams.get("date") || "";
 
