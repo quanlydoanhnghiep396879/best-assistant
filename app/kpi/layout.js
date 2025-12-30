@@ -5,6 +5,6 @@ export const metadata = {
   description: "KPI Dashboard",
 };
 
-export default function KpiLayout({ children }) {
-  return <div className="kpi-root">{children}</div>;
+export default function KPIRootLayout({ children }) {
+  return <>{children}</>;
 }
