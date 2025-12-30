@@ -1,0 +1,59 @@
+.wrap { padding: 24px; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+.h1 { margin: 0 0 12px; font-size: 34px; }
+.h2 { margin: 0 0 10px; font-size: 18px; }
+
+.err{
+  background:#ffe3e3; border:1px solid #ffb3b3; padding:10px 12px; border-radius:10px; margin:10px 0 14px;
+}
+
+.controls{
+  display:flex; gap:12px; align-items:end; flex-wrap:wrap;
+  padding:12px; border:1px solid #e7e7e7; border-radius:12px; background:#fff;
+}
+.field{ display:flex; flex-direction:column; gap:6px; min-width:200px; }
+.field label{ font-size:12px; color:#555; }
+.field input, .field select{
+  height:36px; padding:0 10px; border-radius:10px; border:1px solid #ddd; outline:none;
+}
+.check{ display:flex; gap:8px; align-items:center; user-select:none; }
+
+.btn{
+  height:36px; padding:0 14px; border-radius:10px; border:1px solid #ddd;
+  background:#111; color:#fff; cursor:pointer;
+}
+.btn:disabled{ opacity:.6; cursor:not-allowed; }
+
+.cards{ display:grid; grid-template-columns:repeat(4, minmax(160px, 1fr)); gap:12px; margin:12px 0 18px; }
+.card{ border:1px solid #e7e7e7; border-radius:12px; padding:12px; background:#fff; }
+.cardTitle{ font-size:12px; color:#666; }
+.cardValue{ font-size:28px; font-weight:700; margin-top:6px; }
+
+.section{ margin-top:16px; }
+
+.table{ width:100%; border-collapse:collapse; background:#fff; border:1px solid #e7e7e7; border-radius:12px; overflow:hidden; }
+.table th, .table td{ padding:10px 12px; border-bottom:1px solid #f0f0f0; text-align:left; }
+.table thead th{ background:#fafafa; font-size:12px; color:#555; }
+.empty{ text-align:center; color:#777; padding:16px; }
+
+.rowOk{ background:#f2fff4; }
+.rowBad{ background:#fff5f5; }
+
+.badge{
+  display:inline-block; padding:4px 10px; border-radius:999px; font-size:12px; font-weight:600;
+  border:1px solid transparent;
+}
+.badgeOk{ background:#eaffef; color:#0b6b2d; border-color:#bfeecd; }
+.badgeBad{ background:#ffecec; color:#a01212; border-color:#ffc6c6; }
+
+.percentWrap{ display:flex; align-items:center; gap:10px; }
+.percentBar{ width:120px; height:10px; background:#eee; border-radius:999px; overflow:hidden; }
+.percentFill{ height:100%; }
+.fillOk{ background:#22c55e; }
+.fillBad{ background:#ef4444; }
+.percentText{ font-size:12px; color:#333; min-width:48px; }
+
+.pos{ color:#0b6b2d; font-weight:600; }
+.neg{ color:#a01212; font-weight:600; }
+
+.debug{ margin-top:14px; }
+.debug pre{ white-space:pre-wrap; background:#111; color:#eee; padding:10px; border-radius:10px; }
