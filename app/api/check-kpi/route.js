@@ -1,5 +1,12 @@
 import { NextResponse } from "next/server";
-import { readRangeA1, requireEnv } from "../_lib/googleSheetsClient"; // chỉnh path đúng theo dự án bạn
+import { readRangeA1 } from "../_lib/googleSheetsClient";
+
+// BẮT BUỘC: googleapis chạy Node runtime, không chạy Edge
+export const runtime = "nodejs";
+
+// BẮT BUỘC: ép route này chạy động, không static
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 function norm(s) {
   return String(s ?? "")
@@ -26,12 +33,11 @@ function findIdx(headers, candidates) {
   return -1;
 }
 
-export async function GET(req) {
+export async function GET(request) {
   try {
-    const { searchParams } = new URL(req.url);
-    const date = searchParams.get("date") || "";
+    // ✅ ĐỪNG dùng new URL(req.url)
+    const date = request.nextUrl.searchParams.get("date") || "";
 
-    // Range KPI (bạn đang dùng KPI!A20:AZ37)
     const sheetName = process.env.KPI_SHEET_NAME || "KPI";
     const range = `${sheetName}!A20:AZ37`;
 
@@ -47,8 +53,7 @@ export async function GET(req) {
     const headers = values[0] || [];
     const rows = values.slice(1);
 
-    // Bạn có thể đổi candidates theo header thực tế trong sheet KPI
-    const idxLine = 0; // cột A thường là chuyền C1/C2...
+    const idxLine = 0;
     const idxMH = findIdx(headers, ["MH", "MÃ HÀNG", "MA HANG"]);
     const idxAfter = findIdx(headers, ["AFTER 16H30", "16H30"]);
     const idxDMNgay = findIdx(headers, ["DM/NGAY", "ĐM/NGÀY", "DINH MUC NGAY", "DM NGAY"]);
@@ -80,8 +85,7 @@ export async function GET(req) {
       ok: true,
       date,
       range,
-      values, // giữ lại để debug
-      lines,  // cái dashboard cần
+      lines,
       meta: { headers, idxMH, idxAfter, idxDMNgay },
     });
   } catch (e) {
