@@ -123,12 +123,12 @@ export async function GET(req) {
   try {
     const { searchParams } = new URL(req.url);
 
-    const sheetId = process.env.KPI_SHEET_ID;
+    const sheetId = process.env.GOOGLE_SHEET_ID;
     const sheetName = process.env.KPI_SHEET_NAME || "KPI";
 
     if (!sheetId) {
       return NextResponse.json(
-        { ok: false, error: "Missing KPI_SHEET_ID env" },
+        { ok: false, error: "Missing GOOGLE_SHEET_ID env" },
         { status: 500 }
       );
     }
