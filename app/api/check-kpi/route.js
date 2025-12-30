@@ -61,6 +61,8 @@ function matchDateCell(cell, dateStr) {
 const dateParam = searchParams.get("date") || "";
 const dateColIdx = headers.findIndex(h => matchDateCell(h, dateParam));
 
+console.log("dateParam =", dateParam);
+console.log("dateColIdx =", dateColIdx, headers[dateColIdx]);
 
 function mergeHeaders(rowA = [], rowB = []) {
   const n = Math.max(rowA.length, rowB.length);
