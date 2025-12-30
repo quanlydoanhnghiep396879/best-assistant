@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import styles from "./kpi.module.css";
+import styles from "./kpi.css";
 
 function toDDMMYYYY(yyyy_mm_dd) {
   if (!yyyy_mm_dd) return "";
