@@ -1,3 +1,7 @@
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 import { NextResponse } from "next/server";
 import { readRangeA1 } from "../_lib/googleSheetsClient";
 
@@ -60,7 +64,7 @@ function findHourCols(headers) {
 export async function GET(req) {
   try {
     const { searchParams } = new URL(req.url);
-    const date = searchParams.get("date") || "";
+    const date = Request.nextUrl.searchParams.get("date") || "";
 
     const sheetName = process.env.KPI_SHEET_NAME || "KPI";
 
