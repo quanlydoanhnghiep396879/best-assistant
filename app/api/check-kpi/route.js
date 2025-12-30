@@ -1,162 +1,130 @@
-
 import { NextResponse } from "next/server";
 import { readRangeA1 } from "../_lib/googleSheetsClient";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-export const revalidate = 0;
-
-// normalize: bỏ dấu + bỏ ký tự đặc biệt để tìm header chắc ăn
+// Chuẩn hoá mạnh: bỏ dấu tiếng Việt + bỏ mọi ký tự không phải chữ/số
 function norm(s) {
   return String(s ?? "")
     .trim()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "") // remove diacritics
     .toUpperCase()
-    .replace(/\s+/g, "")
-    .replace(/[^A-Z0-9]/g, ""); // remove everything except letters+digits
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")      // bỏ dấu
+    .replace(/[^A-Z0-9]/g, "");          // bỏ space, /, _, -, ., v.v.
 }
 
+// Parse số kiểu VN: 2.814 / 2,814 / 2 814 -> 2814
 function toNumberSafe(v) {
   if (v === null || v === undefined) return 0;
-  const t = String(v).trim();
+  let t = String(v).trim();
   if (!t) return 0;
-  const n = Number(t.replace(/,/g, ""));
+
+  t = t.replace(/\s+/g, "");
+
+  // dạng 1.234.567
+  if (/^\d{1,3}(\.\d{3})+$/.test(t)) t = t.replace(/\./g, "");
+  // dạng 1,234,567
+  if (/^\d{1,3}(,\d{3})+$/.test(t)) t = t.replace(/,/g, "");
+
+  // nếu vẫn còn dấu phẩy (thường là ngăn nghìn) thì bỏ
+  t = t.replace(/,/g, "");
+
+  const n = Number(t);
   return Number.isFinite(n) ? n : 0;
 }
 
 function findIdx(headers, candidates) {
   const h = headers.map(norm);
   for (const c of candidates) {
-    const nc = norm(c);
-    const idx = h.findIndex((x) => x === nc || x.includes(nc));
+    const key = norm(c);
+    const idx = h.findIndex((x) => x.includes(key));
     if (idx >= 0) return idx;
   }
   return -1;
 }
 
-// bắt các mốc giờ kiểu: "->9h", "9h", "12h30", "16h30"...
-function pickTimeColumns(headers) {
+// tìm các cột giờ: 9H / 10H / ->9H / 9H30 ...
+function findHourCols(headers) {
   const out = [];
-  headers.forEach((raw, idx) => {
-    const s = String(raw ?? "").trim();
-    // có chữ h/H và có số giờ
-    if (!/[hH]/.test(s)) return;
-    const m = s.match(/(\d{1,2})\s*[hH]\s*(30)?/);
-    if (!m) return;
-    const hh = parseInt(m[1], 10);
-    if (!(hh >= 6 && hh <= 20)) return; // lọc bậy
-    // label giữ nguyên header để hiển thị
-    out.push({ idx, label: s });
+  headers.forEach((h, idx) => {
+    const raw = String(h ?? "").toUpperCase();
+    // bắt "9H", "->9H", "9H30", "12H30"...
+    const m = raw.match(/(?:->\s*)?(\d{1,2})\s*H(?:\s*(\d{2}))?/i);
+    if (m) {
+      const hh = m[1].padStart(2, "0");
+      const mm = (m[2] || "00").padStart(2, "0");
+      out.push({ idx, label: `${hh}:${mm}`, raw: String(h ?? "") });
+    }
   });
-
-  // sort theo giờ tăng (dựa vào số đầu tiên)
-  out.sort((a, b) => {
-    const ah = parseInt(String(a.label).match(/(\d{1,2})/)?.[1] || "0", 10);
-    const bh = parseInt(String(b.label).match(/(\d{1,2})/)?.[1] || "0", 10);
-    return ah - bh;
-  });
-
   return out;
 }
 
-export async function GET(request) {
+export async function GET(req) {
   try {
-    const date = request.nextUrl.searchParams.get("date") || "";
+    const { searchParams } = new URL(req.url);
+    const date = searchParams.get("date") || "";
 
     const sheetName = process.env.KPI_SHEET_NAME || "KPI";
-    const range = `${sheetName}!A20:AZ37`;
+
+    // 🔥 IMPORTANT: nới range rộng hơn để không bị thiếu cột DM/NGÀY
+    // Bạn có thể tăng thêm nếu DM/NGÀY nằm xa hơn: CO, CP...
+    const range = `${sheetName}!A20:CO37`;
 
     const values = await readRangeA1(range, {
       valueRenderOption: "FORMATTED_VALUE",
       dateTimeRenderOption: "FORMATTED_STRING",
     });
 
-    if (!values || values.length === 0) {
-      return NextResponse.json({ ok: true, date, range, lines: [], progress: [] });
+    if (!values?.length) {
+      return NextResponse.json({ ok: true, date, range, lines: [], meta: {} });
     }
 
     const headers = values[0] || [];
     const rows = values.slice(1);
 
     const idxLine = 0;
-    const idxMH = findIdx(headers, ["MH", "MA HANG", "MÃ HÀNG"]);
-    const idxAfter = findIdx(headers, ["AFTER 16H30", "AFTER16H30", "SAU 16H30", "16H30"]);
-    const idxDMNgay = findIdx(headers, ["DM/NGAY", "DM NGAY", "DINH MUC NGAY", "ĐM/NGÀY", "DM/NGÀY"]);
+    const idxMH = findIdx(headers, ["MH", "MAHANG", "MA HANG", "MÃHÀNG", "MÃ HÀNG"]);
+    const idxAfter = findIdx(headers, ["AFTER16H30", "AFTER 16H30", "16H30"]);
+    const idxDMNgay = findIdx(headers, ["DMNGAY", "DM/NGAY", "ĐM/NGÀY", "DINHMUCNGAY", "DINH MUC NGAY"]);
+    const idxKiemDat = findIdx(headers, ["KIEMDAT", "KIỂMĐẠT", "KIEM DAT"]);
 
-    // lấy các cột mốc giờ để làm lũy tiến
-    const timeCols = pickTimeColumns(headers);
+    const hourCols = findHourCols(headers);
 
     const lines = [];
-
     for (const r of rows) {
       const line = String(r[idxLine] ?? "").trim();
       if (!line) continue;
 
       const mh = idxMH >= 0 ? String(r[idxMH] ?? "").trim() : "";
-      const after = idxAfter >= 0 ? toNumberSafe(r[idxAfter]) : 0;
-      const dm = idxDMNgay >= 0 ? toNumberSafe(r[idxDMNgay]) : 0;
+      const hs_dat = idxAfter >= 0 ? toNumberSafe(r[idxAfter]) : 0;
+      const hs_dm = idxDMNgay >= 0 ? toNumberSafe(r[idxDMNgay]) : 0;
 
-      const percent = dm > 0 ? (after / dm) * 100 : 0;
-      const status = dm > 0 && percent >= 100 ? "ĐẠT" : "KHÔNG ĐẠT";
-
-      // lũy tiến theo giờ: actual = giá trị tại cột mốc đó, expected = dm * frac
-      const checkpoints = timeCols.map((c, i) => {
-        const frac = timeCols.length <= 1 ? 1 : i / (timeCols.length - 1); // 0..1
-        const actual = toNumberSafe(r[c.idx]);
-        const expected = dm * frac;
-        const p = expected > 0 ? (actual / expected) * 100 : 0;
-        return {
-          label: c.label,
-          actual,
-          expected: Number(expected.toFixed(2)),
-          percent: Number(p.toFixed(2)),
-          delta: Number((actual - expected).toFixed(2)),
-        };
-      });
+      const percent = hs_dm > 0 ? (hs_dat / hs_dm) * 100 : 0;
+      const status = hs_dm > 0 && percent >= 100 ? "ĐẠT" : "KHÔNG ĐẠT";
 
       lines.push({
         line,
         mh,
-        after,
-        dm,
+        hs_dat,
+        hs_dm,
         percent: Number(percent.toFixed(2)),
         status,
-        checkpoints,
+        kiem_dat: idxKiemDat >= 0 ? toNumberSafe(r[idxKiemDat]) : 0,
       });
     }
 
-    // tổng hợp lũy tiến toàn xưởng (cộng tất cả chuyền)
-    const progress = [];
-    for (let i = 0; i < timeCols.length; i++) {
-      const label = timeCols[i].label;
-      const frac = timeCols.length <= 1 ? 1 : i / (timeCols.length - 1);
-
-      let sumActual = 0;
-      let sumExpected = 0;
-
-      for (const ln of lines) {
-        sumActual += ln.checkpoints[i]?.actual || 0;
-        sumExpected += (ln.dm || 0) * frac;
-      }
-
-      const p = sumExpected > 0 ? (sumActual / sumExpected) * 100 : 0;
-      progress.push({
-        label,
-        actual: Number(sumActual.toFixed(2)),
-        expected: Number(sumExpected.toFixed(2)),
-        percent: Number(p.toFixed(2)),
-        delta: Number((sumActual - sumExpected).toFixed(2)),
-      });
-    }
+    // Tổng lũy tiến theo giờ (nếu có cột giờ)
+    const hourTotals = hourCols.map((c) => {
+      let sum = 0;
+      for (const r of rows) sum += toNumberSafe(r[c.idx]);
+      return { label: c.label, sum };
+    });
 
     return NextResponse.json({
       ok: true,
       date,
       range,
       lines,
-      progress,
-      meta: { idxMH, idxAfter, idxDMNgay, headers },
+      hourTotals,
+      meta: { idxMH, idxAfter, idxDMNgay, idxKiemDat, headersPreview: headers.slice(0, 30) },
     });
   } catch (e) {
     return NextResponse.json({
