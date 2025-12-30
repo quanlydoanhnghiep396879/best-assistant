@@ -1,9 +1,11 @@
+// app/api/check-kpi/route.js
 import { NextResponse } from "next/server";
-import { readRangeA1 } from "../_lib/googleSheetsClient";
+import { google } from "googleapis";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
+/** ===================== Helpers ===================== */
 function normText(s) {
   return String(s ?? "")
     .trim()
@@ -17,236 +19,236 @@ function toNumberSafe(v) {
   if (v === null || v === undefined) return 0;
   const t = String(v).trim();
   if (!t) return 0;
-
-  // "95.87%" => 95.87
   const cleaned = t.replace(/,/g, "").replace(/%/g, "");
   const n = Number(cleaned);
   return Number.isFinite(n) ? n : 0;
 }
 
-/**
- * findIdx:
- * - ưu tiên EXACT match trước
- * - sau đó mới includes
- */
-function normText(s) {
-  return String(s ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "");
+// yyyy-mm-dd -> dd/mm/yyyy
+function isoToDmy(iso) {
+  const m = String(iso || "").trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return String(iso || "").trim();
+  const yyyy = m[1];
+  const mm = m[2];
+  const dd = m[3];
+  return `${dd}/${mm}/${yyyy}`;
 }
 
 function dateKeys(dateStr) {
   const s = String(dateStr || "").trim();
+  // allow dd/mm or dd/mm/yyyy
   const m = s.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
   if (!m) return [s];
 
   const dd = String(m[1]).padStart(2, "0");
   const mm = String(m[2]).padStart(2, "0");
-  const yyyy = m[3] ? (m[3].length === 2 ? `20${m[3]}`: m[3]) : "";
+  const yyyy = m[3]
+    ? m[3].length === 2
+      ? `20${m[3]}`
+      : m[3]
+    : "";
 
-  const short = `${dd}/${mm}`;                       // 24/12
-  const full  = yyyy ? `${dd}/${mm}/${yyyy}` : short; // 24/12/2025
+  const short = `${dd}/${mm}`; // 24/12
+  const full = yyyy ? `${dd}/${mm}/${yyyy}` : short; // 24/12/2025
   return yyyy ? [full, short] : [short];
 }
 
-function matchDateCell(cell, dateStr) {
-  const keys = dateKeys(dateStr).map(normText);
-  const c = normText(cell);
-  // match exact hoặc header có thêm chữ vẫn bắt được
-  return keys.some(k => c === k || c.includes(k));
+function includesAny(h, arr) {
+  const H = normText(h);
+  return arr.some((x) => H.includes(normText(x)));
 }
 
-// ===== dùng để tìm cột ngày trong headers =====
-const dateParam = searchParams.get("date") || "";
-const dateColIdx = headers.findIndex(h => matchDateCell(h, dateParam));
+function findIdx(headers, candidates) {
+  const H = headers.map(normText);
+  // 1) exact
+  for (const c of candidates) {
+    const cc = normText(c);
+    const idx = H.findIndex((x) => x === cc);
+    if (idx >= 0) return idx;
+  }
+  // 2) includes
+  for (const c of candidates) {
+    const cc = normText(c);
+    const idx = H.findIndex((x) => x.includes(cc));
+    if (idx >= 0) return idx;
+  }
+  return -1;
+}
 
-console.log("dateParam =", dateParam);
-console.log("dateColIdx =", dateColIdx, headers[dateColIdx]);
-
-function mergeHeaders(rowA = [], rowB = []) {
-  const n = Math.max(rowA.length, rowB.length);
+// merge 2 header rows (row0 + row1)
+function mergeHeaders(row0, row1) {
+  const n = Math.max(row0.length, row1.length);
   const out = [];
   for (let i = 0; i < n; i++) {
-    const a = String(rowA[i] ?? "").trim();
-    const b = String(rowB[i] ?? "").trim();
-
-    if (a && b) out.push(`${a} ${b}`);
-    else out.push(a || b || "");
+    const a = String(row0[i] ?? "").trim();
+    const b = String(row1[i] ?? "").trim();
+    out[i] = (a && b) ? `${a} ${b}`.trim() : (a || b || "");
   }
   return out;
 }
 
-// mốc giờ lũy tiến (bạn có thể thêm/bớt tùy sheet)
-const CHECKPOINTS = [
-  { key: "H09", label: "09:00", k: 1, candidates: ["->9H", "=>9H", ">9H", "9H", "09:00", "0900"] },
-  { key: "H10", label: "10:00", k: 2, candidates: ["->10H", "=>10H", ">10H", "10H", "10:00", "1000"] },
-  { key: "H11", label: "11:00", k: 3, candidates: ["->11H", "=>11H", ">11H", "11H", "11:00", "1100"] },
-  { key: "H1230", label: "12:30", k: 4, candidates: ["->12H30", "->12:30", "12:30", "1230", "->12H"] },
-  { key: "H1330", label: "13:30", k: 5, candidates: ["->13H30", "->13:30", "13:30", "1330", "->13H"] },
-  { key: "H1430", label: "14:30", k: 6, candidates: ["->14H30", "->14:30", "14:30", "1430", "->14H"] },
-  { key: "H1530", label: "15:30", k: 7, candidates: ["->15H30", "->15:30", "15:30", "1530", "->15H"] },
-  { key: "H1630", label: "16:30", k: 8, candidates: ["->16H30", "AFTER 16H30", "16:30", "1630"] },
-];
+/** ===================== Google Sheets ===================== */
+async function getSheetsClient() {
+  const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+  let privateKey = process.env.GOOGLE_PRIVATE_KEY;
 
+  if (!clientEmail || !privateKey) {
+    throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_EMAIL / GOOGLE_PRIVATE_KEY");
+  }
+
+  // fix \n in Vercel env
+  privateKey = privateKey.replace(/\\n/g, "\n");
+
+  const auth = new google.auth.JWT({
+    email: clientEmail,
+    key: privateKey,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
+  });
+
+  return google.sheets({ version: "v4", auth });
+}
+
+async function readRange(spreadsheetId, range) {
+  const sheets = await getSheetsClient();
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range,
+    valueRenderOption: "FORMATTED_VALUE",
+  });
+  return res.data.values || [];
+}
+
+/** ===================== Main API ===================== */
 export async function GET(req) {
   try {
     const { searchParams } = new URL(req.url);
-    const date = searchParams.get("date") || "";
 
+    const sheetId = process.env.KPI_SHEET_ID;
     const sheetName = process.env.KPI_SHEET_NAME || "KPI";
-    // ✅ bạn đang dùng A20:AZ37, giữ nguyên
-    const range = `${sheetName}!A20:AZ37`;
 
-    const values = await readRangeA1(range, {
-      valueRenderOption: "FORMATTED_VALUE",
-      dateTimeRenderOption: "FORMATTED_STRING",
-    });
-
-    if (!values || values.length === 0) {
-      return NextResponse.json({ ok: true, date, range, lines: [], meta: {} });
+    if (!sheetId) {
+      return NextResponse.json(
+        { ok: false, error: "Missing KPI_SHEET_ID env" },
+        { status: 500 }
+      );
     }
 
-    // =============================
-    // 1) TÌM HEADER (có thể 2 dòng)
-    // =============================
-    let headerRowIndex = 0;
-    for (let i = 0; i < Math.min(values.length, 6); i++) {
-      const s = values[i].map(norm).join("|");
-      if (
-        s.includes("CHUYEN") ||
-        s.includes("DM/NGAY") ||
-        s.includes("DMNGAY") ||
-        s.includes("DM/H") ||
-        s.includes("DMH") ||
-        s.includes("AFTER16H30") ||
-        s.includes("->9H")
-      ) {
-        headerRowIndex = i;
-        break;
-      }
+    // date can be "yyyy-mm-dd" from <input type="date">
+    const dateParamRaw = searchParams.get("date") || "";
+    const dateParam = dateParamRaw.includes("-") ? isoToDmy(dateParamRaw) : dateParamRaw;
+    const dKeys = dateKeys(dateParam); // ["dd/mm/yyyy","dd/mm"] or ["dd/mm"]
+
+    // read a safe big range (header + data)
+    const range = `${sheetName}!A20:AZ80`;
+    const values = await readRange(sheetId, range);
+
+    if (!values.length) {
+      return NextResponse.json({ ok: true, date: dateParam, range, lines: [], meta: { reason: "empty_range" } });
     }
 
-    const header1 = values[headerRowIndex] || [];
-    const header2 = values[headerRowIndex + 1] || [];
+    // detect header rows
+    const row0 = values[0] || [];
+    const row1 = values[1] || [];
+    const headers = mergeHeaders(row0, row1).map((x) => String(x || "").trim());
 
-    // nếu dòng dưới cũng có vẻ là sub-header thì merge 2 dòng
-    const header2LooksLikeSub =
-      header2.map(normText).join("|").includes("H") ||
-      header2.map(normText).join("|").includes("9") ||
-      header2.map(normText).join("|").includes("10");
+    const dataRows = values.slice(2); // start after 2 header rows
 
-    const headers = header2LooksLikeSub ? mergeHeaders(header1, header2) : header1;
-    const dataStart = headerRowIndex + (header2LooksLikeSub ? 2 : 1);
-
-    const rows = values
-      .slice(dataStart)
-      .filter((r) => r.some((x) => String(x ?? "").trim() !== ""));
-
-    // =============================
-    // 2) BẮT CỘT CHO 2 BẢNG
-    // =============================
+    // columns (not date-dependent)
     const idxLine = findIdx(headers, ["CHUYEN", "CHUYỀN", "LINE"]);
-    const idxMH = findIdx(headers, ["MH", "MÃ HÀNG", "MA HANG"]);
-    const idxAfter = findIdx(headers, ["AFTER 16H30", "16H30", "AFTER16H30"]);
-    const idxDMNgay = findIdx(headers, ["DM/NGAY", "ĐM/NGÀY", "DINH MUC NGAY", "DM NGAY", "DMNGAY"]);
+    const idxMH = findIdx(headers, ["MH", "MÃ HÀNG", "MA HANG", "ITEM", "STYLE"]);
+    const idxAfter = findIdx(headers, ["AFTER 16H30", "AFTER16H30", "->16H30", "16H30", "AFTER 16:30"]);
+    const idxDmNgay = findIdx(headers, ["DM/NGAY", "DM/NGÀY", "DM NGAY", "DMNGAY"]);
+    const idxDmH = findIdx(headers, ["DM/H", "DMH", "DM GIO", "ĐM/H", "ĐM GIỜ"]);
 
-    // ✅ DM/H: tuyệt đối KHÔNG dùng candidate "H" nữa (dễ match nhầm ->9H)
-    const idxDMH = findIdx(headers, ["DM/H", "ĐM/H", "DINH MUC GIO", "DM GIO", "DMH"]);
+    // hour columns (date-dependent preferred)
+    const hourDefs = [
+      { label: "09:00", k: 1, candidates: ["->9H", "9H", "09:00", "09H00", "9:00"] },
+      { label: "10:00", k: 2, candidates: ["->10H", "10H", "10:00", "10H00", "10:00"] },
+      { label: "11:00", k: 3, candidates: ["->11H", "11H", "11:00", "11H00", "11:00"] },
+      { label: "12:30", k: 4, candidates: ["->12H30", "12H30", "12:30", "1230"] },
+      { label: "13:30", k: 5, candidates: ["->13H30", "13H30", "13:30", "1330"] },
+      { label: "14:30", k: 6, candidates: ["->14H30", "14H30", "14:30", "1430"] },
+      { label: "15:30", k: 7, candidates: ["->15H30", "15H30", "15:30", "1530"] },
+      { label: "16:30", k: 8, candidates: ["->16H30", "16H30", "AFTER 16H30", "AFTER16H30", "16:30", "1630"] },
+    ];
 
-    const idxTG = findIdx(headers, ["TG SX", "TGSX", "TG"]);
+    function findHourCol(cands) {
+      // ưu tiên header có chứa ngày + giờ
+      const idxDateHour = headers.findIndex((h) => includesAny(h, cands) && includesAny(h, dKeys));
+      if (idxDateHour >= 0) return idxDateHour;
+      // fallback: chỉ cần giờ (nếu sheet chỉ có 1 ngày / header không chứa ngày)
+      return headers.findIndex((h) => includesAny(h, cands));
+    }
 
-    // mốc giờ: tìm index theo header
-    const hourCols = CHECKPOINTS.map((cp) => ({
-      ...cp,
-      idx: findIdx(headers, cp.candidates),
+    const hourCols = hourDefs.map((h) => ({
+      label: h.label,
+      k: h.k,
+      idx: findHourCol(h.candidates),
+      candidates: h.candidates,
     }));
 
-    // =============================
-    // 3) BUILD LINES
-    // =============================
+    // build lines
     const lines = [];
+    for (const r of dataRows) {
+      const line = idxLine >= 0 ? String(r[idxLine] || "").trim() : "";
+      const mh = idxMH >= 0 ? String(r[idxMH] || "").trim() : "";
 
-    for (const r of rows) {
-      const line = String(r[idxLine] ?? "").trim();
-      if (!line) continue;
+      // ignore empty rows
+      if (!line && !mh) continue;
 
-      const mh = idxMH >= 0 ? String(r[idxMH] ?? "").trim() : "";
+      const after = idxAfter >= 0 ? toNumberSafe(r[idxAfter]) : 0;
+      const dmNgay = idxDmNgay >= 0 ? toNumberSafe(r[idxDmNgay]) : 0;
+      const dmH = idxDmH >= 0 ? toNumberSafe(r[idxDmH]) : 0;
 
-      const hs_dat = idxAfter >= 0 ? toNumberSafe(r[idxAfter]) : 0;
-      const hs_dm = idxDMNgay >= 0 ? toNumberSafe(r[idxDMNgay]) : 0;
-
-      const percent = hs_dm > 0 ? (hs_dat / hs_dm) * 100 : 0;
+      const percent = dmNgay > 0 ? (after / dmNgay) * 100 : 0;
       const status = percent >= 100 ? "ĐẠT" : "KHÔNG ĐẠT";
 
-      // DM/H dùng cho bảng lũy tiến
-      let dmH = idxDMH >= 0 ? toNumberSafe(r[idxDMH]) : 0;
-
-      // fallback: dmH = dmNgay / TG_SX (thường 😎
-      if (dmH <= 0) {
-        const dmNgayTmp = idxDMNgay >= 0 ? toNumberSafe(r[idxDMNgay]) : 0;
-        const tg = idxTG >= 0 ? toNumberSafe(r[idxTG]) : 0;
-        if (dmNgayTmp > 0 && tg > 0) dmH = dmNgayTmp / tg;
-      }
-
       const hours = hourCols
-        .filter((c) => c.idx >= 0)
-        .map((c) => {
-          const actual = toNumberSafe(r[c.idx]);
-          const target = dmH > 0 ? dmH * c.k : 0;
+        .filter((hc) => hc.idx >= 0)
+        .map((hc) => {
+          const actual = toNumberSafe(r[hc.idx]);
+          // target giờ: DM/H * k (k = số mốc lũy tiến)
+          const target = dmH > 0 ? dmH * hc.k : 0;
+          const diff = actual - target;
+          let hStatus = "ĐỦ";
+          if (diff > 0) hStatus = "VƯỢT";
+          else if (diff < 0) hStatus = "THIẾU";
 
-          let ok = false;
-          let level = "NO_TARGET"; // ĐỦ / VƯỢT / THIẾU
-          if (target > 0) {
-            if (actual === target) { ok = true; level = "ĐỦ"; }
-            else if (actual > target) { ok = true; level = "VƯỢT"; }
-            else { ok = false; level = "THIẾU"; }
-          }
-
-          return {
-            key: c.key,
-            label: c.label,
-            k: c.k,
-            actual,
-            target: Number(target.toFixed(2)),
-            ok,
-            level,
-          };
+          return { label: hc.label, k: hc.k, actual, target, diff, status: hStatus };
         });
 
       lines.push({
         line,
         mh,
-        hs_dat,
-        hs_dm,
-        percent: Number(percent.toFixed(2)),
+        after,
+        dmNgay,
+        dmH,
+        percent,
         status,
-        dmH: Number(dmH.toFixed(2)),
         hours,
       });
     }
 
     return NextResponse.json({
       ok: true,
-      date,
+      date: dateParam,
+      dateKeys: dKeys,
       range,
       lines,
       meta: {
-        headers,
         idxLine,
         idxMH,
         idxAfter,
-        idxDMNgay,
-        idxDMH,
-        idxTG,
+        idxDmNgay,
+        idxDmH,
         hourCols,
+        headersPreview: headers.slice(0, 25),
       },
     });
-  } catch (e) {
-    return NextResponse.json({
-      ok: false,
-      error: "CHECK_KPI_ERROR",
-      message: String(e?.message || e),
-    });
+  } catch (err) {
+    return NextResponse.json(
+      { ok: false, error: String(err?.message || err) },
+      { status: 500 }
+    );
   }
 }
