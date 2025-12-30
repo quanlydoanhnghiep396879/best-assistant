@@ -4,7 +4,7 @@ import { readRangeA1 } from "../_lib/googleSheetsClient";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-function norm(s) {
+function normText(s) {
   return String(s ?? "")
     .trim()
     .toUpperCase()
@@ -29,7 +29,7 @@ function toNumberSafe(v) {
  * - ưu tiên EXACT match trước
  * - sau đó mới includes
  */
-function norm(s) {
+function normText(s) {
   return String(s ?? "")
     .trim()
     .toLowerCase()
@@ -51,8 +51,8 @@ function dateKeys(dateStr) {
 }
 
 function matchDateCell(cell, dateStr) {
-  const keys = dateKeys(dateStr).map(norm);
-  const c = norm(cell);
+  const keys = dateKeys(dateStr).map(normText);
+  const c = normText(cell);
   // match exact hoặc header có thêm chữ vẫn bắt được
   return keys.some(k => c === k || c.includes(k));
 }
@@ -132,9 +132,9 @@ export async function GET(req) {
 
     // nếu dòng dưới cũng có vẻ là sub-header thì merge 2 dòng
     const header2LooksLikeSub =
-      header2.map(norm).join("|").includes("H") ||
-      header2.map(norm).join("|").includes("9") ||
-      header2.map(norm).join("|").includes("10");
+      header2.map(normText).join("|").includes("H") ||
+      header2.map(normText).join("|").includes("9") ||
+      header2.map(normText).join("|").includes("10");
 
     const headers = header2LooksLikeSub ? mergeHeaders(header1, header2) : header1;
     const dataStart = headerRowIndex + (header2LooksLikeSub ? 2 : 1);
