@@ -29,26 +29,38 @@ function toNumberSafe(v) {
  * - ưu tiên EXACT match trước
  * - sau đó mới includes
  */
-function findIdx(headers, candidates) {
-  const H = headers.map(norm);
-
-  // 1) exact
-  for (const c of candidates) {
-    const cc = norm(c);
-    const idx = H.findIndex((x) => x === cc);
-    if (idx >= 0) return idx;
-  }
-
-  // 2) includes
-  for (const c of candidates) {
-    const cc = norm(c);
-    if (!cc) continue;
-    const idx = H.findIndex((x) => x.includes(cc));
-    if (idx >= 0) return idx;
-  }
-
-  return -1;
+function norm(s) {
+  return String(s ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "");
 }
+
+function dateKeys(dateStr) {
+  const s = String(dateStr || "").trim();
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
+  if (!m) return [s];
+
+  const dd = String(m[1]).padStart(2, "0");
+  const mm = String(m[2]).padStart(2, "0");
+  const yyyy = m[3] ? (m[3].length === 2 ? `20${m[3]}`: m[3]) : "";
+
+  const short = `${dd}/${mm}`;                       // 24/12
+  const full  = yyyy ? `${dd}/${mm}/${yyyy}` : short; // 24/12/2025
+  return yyyy ? [full, short] : [short];
+}
+
+function matchDateCell(cell, dateStr) {
+  const keys = dateKeys(dateStr).map(norm);
+  const c = norm(cell);
+  // match exact hoặc header có thêm chữ vẫn bắt được
+  return keys.some(k => c === k || c.includes(k));
+}
+
+// ===== dùng để tìm cột ngày trong headers =====
+const dateParam = searchParams.get("date") || "";
+const dateColIdx = headers.findIndex(h => matchDateCell(h, dateParam));
+
 
 function mergeHeaders(rowA = [], rowB = []) {
   const n = Math.max(rowA.length, rowB.length);
