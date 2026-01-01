@@ -1,7 +1,7 @@
 // app/api/_lib/googleSheetsClient.js
 
 import { google } from "googleapis";
-import { pickServiceAccount } from "./pickServiceAccount";
+import { pickServiceAccount } from "../pickServiceAccount";
 
 let _sheets = null;
 

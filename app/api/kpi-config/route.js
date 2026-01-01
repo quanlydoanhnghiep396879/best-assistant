@@ -1,37 +1,59 @@
-import { readRangeA1, parseVNDateToTime } from "../_lib/googleSheetsClient";
-
 export const runtime = "nodejs";
 
-export async function GET(req) {
+import { NextResponse } from "next/server";
+import { readRangeA1 } from "../googleSheetsClient";
+
+function extractDateFromCell(v) {
+  const s = String(v ?? "").trim();
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
+  if (!m) return null;
+
+  const dd = String(m[1]).padStart(2, "0");
+  const mm = String(m[2]).padStart(2, "0");
+  const yyyy = m[3] ? (m[3].length === 2 ? `20${m[3]}` : m[3]) : "";
+
+  return yyyy ? `${dd}/${mm}/${yyyy}` : `${dd}/${mm}`;
+}
+
+function todayYearVN() {
+  const now = new Date();
+  const vn = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Ho_Chi_Minh" }));
+  return vn.getFullYear();
+}
+
+function sortKeyVNDate(d) {
+  const year = todayYearVN();
+  const m = String(d).match(/^(\d{2})\/(\d{2})(?:\/(\d{4}))?$/);
+  if (!m) return 0;
+  const dd = Number(m[1]);
+  const mm = Number(m[2]);
+  const yyyy = m[3] ? Number(m[3]) : year;
+  return new Date(yyyy, mm - 1, dd).getTime();
+}
+
+export async function GET() {
   try {
-    const { searchParams } = new URL(req.url);
-    const list = searchParams.get("list");
+    const sheetName = process.env.KPI_SHEET_NAME || "KPI";
+    const values = await readRangeA1(`${sheetName}!A1:AZ3000`);
 
-    // Sheet CONFIG_KPI: cột A = DATE, cột B = RANGE (như ảnh bạn)
-    // Ví dụ:
-    // A2: 23/12/2025   B2: KPI!A19:AZ37
-    // A3: 24/12/2025   B3: KPI!A2:AZ18
-    const values = await readRangeA1("CONFIG_KPI!A2:B1000");
+    const dates = new Map();
 
-    const map = {};
-    for (const row of values) {
-      const date = (row?.[0] || "").trim();
-      const range = (row?.[1] || "").trim();
-      if (!date || !range) continue;
-      map[date] = range;
+    for (const row of values || []) {
+      for (const cell of row || []) {
+        const d = extractDateFromCell(cell);
+        if (d) {
+          dates.set(d, d);
+          break;
+        }
+      }
     }
 
-    if (list === "1") {
-      const dates = Object.keys(map)
-        .sort((a, b) => parseVNDateToTime(a) - parseVNDateToTime(b)); // ✅ 23 trước 24
+    const out = Array.from(dates.values()).sort((a, b) => sortKeyVNDate(b) - sortKeyVNDate(a)); // mới nhất trước
 
-      return Response.json({ ok: true, dates });
-    }
-
-    return Response.json({ ok: true, map });
+    return NextResponse.json({ ok: true, dates: out });
   } catch (e) {
-    return Response.json(
-      { ok: false, error: "KPI_CONFIG_ERROR", message: String(e.message || e) },
+    return NextResponse.json(
+      { ok: false, error: "KPI_CONFIG_ERROR", message: String(e?.message || e) },
       { status: 500 }
     );
   }
