@@ -1,7 +1,7 @@
 // app/api/check-kpi/route.js
 
-import { readValues } from "../googleSheetsClient";
-import { sheetNames } from "../sheetNames";
+import { readValues } from "../_lib/googleSheetsClient";
+import { sheetNames } from "../_lib/sheetNames";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
