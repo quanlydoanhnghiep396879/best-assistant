@@ -1,67 +1,55 @@
-
+// app/api/_lib/googleSheetsClient.js
 import { google } from "googleapis";
+import { pickServiceAccount } from "./pickServiceAccount";
 
-function pickServiceAccount() {
-  // Ưu tiên JSON (raw hoặc base64)
-  const b64 =
-    process.env.GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 ||
-    process.env.GOOGLE_SERVICE_ACCOUNT_BASE64;
-
-  if (b64) {
-    const jsonText = Buffer.from(b64, "base64").toString("utf8");
-    return JSON.parse(jsonText);
-  }
-
-  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-  if (raw) {
-    return JSON.parse(raw);
-  }
-
-  // Fallback: email + private key (raw hoặc base64)
-  const client_email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-
-  let private_key = process.env.GOOGLE_PRIVATE_KEY || "";
-  if (!private_key && process.env.GOOGLE_PRIVATE_KEY_BASE64) {
-    private_key = Buffer.from(process.env.GOOGLE_PRIVATE_KEY_BASE64, "base64").toString("utf8");
-  }
-
-  // Vercel hay lưu \n dạng text => đổi về xuống dòng thật
-  private_key = private_key.replace(/\\n/g, "\n");
-
-  if (!client_email || !private_key) {
-    throw new Error("Missing service account credentials (email/private_key or json).");
-  }
-
-  return { client_email, private_key };
+// ✅ Tên các sheet lấy từ ENV (nếu không có thì dùng mặc định)
+export function sheetNames() {
+  return {
+    KPI_SHEET_NAME: process.env.KPI_SHEET_NAME || "KPI",
+    CONFIG_KPI_SHEET_NAME: process.env.CONFIG_KPI_SHEET_NAME || "CONFIG_KPI",
+    MAIL_LOG_SHEET_NAME: process.env.MAIL_LOG_SHEET_NAME || "MAIL_LOG",
+  };
 }
 
-let _sheets = null;
+function getSpreadsheetId() {
+  const id = process.env.GOOGLE_SHEET_ID;
+  if (!id) throw new Error("Missing GOOGLE_SHEET_ID");
+  return id;
+}
 
-export function getSheetsClient() {
-  if (_sheets) return _sheets;
+const SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"];
 
-  const sa = pickServiceAccount();
+let _cached = null;
+
+export async function getSheetsClient() {
+  if (_cached) return _cached;
+
+  const sa = pickServiceAccount(); // { client_email, private_key }
+  if (!sa?.client_email || !sa?.private_key) {
+    throw new Error("Missing service account email/private key (ENV not loaded)");
+  }
 
   const auth = new google.auth.JWT({
     email: sa.client_email,
     key: sa.private_key,
-    scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
+    scopes: SCOPES,
   });
 
-  _sheets = google.sheets({ version: "v4", auth });
-  return _sheets;
+  const sheets = google.sheets({ version: "v4", auth });
+
+  _cached = { sheets, spreadsheetId: getSpreadsheetId() };
+  return _cached;
 }
 
+// ✅ Đọc dữ liệu A1 range
 export async function readValues(rangeA1) {
-  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
-  if (!spreadsheetId) throw new Error("Missing GOOGLE_SHEET_ID");
+  const { sheets, spreadsheetId } = await getSheetsClient();
 
-  const sheets = getSheetsClient();
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range: rangeA1,
     valueRenderOption: "UNFORMATTED_VALUE",
   });
 
-  return res.data.values || [];
+  return res?.data?.values || [];
 }
