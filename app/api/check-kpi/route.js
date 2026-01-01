@@ -1,4 +1,6 @@
 // app/api/check-kpi/route.js
+export const runtime = "nodejs";
+
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
 

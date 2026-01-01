@@ -1,79 +1,131 @@
+// app/_lib/googleSheetsClient.js
 import { google } from "googleapis";
 
-let _sheets = null;
-
-function requireEnv(name) {
+/** ========= helpers: env ========= */
+function mustEnv(name) {
   const v = process.env[name];
-  if (!v) throw new Error(`Missing env: ${name}`);
-  return v;
+  if (v === undefined || v === null || String(v).trim() === "") return null;
+  return String(v);
 }
 
-function getServiceAccount() {
-  // Ưu tiên: base64 của toàn bộ JSON service account
-  const b64 = process.env.GOOGLE_SERVICE_ACCOUNT_BASE64;
-  if (b64) {
-    const jsonText = Buffer.from(b64, "base64").toString("utf8");
-    const sa = JSON.parse(jsonText);
-
-    if (!sa.client_email) throw new Error("Service account JSON missing client_email");
-    if (!sa.private_key) throw new Error("Service account JSON missing private_key");
-
-    // Vercel đôi khi lưu \n thành \\n
-    sa.private_key = String(sa.private_key).replace(/\\n/g, "\n").trim();
-    return sa;
+function pickEnv(...names) {
+  for (const n of names) {
+    const v = mustEnv(n);
+    if (v) return v;
   }
-
-  // Fallback nếu bạn muốn giữ kiểu cũ
-  const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-  const privateKeyB64 = process.env.GOOGLE_PRIVATE_KEY_BASE64;
-
-  if (clientEmail && privateKeyB64) {
-    const key = Buffer.from(privateKeyB64, "base64").toString("utf8").replace(/\\n/g, "\n").trim();
-    return { client_email: clientEmail, private_key: key };
-  }
-
-  throw new Error("Missing env: GOOGLE_SERVICE_ACCOUNT_BASE64 (recommended)");
+  return null;
 }
 
-export async function getSheetsClient() {
-  if (_sheets) return _sheets;
+function decodeBase64ToUtf8(b64) {
+  // Vercel env có thể dính khoảng trắng/newline => trim
+  const clean = String(b64 || "").trim();
+  if (!clean) return "";
+  return Buffer.from(clean, "base64").toString("utf8");
+}
 
-  const sa = getServiceAccount();
+function normalizePrivateKey(key) {
+  if (!key) return "";
+  // nhiều người lưu key dạng \n => phải đổi lại thành newline thật
+  return String(key).replace(/\\n/g, "\n");
+}
 
-  // kiểm tra nhanh PEM
-  if (!sa.private_key.includes("BEGIN PRIVATE KEY")) {
-    throw new Error("Invalid private_key: not a PEM key (BEGIN PRIVATE KEY not found)");
+/** ========= service account resolver ========= */
+function getServiceAccountFromEnv() {
+  // 1) full JSON base64
+  const saB64 = pickEnv("GOOGLE_SERVICE_ACCOUNT_BASE64");
+  if (saB64) {
+    const jsonText = decodeBase64ToUtf8(saB64);
+    try {
+      return JSON.parse(jsonText);
+    } catch (e) {
+      throw new Error("GOOGLE_SERVICE_ACCOUNT_BASE64 is not valid JSON after base64 decode.");
+    }
+  }
+
+  // 2) full JSON raw
+  const saJson = pickEnv("GOOGLE_SERVICE_ACCOUNT_JSON");
+  if (saJson) {
+    try {
+      return JSON.parse(saJson);
+    } catch (e) {
+      throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON.");
+    }
+  }
+
+  // 3) email + private key (raw or base64)
+  const email = pickEnv("GOOGLE_SERVICE_ACCOUNT_EMAIL", "GOOGLE_CLIENT_EMAIL");
+  const keyRaw = pickEnv("GOOGLE_PRIVATE_KEY");
+  const keyB64 = pickEnv("GOOGLE_PRIVATE_KEY_BASE64");
+
+  const privateKey =
+    keyRaw ? normalizePrivateKey(keyRaw) :
+    keyB64 ? normalizePrivateKey(decodeBase64ToUtf8(keyB64)) :
+    "";
+
+  if (email && privateKey) {
+    return { client_email: email, private_key: privateKey };
+  }
+
+  // không có gì
+  const missing = [];
+  if (!saB64 && !saJson) {
+    if (!email) missing.push("GOOGLE_SERVICE_ACCOUNT_EMAIL");
+    if (!keyRaw && !keyB64) missing.push("GOOGLE_PRIVATE_KEY or GOOGLE_PRIVATE_KEY_BASE64");
+  }
+
+  throw new Error(
+    `Missing service account credentials. Provide GOOGLE_SERVICE_ACCOUNT_BASE64 (recommended) OR GOOGLE_SERVICE_ACCOUNT_JSON OR GOOGLE_SERVICE_ACCOUNT_EMAIL + (GOOGLE_PRIVATE_KEY/GOOGLE_PRIVATE_KEY_BASE64). Missing: ${missing.join(", ")}`
+  );
+}
+
+/** ========= sheets client ========= */
+let _cached = null;
+
+export function getSheetsClient() {
+  if (_cached) return _cached;
+
+  const sa = getServiceAccountFromEnv();
+
+  const clientEmail = sa.client_email;
+  const privateKey = normalizePrivateKey(sa.private_key);
+
+  if (!clientEmail || !privateKey) {
+    throw new Error("Service account JSON missing client_email or private_key.");
   }
 
   const auth = new google.auth.JWT({
-    email: sa.client_email,
-    key: sa.private_key,
+    email: clientEmail,
+    key: privateKey,
     scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
   });
 
   const sheets = google.sheets({ version: "v4", auth });
-  _sheets = sheets;
+  _cached = sheets;
   return sheets;
 }
 
-export async function readRangeA1(a1Range, opts = {}) {
-  const sheets = await getSheetsClient();
-  const spreadsheetId = requireEnv("GOOGLE_SHEET_ID");
+export function getSpreadsheetId() {
+  const id = pickEnv("GOOGLE_SHEET_ID", "SPREADSHEET_ID");
+  if (!id) throw new Error("Missing GOOGLE_SHEET_ID.");
+  return id;
+}
+
+export function getKpiSheetName() {
+  // bạn có thể đổi đúng tên biến bạn đang dùng ở đây
+  return pickEnv("KPI_SHEET_NAME", "KPI_SHEET_TAB", "KPI_SHEET") || "KPI";
+}
+
+/** ========= convenience read ========= */
+export async function readRange(rangeA1) {
+  const sheets = getSheetsClient();
+  const spreadsheetId = getSpreadsheetId();
 
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: a1Range,
-    valueRenderOption: opts.valueRenderOption || "FORMATTED_VALUE",
-    dateTimeRenderOption: opts.dateTimeRenderOption || "FORMATTED_STRING",
+    range: rangeA1,
+    valueRenderOption: "UNFORMATTED_VALUE",
+    dateTimeRenderOption: "FORMATTED_STRING",
   });
 
   return res.data.values || [];
-}
-
-// Parse dd/mm/yyyy
-export function parseVNDateToTime(s) {
-  if (!s) return 0;
-  const [dd, mm, yyyy] = String(s).split("/").map((x) => parseInt(x, 10));
-  if (!dd || !mm || !yyyy) return 0;
-  return new Date(yyyy, mm - 1, dd).getTime();
 }
