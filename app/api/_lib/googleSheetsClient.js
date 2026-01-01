@@ -1,6 +1,6 @@
 // app/api/_lib/googleSheetsClient.js
 import { google } from "googleapis";
-import { pickServiceAccount } from "./pickServiceAccount";
+import { pickServiceAccount } from "../pickServiceAccount";
 
 // ✅ Tên các sheet lấy từ ENV (nếu không có thì dùng mặc định)
 export function sheetNames() {
