@@ -1,7 +1,8 @@
 export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
-import { readRangeA1 } from "../googleSheetsClient";
+import { readValues } from "../_lib/googleSheetsClient";
+import { sheetNames } from "../_lib/sheetNames";
 
 function extractDateFromCell(v) {
   const s = String(v ?? "").trim();
