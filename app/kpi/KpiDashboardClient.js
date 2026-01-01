@@ -1,249 +1,187 @@
-// app/kpi/KpiDashboardClient.js
+// app/kpi/kpiDashboardClient.js
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
 import "./kpi.css";
 
-function cls(...xs) {
-  return xs.filter(Boolean).join(" ");
+function Badge({ text, type }) {
+  return <span className={`badge ${type}`}>{text}</span>;
+}
+
+function statusType(s) {
+  if (s === "ĐỦ" || s === "VƯỢT") return "ok";
+  if (s === "THIẾU") return "bad";
+  return "muted";
 }
 
 export default function KpiDashboardClient() {
-  const [loading, setLoading] = useState(true);
+  const [dates, setDates] = useState([]);
+  const [chosenDate, setChosenDate] = useState("");
+  const [lines, setLines] = useState([]);
+  const [chosenLine, setChosenLine] = useState("TỔNG HỢP");
+  const [data, setData] = useState(null);
   const [err, setErr] = useState("");
 
-  const [dates, setDates] = useState([]);
-  const [hourCandidates, setHourCandidates] = useState([]);
-
-  const [date, setDate] = useState("");     // dd/mm/yyyy
-  const [hour, setHour] = useState("");     // "08:00"
-
-  const [perf, setPerf] = useState([]);
-  const [qc, setQc] = useState([]);
-  const [stats, setStats] = useState(null);
-
-  async function fetchData(nextDate, nextHour) {
-    setLoading(true);
+  async function load(nextDate, nextLine) {
     setErr("");
-    try {
-      const params = new URLSearchParams();
-      if (nextDate) params.set("date", nextDate);
-      if (nextHour) params.set("hour", nextHour);
+    const qs = new URLSearchParams();
+    if (nextDate) qs.set("date", nextDate);
+    if (nextLine) qs.set("line", nextLine);
 
-      const res = await fetch(`/api/check-kpi?${params.toString()}`, { cache: "no-store" });
-      const json = await res.json();
-
-      if (!json.ok) {
-        setErr(json.error || "Unknown error");
-        setPerf([]);
-        setQc([]);
-        setStats(null);
-        setDates(json?.meta?.dates || []);
-        setHourCandidates(json?.meta?.hourCandidates || []);
-        return;
-      }
-
-      setDates(json.meta?.dates || []);
-      setHourCandidates(json.meta?.hourCandidates || []);
-      setStats(json.meta?.stats || null);
-
-      // set default date/hour if empty
-      if (!nextDate) setDate(json.date || "");
-      if (!nextHour) setHour(json.meta?.selectedHour || "");
-
-      setPerf(json.perf || []);
-      setQc(json.qc || []);
-    } catch (e) {
-      setErr(e?.message || String(e));
-    } finally {
-      setLoading(false);
+    const res = await fetch(`/api/check-kpi?${qs.toString()}`, { cache: "no-store" });
+    const j = await res.json();
+    if (!j.ok) {
+      setErr(j.error || "Lỗi không rõ");
+      setData(null);
+      return;
     }
+
+    setDates(j.dates || []);
+    setLines(j.lines || []);
+    setChosenDate(j.chosenDate || "");
+    setChosenLine(j.selectedLine || "TỔNG HỢP");
+    setData(j);
   }
 
-  // first load
   useEffect(() => {
-    fetchData("", "");
+    load("", "TỔNG HỢP");
   }, []);
 
-  // auto refresh
-  useEffect(() => {
-    const t = setInterval(() => {
-      fetchData(date, hour);
-    }, 20000);
-    return () => clearInterval(t);
-  }, [date, hour]);
-
-  const perfSummary = useMemo(() => {
-    const ok = perf.filter(x => x.ok).length;
-    return { total: perf.length, ok, fail: perf.length - ok };
-  }, [perf]);
-
-  const qcSummary = useMemo(() => {
-    const ok = qc.filter(x => x.ok).length;
-    return { total: qc.length, ok, fail: qc.length - ok };
-  }, [qc]);
+  const hourlyRows = useMemo(() => data?.hourly?.hours || [], [data]);
 
   return (
-    <div className="kpi-page">
-      <div className="kpi-header">
+    <div className="kpi-wrap">
+      <div className="kpi-top">
         <div>
-          <div className="kpi-title">KPI Dashboard</div>
-          <div className="kpi-sub">
-            {stats ? (
-              <>
-                <span>Hiệu suất: Tổng {stats.perf_total} | Đạt {stats.perf_ok} | Không đạt {stats.perf_fail}</span>
-                <span className="sep">•</span>
-                <span>Kiểm: Tổng {stats.qc_total} | OK {stats.qc_ok} | Lỗi {stats.qc_fail}</span>
-              </>
-            ) : (
-              <span>Chọn ngày để xem dữ liệu</span>
-            )}
-          </div>
+          <div className="title">KPI Dashboard</div>
+          <div className="sub">Chọn ngày và chuyền để xem dữ liệu</div>
         </div>
 
-        <div className="kpi-controls">
-          <div className="ctrl">
+        <div className="controls">
+          <div className="control">
             <label>Chọn ngày</label>
             <select
-              value={date}
+              value={chosenDate}
               onChange={(e) => {
                 const v = e.target.value;
-                setDate(v);
-                fetchData(v, hour);
+                setChosenDate(v);
+                load(v, chosenLine);
               }}
             >
-              <option value="">(Tự chọn ngày mới nhất)</option>
-              {dates.map(d => (
-                <option key={d} value={d}>{d}</option>
+              {dates.length === 0 ? <option value="">(Chưa có ngày)</option> : null}
+              {dates.map((d) => (
+                <option key={d} value={d}>
+                  {d}
+                </option>
               ))}
             </select>
           </div>
 
-          <div className="ctrl">
-            <label>Định mức giờ</label>
+          <div className="control">
+            <label>Chọn chuyền</label>
             <select
-              value={hour}
+              value={chosenLine}
               onChange={(e) => {
                 const v = e.target.value;
-                setHour(v);
-                fetchData(date, v);
+                setChosenLine(v);
+                load(chosenDate, v);
               }}
-              disabled={!hourCandidates.length}
             >
-              {!hourCandidates.length ? (
-                <option value="">(Chưa có cột giờ)</option>
-              ) : (
-                <>
-                  <option value="">(Mặc định giờ mới nhất)</option>
-                  {hourCandidates.map(h => (
-                    <option key={h} value={h}>{h}</option>
-                  ))}
-                </>
-              )}
+              {(lines.length ? lines : ["TỔNG HỢP"]).map((ln) => (
+                <option key={ln} value={ln}>
+                  {ln}
+                </option>
+              ))}
             </select>
           </div>
 
-          <button className="btn" onClick={() => fetchData(date, hour)} disabled={loading}>
-            {loading ? "Đang tải..." : "Refresh"}
+          <button className="btn" onClick={() => load(chosenDate, chosenLine)}>
+            Refresh
           </button>
         </div>
       </div>
 
       {err ? (
-        <div className="kpi-error">
-          <div className="kpi-error-title">Lỗi</div>
-          <div className="kpi-error-text">{err}</div>
+        <div className="error">
+          <div className="error-title">Lỗi</div>
+          <div className="error-msg">{err}</div>
         </div>
       ) : null}
 
-      <div className="kpi-grid-2">
-        {/* TABLE 1: HIỆU SUẤT */}
+      <div className="grid-2">
+        {/* Bảng trái: để khung sẵn, bạn muốn lấy HS ở vùng nào trong sheet thì mình map tiếp */}
         <div className="card">
-          <div className="card-title">
-            Hiệu suất trong ngày (so với định mức)
-            <span className="chip">
-              Tổng {perfSummary.total} • Đạt {perfSummary.ok} • Không đạt {perfSummary.fail}
-            </span>
+          <div className="card-head">
+            <div className="card-title">Hiệu suất trong ngày (so với định mức)</div>
+            <div className="pill">Đang dùng khung UI</div>
           </div>
 
-          <div className="table-wrap">
-            <table className="kpi-table">
-              <thead>
-                <tr>
-                  <th>Chuyền/BP</th>
-                  <th>Mã hàng</th>
-                  <th className="num">HS đạt</th>
-                  <th className="num">HS ĐM</th>
-                  <th>Trạng thái</th>
-                </tr>
-              </thead>
-              <tbody>
-                {perf.map((x, i) => (
-                  <tr key={i} className={x.ok ? "row-ok" : "row-bad"}>
-                    <td className="mono">{x.line}</td>
-                    <td className="mono">{x.mh || "-"}</td>
-                    <td className="num">{x.hs_dat}</td>
-                    <td className="num">{x.hs_dm}</td>
-                    <td>
-                      <span className={cls("badge", x.ok ? "badge-ok" : "badge-bad")}>
-                        {x.status}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-                {!perf.length ? (
-                  <tr><td colSpan={5} className="empty">Không có dữ liệu</td></tr>
-                ) : null}
-              </tbody>
-            </table>
+          <div className="table">
+            <div className="thead">
+              <div>Chuyền/BP</div>
+              <div>Mã hàng</div>
+              <div>HS đạt</div>
+              <div>HS ĐM</div>
+              <div>Trạng thái</div>
+            </div>
+
+            <div className="tbody">
+              <div className="row">
+                <div>{chosenLine}</div>
+                <div>-</div>
+                <div>—</div>
+                <div>—</div>
+                <div>
+                  <Badge text="(chưa map HS)" type="muted" />
+                </div>
+              </div>
+            </div>
+
+            <div className="hint">
+              * Nếu bạn chỉ mình “HS đạt/HS ĐM” đang nằm cột nào/khối nào trong KPI sheet, mình map phát là ra đủ xanh/đỏ.
+            </div>
           </div>
         </div>
 
-        {/* TABLE 2: KIỂM LŨY TIẾN */}
+        {/* Bảng phải: lũy tiến theo giờ */}
         <div className="card">
-          <div className="card-title">
-            Kiểm lũy tiến (so với định mức giờ)
-            <span className="chip">
-              Tổng {qcSummary.total} • OK {qcSummary.ok} • Lỗi {qcSummary.fail}
-            </span>
+          <div className="card-head">
+            <div className="card-title">Kiểm lũy tiến theo giờ (so với ĐM/H)</div>
+            <div className="pill">
+              DM/H: <b>{data?.hourly?.dmH ?? 0}</b>
+            </div>
           </div>
 
-          <div className="table-wrap">
-            <table className="kpi-table">
-              <thead>
-                <tr>
-                  <th>Chuyền/BP</th>
-                  <th>Mã hàng</th>
-                  <th className="num">Tổng kiểm đạt</th>
-                  <th className="num">ĐM giờ</th>
-                  <th className="num">Chênh</th>
-                  <th>Trạng thái</th>
-                </tr>
-              </thead>
-              <tbody>
-                {qc.map((x, i) => (
-                  <tr key={i} className={x.ok ? "row-ok" : "row-bad"}>
-                    <td className="mono">{x.line}</td>
-                    <td className="mono">{x.mh || "-"}</td>
-                    <td className="num">{x.totalKiemDat}</td>
-                    <td className="num">{x.dmGio}</td>
-                    <td className={cls("num", x.delta < 0 ? "neg" : "pos")}>{x.delta}</td>
-                    <td>
-                      <span className={cls("badge", x.ok ? "badge-ok" : "badge-bad")}>
-                        {x.status}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-                {!qc.length ? (
-                  <tr><td colSpan={6} className="empty">Không có dữ liệu</td></tr>
-                ) : null}
-              </tbody>
-            </table>
-          </div>
+          <div className="table">
+            <div className="thead">
+              <div>Giờ</div>
+              <div>Tổng kiểm đạt</div>
+              <div>ĐM lũy tiến</div>
+              <div>Chênh</div>
+              <div>Trạng thái</div>
+            </div>
 
-          <div className="hint">
-            * Logic: = hoặc &gt; định mức → xanh. &lt; định mức → đỏ.
+            <div className="tbody">
+              {hourlyRows.length === 0 ? (
+                <div className="empty">Không có dữ liệu</div>
+              ) : (
+                hourlyRows.map((h) => (
+                  <div className="row" key={h.label}>
+                    <div>{h.label}</div>
+                    <div>{h.actual}</div>
+                    <div>{h.target}</div>
+                    <div className={h.diff < 0 ? "neg" : "pos"}>{h.diff}</div>
+                    <div>
+                      <Badge text={h.status} type={statusType(h.status)} />
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="hint">
+              * Logic: = ĐỦ (xanh), &gt; VƯỢT (xanh), &lt; THIẾU (đỏ). Lấy trực tiếp từ bảng “THỐNG KÊ HIỆU SUẤT THEO GIỜ, NGÀY”.
+            </div>
           </div>
         </div>
       </div>
