@@ -1,155 +1,252 @@
+// app/kpi/KpiDashboardClient.js
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import "./kpi.css";
+
+function cls(...xs) {
+  return xs.filter(Boolean).join(" ");
+}
 
 export default function KpiDashboardClient() {
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
+
   const [dates, setDates] = useState([]);
-  const [date, setDate] = useState("");
-  const [loadingDates, setLoadingDates] = useState(false);
-  const [loadingData, setLoadingData] = useState(false);
+  const [hourCandidates, setHourCandidates] = useState([]);
 
-  const [error, setError] = useState("");
-  const [daily, setDaily] = useState([]);
+  const [date, setDate] = useState("");     // dd/mm/yyyy
+  const [hour, setHour] = useState("");     // "08:00"
 
-  // load dates list
+  const [perf, setPerf] = useState([]);
+  const [qc, setQc] = useState([]);
+  const [stats, setStats] = useState(null);
+
+  async function fetchData(nextDate, nextHour) {
+    setLoading(true);
+    setErr("");
+    try {
+      const params = new URLSearchParams();
+      if (nextDate) params.set("date", nextDate);
+      if (nextHour) params.set("hour", nextHour);
+
+      const res = await fetch(`/api/check-kpi?${params.toString()}`, { cache: "no-store" });
+      const json = await res.json();
+
+      if (!json.ok) {
+        setErr(json.error || "Unknown error");
+        setPerf([]);
+        setQc([]);
+        setStats(null);
+        setDates(json?.meta?.dates || []);
+        setHourCandidates(json?.meta?.hourCandidates || []);
+        return;
+      }
+
+      setDates(json.meta?.dates || []);
+      setHourCandidates(json.meta?.hourCandidates || []);
+      setStats(json.meta?.stats || null);
+
+      // set default date/hour if empty
+      if (!nextDate) setDate(json.date || "");
+      if (!nextHour) setHour(json.meta?.selectedHour || "");
+
+      setPerf(json.perf || []);
+      setQc(json.qc || []);
+    } catch (e) {
+      setErr(e?.message || String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // first load
   useEffect(() => {
-    let alive = true;
-    setLoadingDates(true);
-    setError("");
-
-    fetch("/api/kpi-config", { cache: "no-store" })
-      .then((r) => r.json())
-      .then((j) => {
-        if (!alive) return;
-        if (!j?.ok) throw new Error(j?.message || j?.error || "Load dates failed");
-        const list = Array.isArray(j.dates) ? j.dates : [];
-        setDates(list);
-
-        // default chọn ngày mới nhất (list đã sort mới nhất trước)
-        if (!date && list.length) setDate(list[0]);
-      })
-      .catch((e) => alive && setError(String(e?.message || e)))
-      .finally(() => alive && setLoadingDates(false));
-
-    return () => {
-      alive = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    fetchData("", "");
   }, []);
 
-  // load data by date
+  // auto refresh
   useEffect(() => {
-    if (!date) return;
+    const t = setInterval(() => {
+      fetchData(date, hour);
+    }, 20000);
+    return () => clearInterval(t);
+  }, [date, hour]);
 
-    let alive = true;
-    setLoadingData(true);
-    setError("");
+  const perfSummary = useMemo(() => {
+    const ok = perf.filter(x => x.ok).length;
+    return { total: perf.length, ok, fail: perf.length - ok };
+  }, [perf]);
 
-    fetch(`/api/check-kpi?date=${encodeURIComponent(date)}`, { cache: "no-store" })
-      .then((r) => r.json())
-      .then((j) => {
-        if (!alive) return;
-        if (!j?.ok) throw new Error(j?.message || j?.error || "Load KPI failed");
-        setDaily(Array.isArray(j.daily) ? j.daily : []);
-      })
-      .catch((e) => alive && setError(String(e?.message || e)))
-      .finally(() => alive && setLoadingData(false));
-
-    return () => {
-      alive = false;
-    };
-  }, [date]);
-
-  const summary = useMemo(() => {
-    const ok = daily.filter((x) => x.status === "ĐẠT").length;
-    const bad = daily.filter((x) => x.status !== "ĐẠT").length;
-    return { ok, bad, total: daily.length };
-  }, [daily]);
+  const qcSummary = useMemo(() => {
+    const ok = qc.filter(x => x.ok).length;
+    return { total: qc.length, ok, fail: qc.length - ok };
+  }, [qc]);
 
   return (
-    <div style={{ padding: 16, fontFamily: "system-ui, Arial" }}>
-      <h2 style={{ margin: "0 0 12px 0" }}>KPI Dashboard</h2>
-
-      <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12 }}>
+    <div className="kpi-page">
+      <div className="kpi-header">
         <div>
-          <div style={{ fontSize: 12, opacity: 0.7 }}>Chọn ngày</div>
-          <select
-            value={date}
-            onChange={(e) => setDate(e.target.value)}
-            disabled={loadingDates || !dates.length}
-            style={{ padding: 8, minWidth: 180 }}
-          >
-            {dates.length === 0 ? (
-              <option value="">{loadingDates ? "Đang tải..." : "Không có ngày"}</option>
+          <div className="kpi-title">KPI Dashboard</div>
+          <div className="kpi-sub">
+            {stats ? (
+              <>
+                <span>Hiệu suất: Tổng {stats.perf_total} | Đạt {stats.perf_ok} | Không đạt {stats.perf_fail}</span>
+                <span className="sep">•</span>
+                <span>Kiểm: Tổng {stats.qc_total} | OK {stats.qc_ok} | Lỗi {stats.qc_fail}</span>
+              </>
             ) : (
-              dates.map((d) => (
-                <option key={d} value={d}>
-                  {d}
-                </option>
-              ))
+              <span>Chọn ngày để xem dữ liệu</span>
             )}
-          </select>
+          </div>
         </div>
 
-        <div style={{ fontSize: 13, opacity: 0.85 }}>
-          {loadingData ? "Đang tải dữ liệu..." : `Tổng: ${summary.total} | Đạt: ${summary.ok} | Không đạt: ${summary.bad}`}
+        <div className="kpi-controls">
+          <div className="ctrl">
+            <label>Chọn ngày</label>
+            <select
+              value={date}
+              onChange={(e) => {
+                const v = e.target.value;
+                setDate(v);
+                fetchData(v, hour);
+              }}
+            >
+              <option value="">(Tự chọn ngày mới nhất)</option>
+              {dates.map(d => (
+                <option key={d} value={d}>{d}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="ctrl">
+            <label>Định mức giờ</label>
+            <select
+              value={hour}
+              onChange={(e) => {
+                const v = e.target.value;
+                setHour(v);
+                fetchData(date, v);
+              }}
+              disabled={!hourCandidates.length}
+            >
+              {!hourCandidates.length ? (
+                <option value="">(Chưa có cột giờ)</option>
+              ) : (
+                <>
+                  <option value="">(Mặc định giờ mới nhất)</option>
+                  {hourCandidates.map(h => (
+                    <option key={h} value={h}>{h}</option>
+                  ))}
+                </>
+              )}
+            </select>
+          </div>
+
+          <button className="btn" onClick={() => fetchData(date, hour)} disabled={loading}>
+            {loading ? "Đang tải..." : "Refresh"}
+          </button>
         </div>
       </div>
 
-      {error ? (
-        <div style={{ padding: 12, background: "#ffecec", border: "1px solid #ffb3b3", marginBottom: 12 }}>
-          <b>Lỗi:</b> {error}
+      {err ? (
+        <div className="kpi-error">
+          <div className="kpi-error-title">Lỗi</div>
+          <div className="kpi-error-text">{err}</div>
         </div>
       ) : null}
 
-      <div style={{ overflowX: "auto" }}>
-        <table style={{ borderCollapse: "collapse", width: "100%" }}>
-          <thead>
-            <tr>
-              <th style={th}>Chuyền</th>
-              <th style={th}>MH</th>
-              <th style={th}>HS đạt</th>
-              <th style={th}>HS định mức</th>
-              <th style={th}>Trạng thái</th>
-            </tr>
-          </thead>
-          <tbody>
-            {daily.length === 0 ? (
-              <tr>
-                <td style={td} colSpan={5}>
-                  {loadingData ? "Đang tải..." : "Không có dữ liệu"}
-                </td>
-              </tr>
-            ) : (
-              daily.map((r, i) => (
-                <tr key={i}>
-                  <td style={td}>{r.line}</td>
-                  <td style={td}>{r.mh || ""}</td>
-                  <td style={td}>{Number(r.hs_dat || 0).toFixed(2)}%</td>
-                  <td style={td}>{Number(r.hs_dm || 0).toFixed(2)}%</td>
-                  <td style={td}>
-                    <b>{r.status}</b>
-                  </td>
+      <div className="kpi-grid-2">
+        {/* TABLE 1: HIỆU SUẤT */}
+        <div className="card">
+          <div className="card-title">
+            Hiệu suất trong ngày (so với định mức)
+            <span className="chip">
+              Tổng {perfSummary.total} • Đạt {perfSummary.ok} • Không đạt {perfSummary.fail}
+            </span>
+          </div>
+
+          <div className="table-wrap">
+            <table className="kpi-table">
+              <thead>
+                <tr>
+                  <th>Chuyền/BP</th>
+                  <th>Mã hàng</th>
+                  <th className="num">HS đạt</th>
+                  <th className="num">HS ĐM</th>
+                  <th>Trạng thái</th>
                 </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+              </thead>
+              <tbody>
+                {perf.map((x, i) => (
+                  <tr key={i} className={x.ok ? "row-ok" : "row-bad"}>
+                    <td className="mono">{x.line}</td>
+                    <td className="mono">{x.mh || "-"}</td>
+                    <td className="num">{x.hs_dat}</td>
+                    <td className="num">{x.hs_dm}</td>
+                    <td>
+                      <span className={cls("badge", x.ok ? "badge-ok" : "badge-bad")}>
+                        {x.status}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+                {!perf.length ? (
+                  <tr><td colSpan={5} className="empty">Không có dữ liệu</td></tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* TABLE 2: KIỂM LŨY TIẾN */}
+        <div className="card">
+          <div className="card-title">
+            Kiểm lũy tiến (so với định mức giờ)
+            <span className="chip">
+              Tổng {qcSummary.total} • OK {qcSummary.ok} • Lỗi {qcSummary.fail}
+            </span>
+          </div>
+
+          <div className="table-wrap">
+            <table className="kpi-table">
+              <thead>
+                <tr>
+                  <th>Chuyền/BP</th>
+                  <th>Mã hàng</th>
+                  <th className="num">Tổng kiểm đạt</th>
+                  <th className="num">ĐM giờ</th>
+                  <th className="num">Chênh</th>
+                  <th>Trạng thái</th>
+                </tr>
+              </thead>
+              <tbody>
+                {qc.map((x, i) => (
+                  <tr key={i} className={x.ok ? "row-ok" : "row-bad"}>
+                    <td className="mono">{x.line}</td>
+                    <td className="mono">{x.mh || "-"}</td>
+                    <td className="num">{x.totalKiemDat}</td>
+                    <td className="num">{x.dmGio}</td>
+                    <td className={cls("num", x.delta < 0 ? "neg" : "pos")}>{x.delta}</td>
+                    <td>
+                      <span className={cls("badge", x.ok ? "badge-ok" : "badge-bad")}>
+                        {x.status}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+                {!qc.length ? (
+                  <tr><td colSpan={6} className="empty">Không có dữ liệu</td></tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="hint">
+            * Logic: = hoặc &gt; định mức → xanh. &lt; định mức → đỏ.
+          </div>
+        </div>
       </div>
     </div>
   );
 }
-
-const th = {
-  border: "1px solid #ddd",
-  padding: 8,
-  textAlign: "left",
-  background: "#f6f6f6",
-  whiteSpace: "nowrap",
-};
-
-const td = {
-  border: "1px solid #ddd",
-  padding: 8,
-  whiteSpace: "nowrap",
-};
