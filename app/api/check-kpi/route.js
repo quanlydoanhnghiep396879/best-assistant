@@ -2,6 +2,8 @@
 import { readValues, sheetNames } from "../_lib/googleSheetsClient";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 function pad2(n) {
   return String(n).padStart(2, "0");
@@ -168,9 +170,8 @@ async function readConfigDates() {
 
 export async function GET(request) {
   try {
-    const url = new URL(request.url);
-    const qDate = url.searchParams.get("date") || "";
-    const qHour = url.searchParams.get("hour") || "";
+    const qDate = request.nextUrl.searchParams.get("date") || "";
+    const qHour = request.nextUrl.searchParams.get("hour") || "";
 
     const { KPI_SHEET_NAME } = sheetNames();
 
