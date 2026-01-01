@@ -1,5 +1,5 @@
 import KpiDashboardClient from "./KpiDashboardClient";
 
-export default function KPIPage() {
+export default function Page() {
   return <KpiDashboardClient />;
 }
