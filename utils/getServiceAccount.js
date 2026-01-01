@@ -1,6 +1,6 @@
 export function getServiceAccount() {
-  const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-  let privateKey = process.env.GOOGLE_PRIVATE_KEY;
+  const email = process.env.GOOGLE_SERVICE_ACCOUNT_BASE64;
+  let privateKey = process.env.GOOGLE_PRIVATE_KEY_BASE64;
 
   if (!email || !privateKey) {
     throw new Error("Missing Google API credentials");
