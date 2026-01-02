@@ -1,206 +1,176 @@
-/* app/kpi/kpi.css */
-
-:root{
-  --bg: #0b1220;
-  --panel: rgba(255,255,255,0.06);
-  --panel2: rgba(255,255,255,0.08);
-  --line: rgba(255,255,255,0.12);
-  --text: #e5e7eb;
-  --muted: rgba(229,231,235,0.65);
-
-  --ok: rgba(16,185,129,0.25);
-  --okText: #34d399;
-
-  --warn: rgba(245,158,11,0.22);
-  --warnText: #fbbf24;
-
-  --bad: rgba(239,68,68,0.20);
-  --badText: #fb7185;
-}
-
-*{ box-sizing: border-box; }
-
-body{
-  margin:0;
-  background: radial-gradient(1200px 600px at 30% 20%, rgba(59,130,246,0.25), transparent 55%),
-              radial-gradient(900px 500px at 75% 35%, rgba(147,51,234,0.18), transparent 60%),
-              var(--bg);
-  color: var(--text);
+.diff.ok{ color: var(--okText); }
+.kpi-page{
+  min-height: 100vh;
+  background: #0b1220;
+  color: #e5e7eb;
+  padding: 18px;
   font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
 }
 
-.kpi-page{
-  padding: 18px 18px 28px;
-  max-width: 1280px;
-  margin: 0 auto;
-}
-
-.kpi-title{
+.title{
   font-size: 28px;
   font-weight: 800;
-  margin: 0 0 6px;
+  letter-spacing: .2px;
+}
+.subtitle{
+  opacity: .8;
+  margin-top: 4px;
 }
 
-.kpi-sub{
-  margin: 0 0 16px;
-  color: var(--muted);
-}
-
-.kpi-toolbar{
-  display:flex;
+.topbar{
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
   flex-wrap: wrap;
-  gap: 12px;
-  align-items: end;
   margin-bottom: 14px;
 }
 
-.field{
-  display:flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 220px;
+.controls{
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: flex-end;
 }
 
-label{
-  color: var(--muted);
-  font-size: 13px;
+.control label{
+  display: block;
+  font-size: 12px;
+  opacity: .85;
+  margin-bottom: 6px;
 }
 
 select{
-  width: 100%;
+  min-width: 200px;
   padding: 10px 12px;
   border-radius: 10px;
-  border: 1px solid var(--line);
-  background: rgba(15,23,42,0.75);
-  color: var(--text);
+  border: 1px solid rgba(255,255,255,.12);
+  background: rgba(255,255,255,.06);
+  color: #e5e7eb;              /* ✅ chữ không chói */
   outline: none;
 }
 
-select:focus{
-  border-color: rgba(59,130,246,0.65);
-  box-shadow: 0 0 0 3px rgba(59,130,246,0.18);
-}
-
-/* Fix option nền trắng/chói */
+/* ✅ option nền tối để không chói */
 select option{
-  background: #0f172a;
-  color: var(--text);
+  background: #0b1220;
+  color: #e5e7eb;
 }
 
 .btn{
   padding: 10px 14px;
   border-radius: 10px;
-  border: 1px solid var(--line);
-  background: rgba(255,255,255,0.06);
-  color: var(--text);
+  border: 1px solid rgba(255,255,255,.14);
+  background: rgba(255,255,255,.10);
+  color: #e5e7eb;
   cursor: pointer;
-  transition: 0.15s ease;
 }
-
-.btn:hover{
-  background: rgba(255,255,255,0.10);
+.btn:disabled{
+  opacity: .6;
+  cursor: not-allowed;
 }
 
 .grid{
-  display:grid;
-  grid-template-columns: 1.15fr 1fr;
+  display: grid;
+  grid-template-columns: 1.25fr 1fr;
   gap: 14px;
-  align-items: start;
 }
-
-@media (max-width: 980px){
+@media (max-width: 1100px){
   .grid{ grid-template-columns: 1fr; }
+  select{ min-width: 260px; }
 }
 
 .card{
-  background: var(--panel);
-  border: 1px solid var(--line);
+  background: rgba(255,255,255,.06);
+  border: 1px solid rgba(255,255,255,.10);
   border-radius: 14px;
   padding: 14px;
   overflow: hidden;
 }
 
-.card h3{
-  margin: 0 0 10px;
+.card-title{
   font-size: 16px;
   font-weight: 800;
+  margin-bottom: 10px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
 }
 
-.muted{
-  color: var(--muted);
-}
-
-/* Table: đảm bảo luôn nằm ngang */
-.kpi-table{
-  width:100%;
-  border-collapse: collapse;
-  border-spacing: 0;
-  table-layout: fixed;
-}
-
-.kpi-table th,
-.kpi-table td{
-  border-bottom: 1px solid rgba(255,255,255,0.08);
-  padding: 10px 10px;
+.right-note{
   font-size: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  opacity: .85;
+}
+
+.table-wrap{
+  overflow: auto;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,.08);
+}
+
+.tbl{
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 720px; /* ✅ giữ ngang đẹp */
+}
+.tbl th, .tbl td{
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(255,255,255,.06);
   white-space: nowrap;
 }
-
-.kpi-table th{
-  color: rgba(229,231,235,0.85);
+.tbl thead th{
+  background: rgba(255,255,255,.06);
   font-weight: 700;
   text-align: left;
-  background: rgba(255,255,255,0.05);
+}
+.tbl tbody tr:hover{
+  background: rgba(255,255,255,.04);
 }
 
-.right{ text-align: right; }
+.mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+.muted{ opacity: .7; text-align: center; padding: 18px 0; }
+
+.hint{
+  font-size: 12px;
+  opacity: .85;
+  margin-top: 10px;
+  line-height: 1.4;
+}
 
 .pill{
-  display:inline-block;
+  display: inline-block;
   padding: 4px 10px;
   border-radius: 999px;
   font-size: 12px;
-  border: 1px solid rgba(255,255,255,0.12);
+  font-weight: 700;
+  border: 1px solid rgba(255,255,255,.16);
+  background: rgba(255,255,255,.08);
 }
-
 .pill.ok{
-  background: var(--ok);
-  color: var(--okText);
+  background: rgba(34,197,94,.15);
+  border-color: rgba(34,197,94,.35);
+  color: #86efac;
 }
-
-.pill.warn{
-  background: var(--warn);
-  color: var(--warnText);
-}
-
 .pill.bad{
-  background: var(--bad);
-  color: var(--badText);
+  background: rgba(239,68,68,.15);
+  border-color: rgba(239,68,68,.35);
+  color: #fca5a5;
+}
+.pill.warn{
+  background: rgba(245,158,11,.15);
+  border-color: rgba(245,158,11,.35);
+  color: #fcd34d;
 }
 
-.split{
-  display:grid;
-  grid-template-columns: 1fr;
-  gap: 10px;
-}
+.pos{ color: #86efac; font-weight: 700; }
+.neg{ color: #fca5a5; font-weight: 700; }
 
-.hours-head{
-  display:flex;
-  gap: 10px;
-  align-items:center;
-  justify-content: space-between;
-  margin-bottom: 8px;
+.error{
+  margin: 10px 0 14px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(239,68,68,.35);
+  background: rgba(239,68,68,.12);
+  color: #fecaca;
 }
-
-.small{
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.diff{
-  font-weight: 800;
-}
-.diff.ok{ color: var(--okText); }
-.diff.bad{ color: var(--badText); }

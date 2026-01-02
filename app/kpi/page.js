@@ -1,38 +1,57 @@
-// app/kpi/page.jsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import "./kpi.css";
 
-export default function KpiPage() {
+function fmt(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return "-";
+  return x.toLocaleString("vi-VN");
+}
+function fmt2(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return "-";
+  return x.toFixed(2);
+}
+
+function StatusPill({ s }) {
+  const t = String(s || "").toUpperCase();
+  let cls = "pill";
+  if (t.includes("ĐẠT") || t.includes("ĐỦ") || t.includes("VƯỢT")) cls += " ok";
+  else if (t.includes("THIẾU") || t.includes("CHƯA ĐẠT")) cls += " bad";
+  else cls += " warn";
+  return <span className={cls}>{s || "-"}</span>;
+}
+
+export default function KPIPage() {
   const [dates, setDates] = useState([]);
   const [lines, setLines] = useState([]);
   const [date, setDate] = useState("");
   const [line, setLine] = useState("TỔNG HỢP");
-  const [data, setData] = useState(null);
+  const [dailyRows, setDailyRows] = useState([]);
+  const [hourly, setHourly] = useState({ line: "TỔNG HỢP", dmDay: 0, dmH: 0, hours: [] });
   const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
 
-  async function load(dateVal, lineVal) {
+  async function load(d = date, l = line) {
     setLoading(true);
+    setErr("");
     try {
       const qs = new URLSearchParams();
-      if (dateVal) qs.set("date", dateVal);
-      if (lineVal) qs.set("line", lineVal);
-
+      if (d) qs.set("date", d);
+      if (l) qs.set("line", l);
       const res = await fetch(`/api/check-kpi?${qs.toString()}`, { cache: "no-store" });
-      const j = await res.json();
+      const js = await res.json();
+      if (!js.ok) throw new Error(js.error || "API error");
 
-      setData(j);
-
-      const ds = j?.dates || [];
-      const ls = j?.lines || [];
-
-      setDates(ds);
-      setLines(ls);
-
-      // set default if empty
-      if (!dateVal && ds[0]) setDate(ds[0]);
-      if (!lineVal && ls.includes("TỔNG HỢP")) setLine("TỔNG HỢP");
+      setDates(js.dates || []);
+      setLines(js.lines || []);
+      setDate(js.chosenDate || d || "");
+      setLine(js.selectedLine || l || "TỔNG HỢP");
+      setDailyRows(js.dailyRows || []);
+      setHourly(js.hourly || { line: "TỔNG HỢP", dmDay: 0, dmH: 0, hours: [] });
+    } catch (e) {
+      setErr(String(e?.message || e));
     } finally {
       setLoading(false);
     }
@@ -40,162 +59,130 @@ export default function KpiPage() {
 
   useEffect(() => {
     load("", "TỔNG HỢP");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    if (!date) return;
-    load(date, line);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [date, line]);
-
-  const hourly = data?.hourly || { dmH: 0, dmDay: 0, hours: [], line: line };
-  const dailyRows = data?.dailyRows || [];
-
-  const dailyRowSelected = useMemo(() => {
-    if (!dailyRows.length) return null;
-    return dailyRows.find((r) => r.line === (data?.selectedLine || line)) || null;
-  }, [dailyRows, data?.selectedLine, line]);
+  const selectedDaily = useMemo(() => {
+    // nếu muốn chỉ hiện 1 chuyền đang chọn thì filter ở đây
+    return dailyRows;
+  }, [dailyRows]);
 
   return (
     <div className="kpi-page">
-      <div className="kpi-title">KPI Dashboard</div>
-      <div className="kpi-sub">Chọn ngày và chuyền để xem dữ liệu</div>
-
-      <div className="kpi-toolbar">
-        <div className="field">
-          <label>Chọn ngày</label>
-          <select value={date} onChange={(e) => setDate(e.target.value)}>
-            {dates.map((d) => (
-              <option key={d} value={d}>
-                {d}
-              </option>
-            ))}
-          </select>
+      <div className="topbar">
+        <div>
+          <div className="title">KPI Dashboard</div>
+          <div className="subtitle">Chọn ngày và chuyền để xem dữ liệu</div>
         </div>
 
-        <div className="field">
-          <label>Chọn chuyền</label>
-          <select value={line} onChange={(e) => setLine(e.target.value)}>
-            {lines.map((l) => (
-              <option key={l} value={l}>
-                {l}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <button className="btn" onClick={() => load(date, line)}>
-          {loading ? "Đang tải..." : "Refresh"}
-        </button>
-      </div>
-
-      <div className="grid">
-        {/* LEFT: Daily performance */}
-        <div className="card">
-          <h3>Hiệu suất trong ngày (so với định mức)</h3>
-
-          <table className="kpi-table">
-            <thead>
-              <tr>
-                <th>Chuyền/BP</th>
-                <th>Mã hàng</th>
-                <th className="right">HS đạt (%)</th>
-                <th className="right">HS ĐM (%)</th>
-                <th>Trạng thái</th>
-              </tr>
-            </thead>
-            <tbody>
-              {dailyRows.length ? (
-                dailyRows.map((r) => (
-                  <tr key={r.line}>
-                    <td>{r.line}</td>
-                    <td>{r.maHang || "-"}</td>
-                    <td className="right">{Number(r.hsDat || 0).toFixed(2)}</td>
-                    <td className="right">{Number(r.hsDm || 100).toFixed(0)}</td>
-                    <td>
-                      <span
-                        className={
-                          "pill " +
-                          (String(r.status).includes("ĐẠT")
-                            ? "ok"
-                            : String(r.status).includes("CHƯA ĐẠT")
-                            ? "bad"
-                            : "warn")
-                        }
-                      >
-                        {r.status}
-                      </span>
-                    </td>
-                  </tr>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan={5} className="muted">
-                    (Chưa có dữ liệu hiệu suất trong ngày)
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-
-          {dailyRowSelected ? (
-            <div className="small" style={{ marginTop: 10 }}>
-              Đang xem: <b>{dailyRowSelected.line}</b> — HS đạt:{" "}
-              <b>{Number(dailyRowSelected.hsDat || 0).toFixed(2)}%</b>
-            </div>
-          ) : null}
-        </div>
-
-        {/* RIGHT: Hourly cumulative */}
-        <div className="card">
-          <div className="hours-head">
-            <h3>Kiểm lũy tiến theo giờ (so với DM/H)</h3>
-            <div className="small">
-              DM/H: <b>{Number(hourly.dmH || 0).toFixed(0)}</b>
-            </div>
+        <div className="controls">
+          <div className="control">
+            <label>Chọn ngày</label>
+            <select value={date} onChange={(e) => setDate(e.target.value)}>
+              {dates.map((d) => (
+                <option key={d} value={d}>{d}</option>
+              ))}
+            </select>
           </div>
 
-          <table className="kpi-table">
-            <thead>
-              <tr>
-                <th>Giờ</th>
-                <th className="right">Tổng kiểm đạt</th>
-                <th className="right">DM lũy tiến</th>
-                <th className="right">Chênh</th>
-                <th>Trạng thái</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(hourly.hours || []).map((h) => {
-                const diff = Number(h.diff || 0);
-                const ok = diff >= 0;
-                return (
-                  <tr key={h.label}>
-                    <td>{h.label}</td>
-                    <td className="right">{Number(h.actual || 0).toFixed(0)}</td>
-                    <td className="right">{Number(h.target || 0).toFixed(0)}</td>
-                    <td className={"right diff " + (ok ? "ok" : "bad")}>{diff.toFixed(0)}</td>
-                    <td>
-                      <span className={"pill " + (h.status === "VƯỢT" || h.status === "ĐỦ" ? "ok" : "bad")}>
-                        {h.status}
-                      </span>
-                    </td>
-                  </tr>
-                );
-              })}
-              {!hourly.hours?.length ? (
-                <tr>
-                  <td colSpan={5} className="muted">
-                    (Chưa có dữ liệu giờ cho ngày này)
-                  </td>
-                </tr>
-              ) : null}
-            </tbody>
-          </table>
+          <div className="control">
+            <label>Chọn chuyền</label>
+            <select value={line} onChange={(e) => setLine(e.target.value)}>
+              {(lines.length ? lines : ["TỔNG HỢP"]).map((x) => (
+                <option key={x} value={x}>{x}</option>
+              ))}
+            </select>
+          </div>
 
-          <div className="small" style={{ marginTop: 10 }}>
-            Logic: = ĐỦ (xanh), &gt; VƯỢT (xanh), &lt; THIẾU (đỏ). Lấy trực tiếp từ bảng “THỐNG KÊ HIỆU SUẤT THEO GIỜ,
-            NGÀY”.
+          <button className="btn" onClick={() => load(date, line)} disabled={loading}>
+            {loading ? "Đang tải..." : "Refresh"}
+          </button>
+        </div>
+      </div>
+
+      {err ? <div className="error">Lỗi: {err}</div> : null}
+
+      <div className="grid">
+        {/* ===== BẢNG HIỆU SUẤT NGÀY ===== */}
+        <div className="card">
+          <div className="card-title">Hiệu suất trong ngày (so với định mức)</div>
+
+          <div className="table-wrap">
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>Chuyền/BP</th>
+                  <th>Mã hàng</th>
+                  <th>HS đạt (%)</th>
+                  <th>HS ĐM (%)</th>
+                  <th>Trạng thái</th>
+                </tr>
+              </thead>
+              <tbody>
+                {selectedDaily?.length ? (
+                  selectedDaily.map((r) => (
+                    <tr key={r.line}>
+                      <td className="mono">{r.line}</td>
+                      <td className="mono">{r.maHang || "-"}</td>
+                      <td>{fmt2(r.hsDat)}</td>
+                      <td>{fmt2(r.hsDm)}</td>
+                      <td><StatusPill s={r.status} /></td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={5} className="muted">Chưa có dữ liệu.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="hint">
+            * HS đạt đang tính theo: <b>Giờ cuối / ĐM lũy tiến</b> (dựa bảng “THỐNG KÊ HIỆU SUẤT THEO GIỜ, NGÀY”).
+          </div>
+        </div>
+
+        {/* ===== BẢNG TỪNG GIỜ ===== */}
+        <div className="card">
+          <div className="card-title">
+            Kiểm lũy tiến theo giờ (so với ĐM/H) — <span className="mono">{hourly?.line || "-"}</span>
+            <span className="right-note">ĐM/H: <b>{fmt(hourly?.dmH)}</b></span>
+          </div>
+
+          <div className="table-wrap">
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>Giờ</th>
+                  <th>Tổng kiểm đạt</th>
+                  <th>ĐM lũy tiến</th>
+                  <th>Chênh</th>
+                  <th>Trạng thái</th>
+                </tr>
+              </thead>
+              <tbody>
+                {hourly?.hours?.length ? (
+                  hourly.hours.map((h, idx) => (
+                    <tr key={idx}>
+                      <td className="mono">{h.label}</td>
+                      <td>{fmt(h.actual)}</td>
+                      <td>{fmt(h.target)}</td>
+                      <td className={Number(h.diff) < 0 ? "neg" : "pos"}>{fmt(h.diff)}</td>
+                      <td><StatusPill s={h.status} /></td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={5} className="muted">Chưa đọc được bảng giờ (kiểm tra sheet).</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="hint">
+            Logic: = ĐỦ (xanh), &gt; VƯỢT (xanh), &lt; THIẾU (đỏ). Lấy trực tiếp từ bảng “THỐNG KÊ HIỆU SUẤT THEO GIỜ, NGÀY”.
           </div>
         </div>
       </div>

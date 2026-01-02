@@ -1,4 +1,5 @@
 // app/api/check-kpi/route.js
+
 import { readValues } from "../_lib/googleSheetsClient";
 import { sheetNames } from "../_lib/sheetName";
 
@@ -6,20 +7,13 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-// ---------- helpers ----------
+/* ================= helpers ================= */
+
 function toNum(v) {
   if (v === null || v === undefined) return 0;
   if (typeof v === "number") return Number.isFinite(v) ? v : 0;
-
   const t = String(v).trim();
   if (!t) return 0;
-
-  // % dạng "95.87%" -> 95.87
-  if (t.endsWith("%")) {
-    const n = Number(t.slice(0, -1).trim().replace(/,/g, ""));
-    return Number.isFinite(n) ? n : 0;
-  }
-
   const n = Number(t.replace(/,/g, ""));
   return Number.isFinite(n) ? n : 0;
 }
@@ -42,17 +36,28 @@ function normalize(s) {
     .replace(/[\u0300-\u036f]/g, "");
 }
 
-function parseDateCell(v) {
-  // Date object
-  if (v instanceof Date && !Number.isNaN(v.getTime())) {
-    const dd = String(v.getDate()).padStart(2, "0");
-    const mm = String(v.getMonth() + 1).padStart(2, "0");
-    const yyyy = v.getFullYear();
-    return `${dd}/${mm}/${yyyy}`;
-  }
+function toShortDM(dmy) {
+  // dd/mm/yyyy -> dd/mm
+  const m = String(dmy || "").match(/^(\d{2})\/(\d{2})\/\d{4}$/);
+  if (m) return `${m[1]}/${m[2]}`;
+  // dd/mm
+  const m2 = String(dmy || "").match(/^(\d{2})\/(\d{2})$/);
+  if (m2) return `${m2[1]}/${m2[2]}`;
+  return "";
+}
 
-  // serial number
-  if (typeof v === "number" && Number.isFinite(v)) return serialToDMY(v);
+/**
+ * IMPORTANT FIX:
+ * Chỉ coi số là "serial date" nếu nằm trong range hợp lý (tránh 430 -> 1899/1901).
+ * 30000 ~ 1982, 70000 ~ 2091
+ */
+function isLikelySerialDate(n) {
+  return typeof n === "number" && Number.isFinite(n) && n >= 30000 && n <= 70000;
+}
+
+function parseDateCell(v) {
+  // serial number nhưng phải hợp lý
+  if (isLikelySerialDate(v)) return serialToDMY(v);
 
   const t = String(v || "").trim();
   if (!t) return "";
@@ -69,18 +74,6 @@ function parseDateCell(v) {
   const m3 = t.match(/^(\d{1,2})\/(\d{1,2})$/);
   if (m3) return `${m3[1].padStart(2, "0")}/${m3[2].padStart(2, "0")}`;
 
-  return t;
-}
-
-function toShortDM(dmy) {
-  // dd/mm/yyyy -> dd/mm
-  const m = String(dmy || "").match(/^(\d{2})\/(\d{2})\/\d{4}$/);
-  if (m) return `${m[1]}/${m[2]}`;
-
-  // dd/mm
-  const m2 = String(dmy || "").match(/^(\d{2})\/(\d{2})$/);
-  if (m2) return `${m2[1]}/${m2[2]}`;
-
   return "";
 }
 
@@ -93,159 +86,115 @@ function sortDatesDesc(a, b) {
   return db - da;
 }
 
-function rowHasChosenShortDM(row, chosenShortDM) {
-  if (!chosenShortDM) return false;
-  for (const cell of row || []) {
-    const dmy = parseDateCell(cell);
-    const sd = toShortDM(dmy);
-    if (sd && sd === chosenShortDM) return true;
-  }
-  return false;
-}
+/* ====== FIX LỆCH NGÀY: cắt section theo ô ngày ở cột A ====== */
+function sliceSectionByDate(full, chosenDate) {
+  const chosenShort = toShortDM(chosenDate);
+  if (!chosenDate) return full;
 
-function extractLineFromRow(row) {
-  // ưu tiên dạng "XXX(C1)" trong MÃ HÀNG
-  for (const cell of row || []) {
-    const t = String(cell || "").trim();
-    if (!t) continue;
-
-    const m = t.match(/\((C\d+)\)/i);
-    if (m) return m[1].toUpperCase();
-
-    // nếu cell là C1, C2...
-    const m2 = t.match(/^(C\d+)$/i);
-    if (m2) return m2[1].toUpperCase();
-
-    const n = normalize(t);
-    if (n === "CAT" || n === "CẮT") return "CẮT";
-    if (n === "KCS") return "KCS";
-    if (n === "HOAN TAT" || n === "HOÀN TẤT") return "HOÀN TẤT";
-    if (n === "NM") return "NM";
-  }
-  return "";
-}
-
-function findColByKeywords(full, headerRow, keywords, upRows = 3, downRows = 1) {
-  const start = Math.max(0, headerRow - upRows);
-  const end = Math.min(full.length - 1, headerRow + downRows);
-
-  for (let r = start; r <= end; r++) {
-    const row = full[r] || [];
-    const norm = row.map(normalize);
-    for (let c = 0; c < norm.length; c++) {
-      const v = norm[c];
-      if (!v) continue;
-      if (keywords.every((k) => v.includes(k))) return c;
+  // tìm start row: ưu tiên cột A (vì file bạn để ngày ở cột A)
+  let start = -1;
+  for (let r = 0; r < full.length; r++) {
+    const d = parseDateCell(full[r]?.[0]);
+    if (!d) continue;
+    if (d === chosenDate || toShortDM(d) === chosenShort) {
+      start = r;
+      break;
     }
   }
-  return -1;
+  if (start < 0) return full;
+
+  // tìm end row = trước ngày kế tiếp (cũng ở cột A)
+  let end = full.length;
+  for (let r = start + 1; r < full.length; r++) {
+    const d = parseDateCell(full[r]?.[0]);
+    if (!d) continue;
+    // gặp một ô ngày khác => đó là ngày mới
+    if (d !== chosenDate && toShortDM(d) !== chosenShort) {
+      end = r;
+      break;
+    }
+  }
+
+  return full.slice(start, end);
 }
 
-// ---------- Find hourly table (đúng ngày) ----------
-function findHourlyTable(full, chosenShortDM) {
+/* ====== tìm bảng “THỐNG KÊ HIỆU SUẤT THEO GIỜ, NGÀY” trong section ====== */
+function findHourlyTable(section) {
   let headerRow = -1;
   let dmDayCol = -1;
   let dmHCol = -1;
   let hourCols = [];
 
-  for (let r = 0; r < full.length; r++) {
-    const row = full[r] || [];
+  for (let r = 0; r < section.length; r++) {
+    const row = section[r] || [];
     const normRow = row.map(normalize);
 
     const hasDMH = normRow.some((x) => x === "DM/H" || x === "DMH" || x === "ĐM/H" || x === "DM / H");
-    const hasArrowHour = row.some((x) => {
-      const t = String(x || "").trim();
-      return t.includes("->") && /h/i.test(t);
-    });
+    const hasArrowHour = row.some((x) => String(x || "").includes("->") && /h/i.test(String(x)));
 
-    if (!hasDMH || !hasArrowHour) continue;
+    if (hasDMH && hasArrowHour) {
+      headerRow = r;
 
-    // ---- IMPORTANT FIX: check đúng block ngày ----
-    // sheet của bạn: ngày nằm trên vài dòng, nên phải dò rộng hơn (-8 .. +2)
-    let okDate = false;
-    for (let rr = Math.max(0, r - 8); rr <= Math.min(full.length - 1, r + 2); rr++) {
-      if (rowHasChosenShortDM(full[rr] || [], chosenShortDM)) {
-        okDate = true;
-        break;
+      for (let c = 0; c < normRow.length; c++) {
+        const cell = normRow[c];
+        if (cell.includes("DM/NGAY") || cell.includes("DMNGAY") || cell.includes("ĐM/NGAY")) dmDayCol = c;
+        if (cell === "DM/H" || cell === "DMH" || cell === "ĐM/H") dmHCol = c;
       }
+
+      hourCols = [];
+      for (let c = 0; c < row.length; c++) {
+        const t = String(row[c] || "").trim();
+        if (t.includes("->") && /h/i.test(t)) hourCols.push(c);
+      }
+      break;
     }
-    if (!okDate) continue;
-
-    headerRow = r;
-
-    // xác định col DM/NGÀY và DM/H
-    for (let c = 0; c < normRow.length; c++) {
-      if (normRow[c].includes("DM/NGAY") || normRow[c].includes("DMNGAY") || normRow[c].includes("ĐM/NGAY")) dmDayCol = c;
-      if (normRow[c] === "DM/H" || normRow[c] === "DMH" || normRow[c] === "ĐM/H") dmHCol = c;
-    }
-
-    // giờ
-    hourCols = [];
-    for (let c = 0; c < row.length; c++) {
-      const t = String(row[c] || "").trim();
-      if (t.includes("->") && /h/i.test(t)) hourCols.push(c);
-    }
-
-    break;
   }
 
   if (headerRow < 0 || dmHCol < 0 || hourCols.length === 0) return null;
 
-  const hourLabels = hourCols.map((c) => String((full[headerRow] || [])[c] || "").trim());
-
-  // tìm cột "MÃ HÀNG" + cột "SUẤT ĐẠT TRONG NGÀY" (để làm dailyRows)
-  const maHangCol = findColByKeywords(full, headerRow, ["MA", "HANG"], 6, 2);
-  const hsDayCol =
-    findColByKeywords(full, headerRow, ["SUAT", "DAT", "TRONG", "NGAY"], 6, 2) ||
-    findColByKeywords(full, headerRow, ["HIEU", "SUAT"], 6, 2);
-
-  return { headerRow, dmDayCol, dmHCol, hourCols, hourLabels, maHangCol, hsDayCol };
+  const hourLabels = hourCols.map((c) => String((section[headerRow] || [])[c] || "").trim());
+  return { headerRow, dmDayCol, dmHCol, hourCols, hourLabels };
 }
 
-function toPercentValue(v) {
-  // nếu Google Sheets trả raw % dạng 0.9587 => 95.87
-  const n = toNum(v);
-  if (n > 0 && n <= 1) return n * 100;
-  return n;
-}
-
-function buildFromKpiSheet(full, chosenShortDM) {
-  const info = findHourlyTable(full, chosenShortDM);
-  if (!info) {
-    return {
-      hourly: { byLine: {}, lines: [] },
-      dailyRows: [],
-      meta: { found: false },
-    };
+function pickLineLabel(row, beforeCol) {
+  for (let c = 0; c < beforeCol; c++) {
+    const t = String(row[c] || "").trim();
+    if (!t) continue;
+    const n = normalize(t);
+    if (/^(TONG HOP|C\d+|CAT|KCS|HOAN|HOAN TAT|NM)/.test(n)) return t;
   }
+  const t0 = String(row[0] || "").trim();
+  return t0 || "";
+}
 
-  const { headerRow, dmDayCol, dmHCol, hourCols, hourLabels, maHangCol, hsDayCol } = info;
+function buildHourlyData(section) {
+  const info = findHourlyTable(section);
+  if (!info) return { byLine: {}, lines: [] };
+
+  const { headerRow, dmDayCol, dmHCol, hourCols, hourLabels } = info;
 
   const byLine = {};
   const lines = [];
-  const dailyRows = [];
 
-  let blankStreak = 0;
-
-  for (let r = headerRow + 1; r < full.length; r++) {
-    const row = full[r] || [];
+  for (let r = headerRow + 1; r < section.length; r++) {
+    const row = section[r] || [];
 
     const dmH = toNum(row[dmHCol]);
     const dmDay = dmDayCol >= 0 ? toNum(row[dmDayCol]) : 0;
+
     const hasAnyHour = hourCols.some((c) => String(row[c] || "").trim() !== "");
-    const line = extractLineFromRow(row);
+    const line = pickLineLabel(row, dmDayCol >= 0 ? dmDayCol : dmHCol);
 
-    // dòng trống -> cho phép bỏ qua 3 dòng rồi mới dừng
-    if (!line && !hasAnyHour && dmH === 0 && dmDay === 0) {
-      blankStreak++;
-      if (blankStreak >= 3) break;
-      continue;
-    }
-    blankStreak = 0;
-
+    // kết thúc bảng: dòng trống hoàn toàn
+    if (!hasAnyHour && dmH === 0 && dmDay === 0 && !line) break;
     if (!line) continue;
 
-    // build hourly
+    // bỏ qua các dòng tiêu đề phụ / TOTAL KIỂM ĐẠT... nếu cần
+    const normLine = normalize(line);
+    if (normLine.includes("TOTAL") || normLine.includes("TONG KIEM") || normLine.includes("TONG MAY")) {
+      continue;
+    }
+
     const hours = hourCols.map((c, idx) => {
       const actual = toNum(row[c]);
       const target = dmH > 0 ? dmH * (idx + 1) : 0;
@@ -268,26 +217,10 @@ function buildFromKpiSheet(full, chosenShortDM) {
     });
 
     byLine[line] = { line, dmDay, dmH, hours };
-    if (!lines.includes(line)) lines.push(line);
-
-    // build daily row
-    const maHang = maHangCol >= 0 ? String(row[maHangCol] || "").trim() : "";
-    const hsDat = hsDayCol >= 0 ? toPercentValue(row[hsDayCol]) : 0;
-    const hsDm = 100;
-
-    let status = "CHƯA CÓ DỮ LIỆU";
-    if (hsDat > 0) status = hsDat >= 100 ? "ĐẠT/VƯỢT" : "CHƯA ĐẠT";
-
-    dailyRows.push({
-      line,
-      maHang: maHang || "-",
-      hsDat,
-      hsDm,
-      status,
-    });
+    lines.push(line);
   }
 
-  // Tổng hợp hourly
+  // Tổng hợp
   if (lines.length) {
     const totalDmH = lines.reduce((s, ln) => s + (byLine[ln]?.dmH || 0), 0);
     const totalDmDay = lines.reduce((s, ln) => s + (byLine[ln]?.dmDay || 0), 0);
@@ -314,29 +247,83 @@ function buildFromKpiSheet(full, chosenShortDM) {
     });
 
     byLine["TỔNG HỢP"] = { line: "TỔNG HỢP", dmDay: totalDmDay, dmH: totalDmH, hours: totalHours };
+  }
 
-    // Tổng hợp daily (từ last hour)
-    const last = totalHours[totalHours.length - 1];
-    const hsDatTotal = last?.target > 0 ? (last.actual / last.target) * 100 : 0;
+  // lines list để dropdown
+  return { byLine, lines: ["TỔNG HỢP", ...lines] };
+}
 
-    dailyRows.unshift({
-      line: "TỔNG HỢP",
-      maHang: "-",
-      hsDat: hsDatTotal,
+/* ====== Map MÃ HÀNG theo chuyền trong section (để bảng “hiệu suất ngày” có mã hàng) ====== */
+function buildMaHangMap(section) {
+  let maHangCol = -1;
+  let headerRow = -1;
+
+  for (let r = 0; r < Math.min(section.length, 60); r++) {
+    const row = section[r] || [];
+    for (let c = 0; c < row.length; c++) {
+      if (normalize(row[c]) === "MA HANG") {
+        headerRow = r;
+        maHangCol = c;
+        break;
+      }
+    }
+    if (maHangCol >= 0) break;
+  }
+
+  const map = {};
+  if (maHangCol < 0 || headerRow < 0) return map;
+
+  for (let r = headerRow + 1; r < section.length; r++) {
+    const row = section[r] || [];
+    const line = String(row[0] || "").trim(); // cột A là C1..C10...
+    if (!line) continue;
+
+    const n = normalize(line);
+    if (!/^(C\d+|CAT|KCS|HOAN|HOAN TAT|NM)/.test(n)) continue;
+
+    const code = String(row[maHangCol] || "").trim();
+    if (code) map[line] = code;
+  }
+
+  return map;
+}
+
+/* ====== Bảng “hiệu suất trong ngày” (tính từ giờ cuối / ĐM) ====== */
+function buildDailyRows(hourly, maHangMap) {
+  const lines = hourly.lines || [];
+  const out = [];
+
+  for (const line of lines) {
+    const d = hourly.byLine?.[line];
+    if (!d) continue;
+
+    const hours = d.hours || [];
+    const last = hours[hours.length - 1] || null;
+
+    const targetEnd = last?.target || 0;
+    const actualEnd = last?.actual || 0;
+
+    let hsDat = 0;
+    if (targetEnd > 0) hsDat = (actualEnd / targetEnd) * 100;
+
+    let status = "CHƯA CÓ DỮ LIỆU";
+    if (targetEnd > 0) {
+      status = actualEnd >= targetEnd ? "ĐẠT/VƯỢT" : "CHƯA ĐẠT";
+    }
+
+    out.push({
+      line,
+      maHang: maHangMap[line] || (line === "TỔNG HỢP" ? "-" : ""),
+      hsDat: Number.isFinite(hsDat) ? hsDat : 0,
       hsDm: 100,
-      status: hsDatTotal >= 100 ? "ĐẠT/VƯỢT" : hsDatTotal > 0 ? "CHƯA ĐẠT" : "CHƯA CÓ DỮ LIỆU",
+      status,
     });
   }
 
-  const outLines = ["TỔNG HỢP", ...lines];
-
-  return {
-    hourly: { byLine, lines: outLines },
-    dailyRows,
-    meta: { found: true, headerRow },
-  };
+  return out;
 }
 
+/* ====== đọc dates từ CONFIG_KPI: chỉ nhận giá trị là date hợp lý ====== */
 async function readConfigDates() {
   const { CONFIG_KPI_SHEET_NAME } = sheetNames();
 
@@ -344,12 +331,16 @@ async function readConfigDates() {
     valueRenderOption: "UNFORMATTED_VALUE",
   });
 
-  const dates = rows.map((r) => parseDateCell(r?.[0])).filter(Boolean);
+  const dates = rows
+    .map((r) => parseDateCell(r?.[0]))
+    .filter(Boolean);
+
   dates.sort(sortDatesDesc);
   return dates;
 }
 
-// ---------- API ----------
+/* ================= API ================= */
+
 export async function GET(request) {
   try {
     const qDate = request.nextUrl.searchParams.get("date") || "";
@@ -359,35 +350,39 @@ export async function GET(request) {
 
     const dates = await readConfigDates();
     const chosenDate = parseDateCell(qDate) || dates[0] || "";
-    const chosenShortDM = toShortDM(chosenDate);
 
+    // đọc KPI rộng
     const full = await readValues(`${KPI_SHEET_NAME}!A1:AZ2000`, {
       valueRenderOption: "UNFORMATTED_VALUE",
     });
 
-    const built = buildFromKpiSheet(full, chosenShortDM);
+    // ===== FIX: chỉ xử lý section đúng ngày =====
+    const section = sliceSectionByDate(full, chosenDate);
 
-    const lines = built.hourly.lines || [];
-    const byLine = built.hourly.byLine || {};
+    // build hourly theo section
+    const hourly = buildHourlyData(section);
 
-    const selectedLine = byLine[qLine] ? qLine : "TỔNG HỢP";
-    const hourly = byLine[selectedLine] || { line: selectedLine, dmDay: 0, dmH: 0, hours: [] };
+    // build daily rows
+    const maHangMap = buildMaHangMap(section);
+    const dailyRows = buildDailyRows(hourly, maHangMap);
 
-    // daily cho line đang chọn (nếu có)
-    const dailyRow = (built.dailyRows || []).find((x) => x.line === selectedLine) || null;
+    // chọn line
+    const line = hourly.byLine[qLine] ? qLine : "TỔNG HỢP";
+    const lineData = hourly.byLine[line] || { line, dmDay: 0, dmH: 0, hours: [] };
 
     return Response.json({
       ok: true,
       chosenDate,
       dates,
-      lines,
-      selectedLine,
-      hourly,
-      dailyRows: built.dailyRows || [],
-      daily: dailyRow,
-      meta: built.meta,
+      lines: hourly.lines,
+      selectedLine: line,
+      dailyRows,         // ✅ bảng hiệu suất ngày
+      hourly: lineData,  // ✅ bảng từng giờ actual/target/diff/status
     });
   } catch (e) {
-    return Response.json({ ok: false, error: String(e?.message || e) }, { status: 500 });
+    return Response.json(
+      { ok: false, error: String(e?.message || e) },
+      { status: 500 }
+    );
   }
 }
