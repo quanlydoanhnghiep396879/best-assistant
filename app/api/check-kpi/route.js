@@ -1,5 +1,4 @@
 // app/api/check-kpi/route.js
-
 import { readValues } from "../_lib/googleSheetsClient";
 import { sheetNames } from "../_lib/sheetName";
 
@@ -7,12 +6,20 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-/* ===================== helpers ===================== */
+// ---------- helpers ----------
 function toNum(v) {
   if (v === null || v === undefined) return 0;
   if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+
   const t = String(v).trim();
   if (!t) return 0;
+
+  // % dạng "95.87%" -> 95.87
+  if (t.endsWith("%")) {
+    const n = Number(t.slice(0, -1).trim().replace(/,/g, ""));
+    return Number.isFinite(n) ? n : 0;
+  }
+
   const n = Number(t.replace(/,/g, ""));
   return Number.isFinite(n) ? n : 0;
 }
@@ -36,6 +43,14 @@ function normalize(s) {
 }
 
 function parseDateCell(v) {
+  // Date object
+  if (v instanceof Date && !Number.isNaN(v.getTime())) {
+    const dd = String(v.getDate()).padStart(2, "0");
+    const mm = String(v.getMonth() + 1).padStart(2, "0");
+    const yyyy = v.getFullYear();
+    return `${dd}/${mm}/${yyyy}`;
+  }
+
   // serial number
   if (typeof v === "number" && Number.isFinite(v)) return serialToDMY(v);
 
@@ -49,7 +64,8 @@ function parseDateCell(v) {
   // yyyy-mm-dd
   const m2 = t.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (m2) return `${m2[3]}/${m2[2]}/${m2[1]}`;
-  // dd/mm (no year)
+
+  // dd/mm
   const m3 = t.match(/^(\d{1,2})\/(\d{1,2})$/);
   if (m3) return `${m3[1].padStart(2, "0")}/${m3[2].padStart(2, "0")}`;
 
@@ -60,9 +76,11 @@ function toShortDM(dmy) {
   // dd/mm/yyyy -> dd/mm
   const m = String(dmy || "").match(/^(\d{2})\/(\d{2})\/\d{4}$/);
   if (m) return `${m[1]}/${m[2]}`;
-  // already dd/mm
+
+  // dd/mm
   const m2 = String(dmy || "").match(/^(\d{2})\/(\d{2})$/);
   if (m2) return `${m2[1]}/${m2[2]}`;
+
   return "";
 }
 
@@ -75,225 +93,159 @@ function sortDatesDesc(a, b) {
   return db - da;
 }
 
-/* ===================== line parsing ===================== */
-// Convert various text forms to a "line id" like C1, C4+C5, CAT/KCS/HOAN TAT/NM...
-function extractLineIdFromText(text) {
-  const raw = String(text || "").trim();
-  if (!raw) return "";
-
-  const n = normalize(raw);
-
-  // Common departments
-  if (/\bKCS\b/.test(n)) return "KCS";
-  if (/\bCAT\b/.test(n)) return "CẮT";
-  if (/\bHOAN\s*TAT\b/.test(n) || /\bHOAN\s*TAT\b/.test(n) || /\bHOAN\b/.test(n)) return "HOÀN TẤT";
-  // NM / N.M
-  if (/\bNM\b/.test(n)) return "NM";
-
-  // Pattern like 088AG(C1) or N61ct(C4+C5) -> take inside (...)
-  const mParen = n.match(/\((C\d+(?:\+C\d+)*)\)/);
-  if (mParen && mParen[1]) return mParen[1];
-
-  // Standalone C1 / C01 / C 1
-  const mC = n.match(/\bC\s*0*(\d+)(?:\s*\+\s*C\s*0*(\d+))*\b/);
-  if (mC) {
-    // if it contains +C.., rebuild canonical string
-    // easiest: extract all C\d occurrences
-    const all = n.match(/C\s*0*\d+/g) || [];
-    if (all.length) {
-      const parts = all.map((x) => {
-        const mm = x.match(/C\s*0*(\d+)/);
-        return mm ? `C${mm[1]}` : "";
-      }).filter(Boolean);
-      return parts.join("+");
-    }
-    const one = mC[1];
-    return one ? `C${Number(one)}` : "";
-  }
-
-  return "";
-}
-
-function extractLineIdFromRow(row) {
-  // scan all cells; first match wins
-  for (const cell of row || []) {
-    const id = extractLineIdFromText(cell);
-    if (id) return id;
-  }
-  return "";
-}
-
-/* ===================== block selection by date ===================== */
 function rowHasChosenShortDM(row, chosenShortDM) {
   if (!chosenShortDM) return false;
-  const want = chosenShortDM.trim();
   for (const cell of row || []) {
     const dmy = parseDateCell(cell);
     const sd = toShortDM(dmy);
-    if (sd && sd === want) return true;
-
-    // sometimes header is literally "24/12"
-    const t = String(cell || "").trim();
-    if (t === want) return true;
+    if (sd && sd === chosenShortDM) return true;
   }
   return false;
 }
 
-// find the header row (the row that contains DM/H and hour columns) for the chosen date block
-function findHourlyTable(full, chosenShortDM) {
-  let chosenHeaderRow = -1;
+function extractLineFromRow(row) {
+  // ưu tiên dạng "XXX(C1)" trong MÃ HÀNG
+  for (const cell of row || []) {
+    const t = String(cell || "").trim();
+    if (!t) continue;
 
-  // find candidate header rows
+    const m = t.match(/\((C\d+)\)/i);
+    if (m) return m[1].toUpperCase();
+
+    // nếu cell là C1, C2...
+    const m2 = t.match(/^(C\d+)$/i);
+    if (m2) return m2[1].toUpperCase();
+
+    const n = normalize(t);
+    if (n === "CAT" || n === "CẮT") return "CẮT";
+    if (n === "KCS") return "KCS";
+    if (n === "HOAN TAT" || n === "HOÀN TẤT") return "HOÀN TẤT";
+    if (n === "NM") return "NM";
+  }
+  return "";
+}
+
+function findColByKeywords(full, headerRow, keywords, upRows = 3, downRows = 1) {
+  const start = Math.max(0, headerRow - upRows);
+  const end = Math.min(full.length - 1, headerRow + downRows);
+
+  for (let r = start; r <= end; r++) {
+    const row = full[r] || [];
+    const norm = row.map(normalize);
+    for (let c = 0; c < norm.length; c++) {
+      const v = norm[c];
+      if (!v) continue;
+      if (keywords.every((k) => v.includes(k))) return c;
+    }
+  }
+  return -1;
+}
+
+// ---------- Find hourly table (đúng ngày) ----------
+function findHourlyTable(full, chosenShortDM) {
+  let headerRow = -1;
+  let dmDayCol = -1;
+  let dmHCol = -1;
+  let hourCols = [];
+
   for (let r = 0; r < full.length; r++) {
     const row = full[r] || [];
     const normRow = row.map(normalize);
 
-    const hasDMH = normRow.some(
-      (x) => x === "DM/H" || x === "DMH" || x === "ĐM/H" || x === "DM / H"
-    );
+    const hasDMH = normRow.some((x) => x === "DM/H" || x === "DMH" || x === "ĐM/H" || x === "DM / H");
     const hasArrowHour = row.some((x) => {
-      const t = String(x || "");
+      const t = String(x || "").trim();
       return t.includes("->") && /h/i.test(t);
     });
 
     if (!hasDMH || !hasArrowHour) continue;
 
-    // Check a few rows ABOVE this headerRow for the date like "24/12"
+    // ---- IMPORTANT FIX: check đúng block ngày ----
+    // sheet của bạn: ngày nằm trên vài dòng, nên phải dò rộng hơn (-8 .. +2)
     let okDate = false;
-    for (let up = Math.max(0, r - 6); up <= r; up++) {
-      if (rowHasChosenShortDM(full[up] || [], chosenShortDM)) {
+    for (let rr = Math.max(0, r - 8); rr <= Math.min(full.length - 1, r + 2); rr++) {
+      if (rowHasChosenShortDM(full[rr] || [], chosenShortDM)) {
         okDate = true;
         break;
       }
     }
+    if (!okDate) continue;
 
-    // If matched date => select this block
-    if (okDate) {
-      chosenHeaderRow = r;
-      break;
-    }
+    headerRow = r;
 
-    // fallback: if no chosenShortDM provided, take first
-    if (!chosenShortDM && chosenHeaderRow < 0) chosenHeaderRow = r;
-  }
-
-  if (chosenHeaderRow < 0) return null;
-
-  const headerRow = chosenHeaderRow;
-  const row = full[headerRow] || [];
-  const normRow = row.map(normalize);
-
-  // locate important columns by scanning nearby rows for header names
-  const scanHeaderRows = [];
-  for (let rr = Math.max(0, headerRow - 3); rr <= headerRow + 1 && rr < full.length; rr++) {
-    scanHeaderRows.push({ rr, row: full[rr] || [], norm: (full[rr] || []).map(normalize) });
-  }
-
-  function findColByHeader(patterns) {
-    for (const item of scanHeaderRows) {
-      for (let c = 0; c < item.norm.length; c++) {
-        const x = item.norm[c] || "";
-        if (patterns.some((p) => x.includes(p))) return c;
-      }
-    }
-    return -1;
-  }
-
-  const dmDayCol = findColByHeader(["DM/NGAY", "DMNGAY", "ĐM/NGAY"]);
-  const dmHCol = (() => {
-    // DM/H appears on headerRow itself
+    // xác định col DM/NGÀY và DM/H
     for (let c = 0; c < normRow.length; c++) {
-      if (normRow[c] === "DM/H" || normRow[c] === "DMH" || normRow[c] === "ĐM/H") return c;
+      if (normRow[c].includes("DM/NGAY") || normRow[c].includes("DMNGAY") || normRow[c].includes("ĐM/NGAY")) dmDayCol = c;
+      if (normRow[c] === "DM/H" || normRow[c] === "DMH" || normRow[c] === "ĐM/H") dmHCol = c;
     }
-    return -1;
-  })();
 
-  const maHangCol = findColByHeader(["MA HANG"]);
-  const chungLoaiCol = findColByHeader(["CHUNG LOAI"]);
-  const tgSxCol = findColByHeader(["TG SX", "TGSX"]);
-  const suatDatCol = findColByHeader(["SUAT DAT TRONG NGAY", "SUAT DAT"]);
+    // giờ
+    hourCols = [];
+    for (let c = 0; c < row.length; c++) {
+      const t = String(row[c] || "").trim();
+      if (t.includes("->") && /h/i.test(t)) hourCols.push(c);
+    }
 
-  // hour columns are on headerRow (the row containing "->9h" ... )
-  const hourCols = [];
-  for (let c = 0; c < row.length; c++) {
-    const t = String(row[c] || "").trim();
-    if (t.includes("->") && /h/i.test(t)) hourCols.push(c);
+    break;
   }
 
-  if (dmHCol < 0 || hourCols.length === 0) return null;
+  if (headerRow < 0 || dmHCol < 0 || hourCols.length === 0) return null;
 
   const hourLabels = hourCols.map((c) => String((full[headerRow] || [])[c] || "").trim());
 
-  return {
-    headerRow,
-    dmDayCol,
-    dmHCol,
-    hourCols,
-    hourLabels,
-    maHangCol,
-    chungLoaiCol,
-    tgSxCol,
-    suatDatCol,
-  };
+  // tìm cột "MÃ HÀNG" + cột "SUẤT ĐẠT TRONG NGÀY" (để làm dailyRows)
+  const maHangCol = findColByKeywords(full, headerRow, ["MA", "HANG"], 6, 2);
+  const hsDayCol =
+    findColByKeywords(full, headerRow, ["SUAT", "DAT", "TRONG", "NGAY"], 6, 2) ||
+    findColByKeywords(full, headerRow, ["HIEU", "SUAT"], 6, 2);
+
+  return { headerRow, dmDayCol, dmHCol, hourCols, hourLabels, maHangCol, hsDayCol };
 }
 
-/* ===================== build data (hourly + daily) ===================== */
-function parsePercentCell(v) {
+function toPercentValue(v) {
+  // nếu Google Sheets trả raw % dạng 0.9587 => 95.87
   const n = toNum(v);
-  if (!Number.isFinite(n) || n <= 0) return 0;
-  // If sheet stores 0.9587 => 95.87%
   if (n > 0 && n <= 1) return n * 100;
-  return n; // already 95.87
+  return n;
 }
 
 function buildFromKpiSheet(full, chosenShortDM) {
   const info = findHourlyTable(full, chosenShortDM);
   if (!info) {
-    return { lines: [], byLine: {}, dailyRows: [] };
+    return {
+      hourly: { byLine: {}, lines: [] },
+      dailyRows: [],
+      meta: { found: false },
+    };
   }
 
-  const {
-    headerRow,
-    dmDayCol,
-    dmHCol,
-    hourCols,
-    hourLabels,
-    maHangCol,
-    chungLoaiCol,
-    tgSxCol,
-    suatDatCol,
-  } = info;
+  const { headerRow, dmDayCol, dmHCol, hourCols, hourLabels, maHangCol, hsDayCol } = info;
 
   const byLine = {};
-  const dailyRows = [];
   const lines = [];
+  const dailyRows = [];
 
-  // data starts after headerRow
+  let blankStreak = 0;
+
   for (let r = headerRow + 1; r < full.length; r++) {
     const row = full[r] || [];
 
-    // stop if next block header reached (another DM/H + ->h row)
-    const norm = row.map(normalize);
-    const isNextHeader =
-      norm.some((x) => x === "DM/H" || x === "DMH" || x === "ĐM/H") &&
-      row.some((x) => String(x || "").includes("->") && /h/i.test(String(x)));
-    if (isNextHeader) break;
-
-    // line id: scan whole row to catch 088AG(C1) etc.
-    const lineId = extractLineIdFromRow(row);
-    if (!lineId) {
-      // If row is truly empty area, allow skipping a little; but if everything empty -> break
-      const hasAny = row.some((x) => String(x || "").trim() !== "");
-      if (!hasAny) break;
-      continue;
-    }
-
-    // ignore totals lines that are not a line/department (but keep "TỔNG HỢP" we compute ourselves)
-    if (normalize(lineId).includes("TONG HOP")) continue;
-
     const dmH = toNum(row[dmHCol]);
     const dmDay = dmDayCol >= 0 ? toNum(row[dmDayCol]) : 0;
+    const hasAnyHour = hourCols.some((c) => String(row[c] || "").trim() !== "");
+    const line = extractLineFromRow(row);
 
+    // dòng trống -> cho phép bỏ qua 3 dòng rồi mới dừng
+    if (!line && !hasAnyHour && dmH === 0 && dmDay === 0) {
+      blankStreak++;
+      if (blankStreak >= 3) break;
+      continue;
+    }
+    blankStreak = 0;
+
+    if (!line) continue;
+
+    // build hourly
     const hours = hourCols.map((c, idx) => {
       const actual = toNum(row[c]);
       const target = dmH > 0 ? dmH * (idx + 1) : 0;
@@ -315,39 +267,27 @@ function buildFromKpiSheet(full, chosenShortDM) {
       };
     });
 
-    byLine[lineId] = { line: lineId, dmDay, dmH, hours };
-    lines.push(lineId);
+    byLine[line] = { line, dmDay, dmH, hours };
+    if (!lines.includes(line)) lines.push(line);
 
-    // build daily row (for left table)
+    // build daily row
     const maHang = maHangCol >= 0 ? String(row[maHangCol] || "").trim() : "";
-    const chungLoai = chungLoaiCol >= 0 ? String(row[chungLoaiCol] || "").trim() : "";
+    const hsDat = hsDayCol >= 0 ? toPercentValue(row[hsDayCol]) : 0;
+    const hsDm = 100;
 
-    // HS đạt: prefer sheet's "SUẤT ĐẠT TRONG NGÀY", fallback compute from last hour vs DM/ngày
-    let hsDat = suatDatCol >= 0 ? parsePercentCell(row[suatDatCol]) : 0;
-    if (!hsDat && dmDay > 0) {
-      const lastActual = hours.length ? (hours[hours.length - 1].actual || 0) : 0;
-      hsDat = (lastActual / dmDay) * 100;
-    }
-
-    const hsDm = 100; // you can change if you want another meaning
-    let dailyStatus = "CHƯA CÓ";
-    if (hsDat > 0) {
-      if (hsDat >= 100) dailyStatus = "ĐẠT/VƯỢT";
-      else dailyStatus = "CHƯA ĐẠT";
-    }
+    let status = "CHƯA CÓ DỮ LIỆU";
+    if (hsDat > 0) status = hsDat >= 100 ? "ĐẠT/VƯỢT" : "CHƯA ĐẠT";
 
     dailyRows.push({
-      line: lineId,
-      maHang,
-      chungLoai,
+      line,
+      maHang: maHang || "-",
       hsDat,
       hsDm,
-      tgSx: tgSxCol >= 0 ? toNum(row[tgSxCol]) : 0,
-      status: dailyStatus,
+      status,
     });
   }
 
-  // ===== Compute TỔNG HỢP =====
+  // Tổng hợp hourly
   if (lines.length) {
     const totalDmH = lines.reduce((s, ln) => s + (byLine[ln]?.dmH || 0), 0);
     const totalDmDay = lines.reduce((s, ln) => s + (byLine[ln]?.dmDay || 0), 0);
@@ -375,31 +315,28 @@ function buildFromKpiSheet(full, chosenShortDM) {
 
     byLine["TỔNG HỢP"] = { line: "TỔNG HỢP", dmDay: totalDmDay, dmH: totalDmH, hours: totalHours };
 
-    // daily tổng hợp
-    let hsDatTotal = 0;
-    if (totalDmDay > 0 && totalHours.length) {
-      const last = totalHours[totalHours.length - 1].actual || 0;
-      hsDatTotal = (last / totalDmDay) * 100;
-    }
+    // Tổng hợp daily (từ last hour)
+    const last = totalHours[totalHours.length - 1];
+    const hsDatTotal = last?.target > 0 ? (last.actual / last.target) * 100 : 0;
+
     dailyRows.unshift({
       line: "TỔNG HỢP",
       maHang: "-",
-      chungLoai: "-",
       hsDat: hsDatTotal,
       hsDm: 100,
-      tgSx: 0,
-      status: hsDatTotal >= 100 ? "ĐẠT/VƯỢT" : "CHƯA ĐẠT",
+      status: hsDatTotal >= 100 ? "ĐẠT/VƯỢT" : hsDatTotal > 0 ? "CHƯA ĐẠT" : "CHƯA CÓ DỮ LIỆU",
     });
   }
 
+  const outLines = ["TỔNG HỢP", ...lines];
+
   return {
-    byLine,
-    lines: ["TỔNG HỢP", ...lines],
+    hourly: { byLine, lines: outLines },
     dailyRows,
+    meta: { found: true, headerRow },
   };
 }
 
-/* ===================== read config dates ===================== */
 async function readConfigDates() {
   const { CONFIG_KPI_SHEET_NAME } = sheetNames();
 
@@ -412,7 +349,7 @@ async function readConfigDates() {
   return dates;
 }
 
-/* ===================== API ===================== */
+// ---------- API ----------
 export async function GET(request) {
   try {
     const qDate = request.nextUrl.searchParams.get("date") || "";
@@ -424,24 +361,31 @@ export async function GET(request) {
     const chosenDate = parseDateCell(qDate) || dates[0] || "";
     const chosenShortDM = toShortDM(chosenDate);
 
-    // read KPI big range
     const full = await readValues(`${KPI_SHEET_NAME}!A1:AZ2000`, {
       valueRenderOption: "UNFORMATTED_VALUE",
     });
 
     const built = buildFromKpiSheet(full, chosenShortDM);
 
-    const line = built.byLine[qLine] ? qLine : "TỔNG HỢP";
-    const lineData = built.byLine[line] || { line, dmDay: 0, dmH: 0, hours: [] };
+    const lines = built.hourly.lines || [];
+    const byLine = built.hourly.byLine || {};
+
+    const selectedLine = byLine[qLine] ? qLine : "TỔNG HỢP";
+    const hourly = byLine[selectedLine] || { line: selectedLine, dmDay: 0, dmH: 0, hours: [] };
+
+    // daily cho line đang chọn (nếu có)
+    const dailyRow = (built.dailyRows || []).find((x) => x.line === selectedLine) || null;
 
     return Response.json({
       ok: true,
       chosenDate,
       dates,
-      lines: built.lines,
-      selectedLine: line,
-      hourly: lineData,
-      dailyRows: built.dailyRows, // <<< for "Hiệu suất trong ngày"
+      lines,
+      selectedLine,
+      hourly,
+      dailyRows: built.dailyRows || [],
+      daily: dailyRow,
+      meta: built.meta,
     });
   } catch (e) {
     return Response.json({ ok: false, error: String(e?.message || e) }, { status: 500 });
