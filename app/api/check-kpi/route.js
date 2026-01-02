@@ -382,10 +382,10 @@ export async function GET(req) {
     const qDate = url.searchParams.get("date") || "";
     const qLine = url.searchParams.get("line") || "TỔNG HỢP";
 
-    const spreadsheetId = process.env.SPREADSHEET_ID;
+    const spreadsheetId = process.env.GOOGLE_SHEET_ID;
     const sheetName = process.env.KPI_SHEET_NAME || "KPI";
 
-    if (!spreadsheetId) throw new Error("Missing env SPREADSHEET_ID");
+    if (!spreadsheetId) throw new Error("Missing env GOOGLE_SHEET_ID");
 
     const grid = await fetchSheetGrid(spreadsheetId, sheetName);
 
