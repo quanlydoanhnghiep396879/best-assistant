@@ -23,7 +23,7 @@ function serialToDMY(n) {
   const dd = String(d.getUTCDate()).padStart(2, "0");
   const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
   const yyyy = d.getUTCFullYear();
-  return ${dd}/${mm}/${yyyy};
+  return `${dd}/${mm}/${yyyy}`;
 }
 
 // normalize: bỏ dấu + upper + trim
@@ -53,24 +53,23 @@ function parseDateCell(v) {
 
   // dd/mm/yyyy
   const m1 = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (m1) return ${m1[1].padStart(2, "0")}/${m1[2].padStart(2, "0")}/${m1[3]};
+  if (m1) return `${m1[1].padStart(2, "0")}/${m1[2].padStart(2, "0")}/${m1[3]}`;
 
   // yyyy-mm-dd
   const m2 = t.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (m2) return ${m2[3]}/${m2[2]}/${m2[1]};
-
+  if (m2) return `${m2[3]}/${m2[2]}/${m2[1]}`;
   // dd/mm (không năm)
   const m3 = t.match(/^(\d{1,2})\/(\d{1,2})$/);
-  if (m3) return ${m3[1].padStart(2, "0")}/${m3[2].padStart(2, "0")};
+  if (m3) return `${m3[1].padStart(2, "0")}/${m3[2].padStart(2, "0")}`;
 
   return t;
 }
 
 function toShortDM(dmy) {
   const m = String(dmy || "").match(/^(\d{2})\/(\d{2})\/\d{4}$/);
-  if (m) return ${m[1]}/${m[2]};
+  if (m) return `${m[1]}/${m[2]};`
   const m2 = String(dmy || "").match(/^(\d{2})\/(\d{2})$/);
-  if (m2) return ${m2[1]}/${m2[2]};
+  if (m2) return `${m2[1]}/${m2[2]}`;
   return "";
 }
 
@@ -78,8 +77,8 @@ function sortDatesDesc(a, b) {
   const pa = String(a).match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
   const pb = String(b).match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
   if (!pa || !pb) return String(b).localeCompare(String(a));
-  const da = Date.parse(${pa[3]}-${pa[2]}-${pa[1]});
-  const db = Date.parse(${pb[3]}-${pb[2]}-${pb[1]});
+  const da = Date.parse(`${pa[3]}-${pa[2]}-${pa[1]}`);
+  const db = Date.parse(`${pb[3]}-${pb[2]}-${pb[1]}`);
   return db - da;
 }
 
@@ -206,7 +205,7 @@ function buildHourlyData(full, chosenShortDM) {
       if (dmH > 0) status = actual >= target ? (actual === target ? "ĐỦ" : "VƯỢT") : "THIẾU";
 
       return {
-        label: hourLabels[idx] || H${idx + 1},
+        label: hourLabels[idx] || `H${idx + 1}`,
         actual,
         target,
         diff,
@@ -232,7 +231,7 @@ function buildHourlyData(full, chosenShortDM) {
       if (totalDmH > 0) status = actual >= target ? (actual === target ? "ĐỦ" : "VƯỢT") : "THIẾU";
 
       return {
-        label: byLine[lines[0]]?.hours?.[idx]?.label || H${idx + 1},
+        label: byLine[lines[0]]?.hours?.[idx]?.label || `H${idx + 1}`,
         actual,
         target,
         diff,
@@ -250,7 +249,7 @@ async function readConfigDates() {
   const names = sheetNames(); // chú ý: sheetNames() phải là function trả về object
   const CONFIG = names.CONFIG_KPI_SHEET_NAME || "CONFIG_KPI";
 
-  const rows = await readValues(${CONFIG}!A2:A1000, {
+  const rows = await readValues(`${CONFIG}!A2:A1000`, {
     valueRenderOption: "UNFORMATTED_VALUE",
   });
 
@@ -272,7 +271,7 @@ export async function GET(request) {
     const chosenDate = parseDateCell(qDate) || dates[0] || "";
     const chosenShortDM = toShortDM(chosenDate);
 
-    const full = await readValues(${KPI}!A1:AZ2000, {
+    const full = await readValues(`${KPI}!A1:AZ2000`, {
       valueRenderOption: "UNFORMATTED_VALUE",
     });
 
