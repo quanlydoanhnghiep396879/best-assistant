@@ -1,242 +1,351 @@
-
 // app/api/check-kpi/route.js
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
+import sheets from "../_lib/googleSheetsClient";
 
-// ====== IMPORT googleSheetsClient (tùy bạn export kiểu gì, mình bắt hết) ======
-async function getSheetsClient() {
-  const lib = await import("../_lib/googleSheetsClient");
+// ================= Helpers =================
+const DDMMYYYY_RE = /^\d{2}\/\d{2}\/\d{4}$/;
 
-  // Các kiểu export thường gặp:
-  // 1) export default sheets
-  // 2) export const sheets = ...
-  // 3) export function getSheets() { return sheets }
-  const client =
-    lib.sheets ||
-    lib.default ||
-    (typeof lib.getSheets === "function" ? lib.getSheets() : null) ||
-    (typeof lib.getSheetsClient === "function" ? lib.getSheetsClient() : null);
-
-  // Validate shape
-  if (!client?.spreadsheets?.values?.get) {
-    throw new Error(
-      "googleSheetsClient không đúng kiểu. Cần có client.spreadsheets.values.get(...)"
-    );
-  }
-  return client;
+function norm(s) {
+  return String(s ?? "").trim();
 }
-
-// ====== helpers ======
-const noMark = (s) =>
-  String(s ?? "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/\u00A0/g, " ")
-    .trim()
-    .toLowerCase();
-
-const norm = (s) => String(s ?? "").replace(/\u00A0/g, " ").trim();
-
-function toNumberSafe(v) {
-  if (v === null || v === undefined) return 0;
+function up(s) {
+  return norm(s).toUpperCase();
+}
+function isEmptyRow(r) {
+  return !r || r.every((c) => norm(c) === "");
+}
+function toNumber(v) {
+  if (v == null) return 0;
   if (typeof v === "number") return Number.isFinite(v) ? v : 0;
-  const t = String(v).trim();
-  if (!t) return 0;
-  const n = Number(t.replace(/,/g, ""));
+
+  const s = norm(v);
+  if (!s) return 0;
+
+  // "98%" -> 98
+  if (s.endsWith("%")) {
+    const n = Number(s.replace("%", "").replace(/,/g, ""));
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  const n = Number(s.replace(/,/g, ""));
   return Number.isFinite(n) ? n : 0;
 }
-
-function normLine(x) {
-  const t = norm(x).toUpperCase();
-  if (t === "TONG HOP" || t === "TỔNG HỢP") return "TỔNG HỢP";
-  const m = t.match(/^C\s*0*([0-9]+)$/);
-  if (m) return `C${Number(m[1])}`;
-  return t;
+function toPercentMaybe(v) {
+  // Nếu sheet lưu 0.98 -> hiểu là 98 (%)
+  const n = toNumber(v);
+  if (n > 0 && n <= 2) return n * 100; // 0.98, 1.01...
+  return n;
 }
 
-function sortLines(a, b) {
-  const A = normLine(a);
-  const B = normLine(b);
+function hourMultiplier(label) {
+  // label dạng "->9h", "->10h", "->12h30", "->16h30"
+  const s = norm(label).replace(/\s+/g, "");
+  const m = s.match(/(\d{1,2})h(\d{2})?/i);
+  if (!m) return 0;
 
-  if (A === "TỔNG HỢP" && B !== "TỔNG HỢP") return -1;
-  if (B === "TỔNG HỢP" && A !== "TỔNG HỢP") return 1;
+  const hh = Number(m[1]);
+  const mm = m[2] ? Number(m[2]) : 0;
 
-  const ma = A.match(/^C(\d+)$/);
-  const mb = B.match(/^C(\d+)$/);
-  if (ma && mb) return Number(ma[1]) - Number(mb[1]);
-  if (ma && !mb) return -1;
-  if (!ma && mb) return 1;
-
-  return A.localeCompare(B, "vi");
+  // quy đổi: ->9h = 1, ->10h = 2 ... theo mốc bắt đầu 8h
+  // (thực tế nhà máy bạn đang dùng: 9h=1; 10h=2; 11h=3; 12h30=4.5; 13h30=5.5; 14h30=6.5; 15h30=7.5; 16h30=8.5)
+  // => multiplier = (hh + mm/60) - 8
+  const mult = hh + mm / 60 - 8;
+  return mult > 0 ? mult : 0;
 }
 
-function statusDaily(hsDat, hsDm) {
+function statusDatChuaDat(hsDat, hsDm) {
+  // đúng yêu cầu của bạn: so sánh 2 cột trong sheet
   return hsDat >= hsDm ? "ĐẠT" : "CHƯA ĐẠT";
 }
 
-function statusHourly(delta) {
-  if (delta > 0) return "VƯỢT";
-  if (delta === 0) return "ĐỦ";
-  return "THIẾU";
+function lineIsWanted(line) {
+  const s = up(line);
+  if (s === "TỔNG HỢP" || s === "TONG HOP") return true;
+  return /^C\d+$/i.test(s);
 }
 
-// ====== Read first sheet values safely ======
-async function getSheetTitles(sheets, spreadsheetId) {
+function lineSortKey(line) {
+  const s = up(line);
+  if (s === "TỔNG HỢP" || s === "TONG HOP") return -1;
+  const m = s.match(/^C(\d+)$/i);
+  return m ? Number(m[1]) : 999999;
+}
+
+// ================= Sheets read =================
+async function getSheetTitles(spreadsheetId) {
   const meta = await sheets.spreadsheets.get({ spreadsheetId });
-  const titles = (meta.data.sheets || [])
-    .map((s) => s.properties?.title)
-    .filter(Boolean);
-  return titles;
+  const tabs = meta?.data?.sheets || [];
+  return tabs.map((t) => t.properties?.title).filter(Boolean);
 }
 
-function pickSheetTitle(titles, preferRegexList) {
-  for (const rx of preferRegexList) {
-    const hit = titles.find((t) => rx.test(noMark(t)));
-    if (hit) return hit;
+async function getValues(spreadsheetId, rangeA1) {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: rangeA1,
+    valueRenderOption: "UNFORMATTED_VALUE",
+    dateTimeRenderOption: "FORMATTED_STRING",
+  });
+  return res?.data?.values || [];
+}
+
+function guessDailySheet(titles) {
+  // ưu tiên các tên thường gặp
+  const prefer = [
+    "KPI",
+    "KPI NGÀY",
+    "KPI_NGAY",
+    "KPI DAILY",
+    "DAILY",
+    "HIỆU SUẤT NGÀY",
+    "HIEU SUAT NGAY",
+  ].map(up);
+
+  for (const p of prefer) {
+    const found = titles.find((t) => up(t) === p);
+    if (found) return found;
   }
+
+  // fallback: sheet nào có chữ KPI
+  const k = titles.find((t) => up(t).includes("KPI"));
+  if (k) return k;
+
+  // fallback cuối: sheet đầu
   return titles[0] || "";
 }
 
-// ====== Parse DAILY table (flexible) ======
-// Kỳ vọng bảng dạng: cột có "chuyền/bp", "hs đạt", "hs đm" (không nhất thiết đúng chính tả)
-function parseDaily(values) {
-  // tìm header row có chứa "chuyền" và "hs"
-  let headerRow = -1;
-  for (let i = 0; i < Math.min(values.length, 40); i++) {
+function guessHourlySheet(titles) {
+  const prefer = [
+    "THỐNG KÊ HIỆU SUẤT THEO GIỜ, NGÀY",
+    "THONG KE HIEU SUAT THEO GIO, NGAY",
+    "THEO GIỜ",
+    "THEO GIO",
+    "HOURLY",
+    "GIỜ",
+    "GIO",
+  ].map(up);
+
+  for (const p of prefer) {
+    const found = titles.find((t) => up(t) === p);
+    if (found) return found;
+  }
+
+  // fallback: sheet nào có chữ GIỜ / HOURLY
+  const h = titles.find((t) => up(t).includes("GIỜ") || up(t).includes("GIO") || up(t).includes("HOURLY"));
+  if (h) return h;
+
+  return "";
+}
+
+// ================= Parse DAILY =================
+function parseDaily(values, chosenDate /* dd/MM/yyyy */) {
+  // Ta sẽ tìm các cột:
+  // - line col: "Chuyền/BP" / "CHUYEN" / "LINE"
+  // - hsDat col: "HS đạt" / "SUẤT ĐẠT" / "TY LE HS DAT"
+  // - hsDm col: "HS ĐM" / "ĐỊNH MỨC ... HS" / "HS DM"
+  // Nếu sheet của bạn dùng theo ngày (có cột dd/MM/yyyy), thì vẫn OK:
+  // ta không parse theo Date() mà so string header.
+
+  if (!values || values.length === 0) return { lines: [], dailyRows: [], _dbg: { reason: "no_values" } };
+
+  // tìm header row: row nào có "CHUYỀN" hoặc "LINE"
+  let headerRowIdx = -1;
+  for (let i = 0; i < Math.min(values.length, 30); i++) {
     const row = values[i] || [];
-    const rowText = noMark(row.join(" | "));
-    if (rowText.includes("chuyen") && rowText.includes("hs")) {
-      headerRow = i;
+    const rowText = row.map(up).join(" | ");
+    if (rowText.includes("CHUY") || rowText.includes("LINE") || rowText.includes("CHUYỀN")) {
+      headerRowIdx = i;
       break;
     }
   }
-  if (headerRow === -1) {
-    return { rows: [], debug: { foundDailyAnchor: false, headerRow: -1 } };
+  if (headerRowIdx < 0) headerRowIdx = 0;
+
+  const header = (values[headerRowIdx] || []).map(norm);
+  const headerU = header.map(up);
+
+  const idxLine =
+    headerU.findIndex((h) => h.includes("CHUY") || h.includes("LINE")) ?? 0;
+
+  // hsDat / hsDm theo kiểu cột cố định
+  let idxHsDat = headerU.findIndex((h) => h.includes("HS ĐẠT") || h.includes("HS DAT") || h.includes("SUẤT ĐẠT") || h.includes("SUAT DAT") || h.includes("TY LE HS DAT"));
+  let idxHsDm  = headerU.findIndex((h) => h.includes("HS ĐM") || h.includes("HS DM") || (h.includes("ĐỊNH MỨC") || h.includes("DINH MUC")) && h.includes("HS"));
+
+  // Nếu có cột theo ngày (header có dd/MM/yyyy) và hs nằm trong block ngày, ta thử fallback:
+  // tìm cột đúng bằng chosenDate và xem các cột gần đó có chứa HS ĐẠT/HS ĐM
+  const idxDateHeader = header.findIndex((h) => norm(h) === chosenDate);
+  if ((idxHsDat < 0 || idxHsDm < 0) && idxDateHeader >= 0) {
+    // thử: chosenDate là cột HS ĐẠT, và HS ĐM là cột bên phải/trái có text định mức
+    idxHsDat = idxDateHeader;
+    // tìm gần đó cột có chữ "ĐỊNH MỨC" hoặc "DM"
+    let best = -1;
+    for (let j = Math.max(0, idxDateHeader - 3); j <= Math.min(header.length - 1, idxDateHeader + 3); j++) {
+      if (headerU[j].includes("ĐỊNH MỨC") || headerU[j].includes("DINH MUC") || headerU[j].includes("HS DM") || headerU[j].includes("HS ĐM")) {
+        best = j;
+        break;
+      }
+    }
+    idxHsDm = best;
   }
 
-  const header = (values[headerRow] || []).map(noMark);
+  // parse rows dưới header
+  const dailyRows = [];
+  const linesSet = new Set();
+
+  for (let i = headerRowIdx + 1; i < values.length; i++) {
+    const row = values[i] || [];
+    if (isEmptyRow(row)) continue;
+
+    const line = norm(row[idxLine]);
+    if (!line) continue;
+
+    // filter theo yêu cầu: chỉ C1..C10 + TỔNG HỢP (loại CẮT/HOÀN TẤT/KCS/NM...)
+    if (!lineIsWanted(line)) continue;
+
+    const hsDat = toPercentMaybe(row[idxHsDat]);
+    const hsDm = idxHsDm >= 0 ? toPercentMaybe(row[idxHsDm]) : 0;
+
+    // nếu cả 2 đều 0 thì bỏ (tránh “rác”)
+    if (hsDat === 0 && hsDm === 0) continue;
+
+    const status = statusDatChuaDat(hsDat, hsDm);
+
+    dailyRows.push({
+      line: up(line) === "TONG HOP" ? "TỔNG HỢP" : up(line),
+      hsDat,
+      hsDm,
+      status,
+    });
+    linesSet.add(up(line) === "TONG HOP" ? "TỔNG HỢP" : up(line));
+  }
+
+  // sort line: TỔNG HỢP trước, rồi C1..C10
+  dailyRows.sort((a, b) => lineSortKey(a.line) - lineSortKey(b.line));
+
+  const lines = Array.from(linesSet).sort((a, b) => lineSortKey(a) - lineSortKey(b));
+  if (!lines.includes("TỔNG HỢP")) lines.unshift("TỔNG HỢP");
+
+  return {
+    lines,
+    dailyRows,
+    _dbg: {
+      headerRowIdx,
+      idxLine,
+      idxHsDat,
+      idxHsDm,
+      foundDateHeader: idxDateHeader,
+    },
+  };
+}
+
+// ================= Parse HOURLY =================
+function parseHourly(values, chosenDate, selectedLine) {
+  if (!values || values.length === 0) return { hourly: { line: selectedLine, dmH: 0, hours: [] }, _dbg: { reason: "no_values" } };
+
+  // tìm header row chứa "DM/H" và có mốc "->9h"
+  let headerRowIdx = -1;
+  for (let i = 0; i < Math.min(values.length, 50); i++) {
+    const row = (values[i] || []).map(up).join(" | ");
+    if (row.includes("DM/H") && (row.includes("->9H") || row.includes("→9H") || row.includes("9H"))) {
+      headerRowIdx = i;
+      break;
+    }
+  }
+  if (headerRowIdx < 0) {
+    // fallback: row nào có DM/H
+    for (let i = 0; i < Math.min(values.length, 50); i++) {
+      const row = (values[i] || []).map(up).join(" | ");
+      if (row.includes("DM/H")) { headerRowIdx = i; break; }
+    }
+  }
+  if (headerRowIdx < 0) headerRowIdx = 0;
+
+  const header = (values[headerRowIdx] || []).map(norm);
+  const headerU = header.map(up);
+
+  const idxDate =
+    headerU.findIndex((h) => h.includes("NGÀY") || h.includes("NGAY") || h.includes("DATE")) ?? -1;
   const idxLine =
-    header.findIndex((x) => x.includes("chuyen")) >= 0
-      ? header.findIndex((x) => x.includes("chuyen"))
-      : 0;
+    headerU.findIndex((h) => h.includes("CHUY") || h.includes("LINE")) ?? -1;
+  const idxDmH = headerU.findIndex((h) => h.includes("DM/H"));
 
-  const idxHsDat = header.findIndex((x) => x.includes("hs") && x.includes("dat"));
-  const idxHsDm =
-    header.findIndex((x) => x.includes("hs") && (x.includes("dm") || x.includes("dinh muc"))) ||
-    header.findIndex((x) => x.includes("dm"));
+  // hour columns: header có "->" hoặc "→"
+  const hourCols = [];
+  for (let c = 0; c < header.length; c++) {
+    const hu = headerU[c];
+    if (hu.includes("->") || hu.includes("→")) {
+      hourCols.push({ col: c, label: header[c] || hu });
+    } else if (/^\d{1,2}H(\d{2})?$/i.test(hu)) {
+      // fallback: "9H", "12H30"
+      hourCols.push({ col: c, label: header[c] });
+    }
+  }
 
-  if (idxHsDat < 0 || idxHsDm < 0) {
+  // tìm data row khớp chosenDate + selectedLine
+  // IMPORTANT: so sánh string trực tiếp, không dùng Date()
+  let foundRow = null;
+  for (let r = headerRowIdx + 1; r < values.length; r++) {
+    const row = values[r] || [];
+    if (isEmptyRow(row)) continue;
+
+    const d = idxDate >= 0 ? norm(row[idxDate]) : "";
+    const l = idxLine >= 0 ? up(row[idxLine]) : "";
+
+    if (d === chosenDate && (l === up(selectedLine) || (up(selectedLine) === "TỔNG HỢP" && (l === "TỔNG HỢP" || l === "TONG HOP")))) {
+      foundRow = row;
+      break;
+    }
+  }
+
+  if (!foundRow) {
     return {
-      rows: [],
-      debug: { foundDailyAnchor: true, headerRow, idxLine, idxHsDat, idxHsDm },
+      hourly: { line: selectedLine, dmH: 0, hours: [] },
+      _dbg: { headerRowIdx, idxDate, idxLine, idxDmH, hourCols: hourCols.length, found: false },
     };
   }
 
-  const out = [];
-  for (let r = headerRow + 1; r < values.length; r++) {
-    const row = values[r] || [];
-    const line = normLine(row[idxLine]);
-    if (!line) continue;
+  const dmH = idxDmH >= 0 ? toNumber(foundRow[idxDmH]) : 0;
 
-    // stop condition: gặp dòng trống dài / footer
-    const rowStr = noMark(row.join(" "));
-    if (rowStr.includes("logic")) break;
+  const hours = hourCols.map(({ col, label }) => {
+    const total = toNumber(foundRow[col]);
+    const mult = hourMultiplier(label);
+    const dmTarget = dmH * mult;
+    const diff = total - dmTarget;
 
-    const hsDat = toNumberSafe(row[idxHsDat]);
-    const hsDm = toNumberSafe(row[idxHsDm]);
+    const status = diff >= 0 ? "VƯỢT" : "THIẾU";
 
-    // bỏ BP không muốn (cắt/hoàn tất/kcs/nm) nếu có
-    const ban = new Set(["CẮT", "HOÀN TẤT", "KCS", "NM"]);
-    if (ban.has(line)) continue;
-
-    out.push({
-      line,
-      hsDat,
-      hsDm,
-      status: statusDaily(hsDat, hsDm),
-    });
-  }
-
-  out.sort((a, b) => sortLines(a.line, b.line));
-
-  // thêm TỔNG HỢP nếu chưa có
-  if (!out.find((x) => x.line === "TỔNG HỢP")) {
-    // không bắt buộc
-  }
-
-  return { rows: out, debug: { foundDailyAnchor: true, headerRow, idxLine, idxHsDat, idxHsDm } };
-}
-
-// ====== Parse HOURLY table (flexible) ======
-// Kỳ vọng bảng có cột "giờ" + "tổng" + "dm/h" hoặc "dm lũy tiến"...
-function parseHourly(values) {
-  let headerRow = -1;
-  for (let i = 0; i < Math.min(values.length, 80); i++) {
-    const rowText = noMark((values[i] || []).join(" | "));
-    if (rowText.includes("gio") && (rowText.includes("tong") || rowText.includes("kiem"))) {
-      headerRow = i;
-      break;
-    }
-  }
-  if (headerRow === -1) {
-    return { hourly: { dmH: 0, hours: [] }, debug: { foundHourlyAnchor: false, headerRow: -1 } };
-  }
-
-  const header = (values[headerRow] || []).map(noMark);
-
-  const idxLabel = header.findIndex((x) => x.includes("gio"));
-  const idxTotal = header.findIndex((x) => x.includes("tong"));
-  // dm lũy tiến có thể nằm ở cột "dm luy tien" hoặc "dm lũy tiến"
-  const idxDmLuy = header.findIndex((x) => x.includes("dm") && x.includes("luy"));
-  const idxDiff =
-    header.findIndex((x) => x.includes("chenh")) >= 0
-      ? header.findIndex((x) => x.includes("chenh"))
-      : -1;
-
-  // dm/h có thể nằm ở góc khác => mình sẽ suy ra bằng dmLuy ở mốc 1 giờ nếu có
-  const hours = [];
-
-  for (let r = headerRow + 1; r < values.length; r++) {
-    const row = values[r] || [];
-    const label = norm(row[idxLabel]);
-    if (!label) continue;
-
-    // stop when footer
-    const rowStr = noMark(row.join(" "));
-    if (rowStr.includes("logic")) break;
-
-    const total = toNumberSafe(row[idxTotal]);
-    const dmLuyTien = idxDmLuy >= 0 ? toNumberSafe(row[idxDmLuy]) : 0;
-    let delta = idxDiff >= 0 ? toNumberSafe(row[idxDiff]) : total - dmLuyTien;
-
-    // loại row toàn 0 (thường do parse sai sheet)
-    // nhưng vẫn giữ nếu label hợp lệ & dmLuyTien có
-    if (total === 0 && dmLuyTien === 0) continue;
-
-    hours.push({
-      label,
+    return {
+      label: norm(label),
       total,
-      dmLuyTien,
-      delta,
-      status: statusHourly(delta),
-    });
-  }
+      dmTarget,
+      diff,
+      status,
+      okHour: diff >= 0,
+      mult,
+    };
+  });
 
-  // suy ra dmH từ row đầu (nếu có dmLuyTien)
-  const dmH = hours.length ? (hours[0].dmLuyTien ? hours[0].dmLuyTien : 0) : 0;
-
-  return { hourly: { dmH, hours }, debug: { foundHourlyAnchor: true, headerRow, idxLabel, idxTotal, idxDmLuy, idxDiff } };
+  return {
+    hourly: { line: selectedLine, dmH, hours },
+    _dbg: { headerRowIdx, idxDate, idxLine, idxDmH, hourCols: hourCols.length, found: true },
+  };
 }
 
-/* ===================== GET ===================== */
+// ================= API =================
 export async function GET(req) {
   try {
     const { searchParams } = new URL(req.url);
-    const date = searchParams.get("date") || ""; // dd/mm/yyyy
-    const lineQ = normLine(searchParams.get("line") || "TỔNG HỢP");
+
+    const chosenDate = norm(searchParams.get("date")); // dd/MM/yyyy
+    const selectedLine = norm(searchParams.get("line")) || "TỔNG HỢP";
     const debug = searchParams.get("debug") === "1";
-    const raw = searchParams.get("raw") === "1";
+
+    if (!chosenDate || !DDMMYYYY_RE.test(chosenDate)) {
+      return NextResponse.json(
+        { ok: false, error: "Thiếu/ sai tham số date (dd/MM/yyyy)" },
+        { status: 400 }
+      );
+    }
 
     const spreadsheetId =
       process.env.GOOGLE_SHEET_ID ||
@@ -247,97 +356,73 @@ export async function GET(req) {
     if (!spreadsheetId) {
       return NextResponse.json(
         { ok: false, error: "Missing env GOOGLE_SHEET_ID (hoặc SPREADSHEET_ID)" },
-        { status: 400 }
+        { status: 500 }
       );
     }
 
-    const sheets = await getSheetsClient();
-    const titles = await getSheetTitles(sheets, spreadsheetId);
+    const titles = await getSheetTitles(spreadsheetId);
 
-    // auto pick sheet names (bạn đổi tên tab vẫn chạy tốt hơn)
-    const dailySheet = pickSheetTitle(titles, [
-      /kpi/,
-      /hieu suat/,
-      /suat dat/,
-    ]);
+    const dailySheet = guessDailySheet(titles);
+    const hourlySheet = guessHourlySheet(titles);
 
-    const hourlySheet = pickSheetTitle(titles, [
-      /thong ke.*gio/,
-      /gio.*ngay/,
-      /luy tien/,
-    ]);
+    // đọc range rộng để khỏi thiếu cột
+    const dailyValues = dailySheet ? await getValues(spreadsheetId, `'${dailySheet}'!A:ZZ`) : [];
+    const hourlyValues = hourlySheet ? await getValues(spreadsheetId, `'${hourlySheet}'!A:ZZ`) : [];
 
-    const dailyRange = `'${dailySheet}'!A:ZZ`;
-    const hourlyRange = `'${hourlySheet}'!A:ZZ`;
+    const dailyParsed = parseDaily(dailyValues, chosenDate);
+    const hourlyParsed = parseHourly(hourlyValues, chosenDate, selectedLine);
 
-    const [dailyRes, hourlyRes] = await Promise.all([
-      sheets.spreadsheets.values.get({ spreadsheetId, range: dailyRange }),
-      sheets.spreadsheets.values.get({ spreadsheetId, range: hourlyRange }),
-    ]);
+    // lines ưu tiên từ daily (đúng theo yêu cầu chọn chuyền)
+    const lines = (dailyParsed.lines || []).filter(lineIsWanted);
+    // nếu daily không ra lines, fallback từ selectedLine
+    if (!lines.length) lines.push("TỔNG HỢP");
 
-    const dailyValues = dailyRes.data.values || [];
-    const hourlyValues = hourlyRes.data.values || [];
+    // ép selectedLine về dạng chuẩn
+    const normalizedLine =
+      up(selectedLine) === "TONG HOP" ? "TỔNG HỢP" : up(selectedLine);
 
-    // raw mode: xem 20 dòng đầu để biết sheet có đọc được không
-    if (raw) {
-      return NextResponse.json({
-        ok: true,
-        date,
-        line: lineQ,
-        titles,
-        dailySheet,
-        hourlySheet,
-        dailyPreview: dailyValues.slice(0, 20),
-        hourlyPreview: hourlyValues.slice(0, 20),
-      });
-    }
+    // Nếu user chọn 1 line thì daily vẫn có thể trả đủ các line (sếp nhìn tổng quan).
+    // Nếu bạn muốn daily chỉ trả đúng line đang chọn, bật filter:
+    const dailyRows = (dailyParsed.dailyRows || []).filter((r) => {
+      // hiển thị tất cả khi chọn TỔNG HỢP, còn chọn Cx thì vẫn hiển thị list C1..C10 (tuỳ bạn)
+      // Bạn từng nói muốn bỏ thao tác refresh và chỉ hiện ngày đó -> OK, còn filter line thì tuỳ.
+      return true;
+    });
 
-    const dailyParsed = parseDaily(dailyValues);
-    const hourlyParsed = parseHourly(hourlyValues);
-
-    // lines list: lấy từ dailyRows
-    const lines = Array.from(new Set(dailyParsed.rows.map((x) => x.line))).sort(sortLines);
-
-    // filter theo line nếu user chọn Cx (còn TỔNG HỢP thì giữ hết)
-    const dailyRows =
-      lineQ === "TỔNG HỢP" ? dailyParsed.rows : dailyParsed.rows.filter((x) => x.line === lineQ);
-
-    const hourly =
-      lineQ === "TỔNG HỢP"
-        ? hourlyParsed.hourly
-        : hourlyParsed.hourly; // (giờ thường là 1 line; nếu bạn có data theo line thì sẽ xử lý phía sheet/logic sau)
-
-    const out = {
+    const body = {
       ok: true,
-      chosenDate: date,
-      selectedLine: lineQ,
-      lines: ["TỔNG HỢP", ...lines.filter((x) => x !== "TỔNG HỢP")],
+      chosenDate,
+      lines: lines
+        .map((l) => (up(l) === "TONG HOP" ? "TỔNG HỢP" : up(l)))
+        .sort((a, b) => lineSortKey(a) - lineSortKey(b)),
+      selectedLine: normalizedLine,
       dailyRows,
-      hourly,
+      hourly: hourlyParsed.hourly,
     };
 
     if (debug) {
-      out._debug = {
-        spreadsheetId: spreadsheetId ? "**set**" : "",
-        sheetTitles: titles,
+      body._debug = {
         dailySheet,
         hourlySheet,
-        dailyRange,
-        hourlyRange,
-        valuesRows: { daily: dailyValues.length, hourly: hourlyValues.length },
-        dailyParse: dailyParsed.debug,
-        hourlyParse: hourlyParsed.debug,
+        titles,
+        daily: dailyParsed._dbg,
+        hourly: hourlyParsed._dbg,
       };
     }
 
-    return NextResponse.json(out, {
+    return NextResponse.json(body, {
       headers: {
-        "Cache-Control": "no-store, max-age=0",
+        "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+        Pragma: "no-cache",
+        Expires: "0",
       },
     });
   } catch (e) {
     return NextResponse.json(
-      { ok: false, error: e?.message || "Server error" },
+      {
+        ok: false,
+        error: e?.message || "Server error",
+      },
       { status: 500 }
     );
   }

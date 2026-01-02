@@ -1,63 +1,45 @@
 // app/api/_lib/googleSheetsClient.js
 import { google } from "googleapis";
 
-/** Hỗ trợ env JSON thường hoặc base64 */
-function parseServiceAccount() {
+const SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"];
+
+function loadServiceAccount() {
   const raw =
     process.env.GOOGLE_SERVICE_ACCOUNT_JSON ||
-    process.env.GOOGLE_SERVICE_ACCOUNT ||
-    "";
+    process.env.GOOGLE_SERVICE_ACCOUNT_BASE64 ||
+    process.env.GOOGLE_SERVICE_ACCOUNT;
 
   if (!raw) {
     throw new Error(
-      "Missing env GOOGLE_SERVICE_ACCOUNT_JSON (or GOOGLE_SERVICE_ACCOUNT)"
+      "Missing env: GOOGLE_SERVICE_ACCOUNT_JSON (or GOOGLE_SERVICE_ACCOUNT_BASE64 / GOOGLE_SERVICE_ACCOUNT)"
     );
   }
 
-  // thử parse trực tiếp
-  try {
-    return JSON.parse(raw);
-  } catch (_) {
-    // thử base64
-    const decoded = Buffer.from(raw, "base64").toString("utf-8");
-    return JSON.parse(decoded);
+  // raw có thể là JSON string hoặc base64(JSON)
+  const jsonStr = raw.trim().startsWith("{")
+    ? raw
+    : Buffer.from(raw, "base64").toString("utf8");
+
+  const creds = JSON.parse(jsonStr);
+
+  // fix private_key bị escape \n
+  if (creds.private_key) creds.private_key = creds.private_key.replace(/\\n/g, "\n");
+
+  if (!creds.client_email || !creds.private_key) {
+    throw new Error("Service account JSON thiếu client_email hoặc private_key");
   }
+  return creds;
 }
 
-export function getSpreadsheetId() {
-  const id = process.env.GOOGLE_SHEET_ID; // ✅ bạn muốn tên này
-  if (!id) throw new Error("Missing env GOOGLE_SHEET_ID");
-  return id;
-}
+const creds = loadServiceAccount();
 
-export async function getSheetsClient() {
-  const sa = parseServiceAccount();
+const auth = new google.auth.JWT({
+  email: creds.client_email,
+  key: creds.private_key,
+  scopes: SCOPES,
+});
 
-  const auth = new google.auth.GoogleAuth({
-    credentials: {
-      client_email: sa.client_email,
-      private_key: sa.private_key,
-    },
-    scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
-  });
+const sheets = google.sheets({ version: "v4", auth });
 
-  const sheets = google.sheets({ version: "v4", auth });
-  return sheets;
-}
-
-/**
- * Lấy values từ A1 range. Ví dụ: "KPI!A1:ZZ2000"
- */
-export async function getValues(rangeA1) {
-  const spreadsheetId = getSpreadsheetId();
-  const sheets = await getSheetsClient();
-
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range: rangeA1,
-    valueRenderOption: "UNFORMATTED_VALUE",
-    dateTimeRenderOption: "FORMATTED_STRING",
-  });
-
-  return res.data.values || [];
-}
+export default sheets;
+export { sheets };
