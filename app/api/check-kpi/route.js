@@ -136,7 +136,7 @@ export async function GET(req) {
   if (!spreadsheetId) {
     return jsonNoStore({ ok: false, error: "Missing env GOOGLE_SHEET_ID" }, 500);
   }
-
+s
   const sheetName = process.env.KPI_SHEET_NAME || "KPI";
   const range = `${sheetName}!A1:Z400`;
 
