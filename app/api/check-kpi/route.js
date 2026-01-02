@@ -1,6 +1,6 @@
 // app/api/check-kpi/route.js
 import { NextResponse } from "next/server";
-import { getValues } from "@/lib/googleSheetsClient";
+import { getValues } from "../_lib/googleSheetsClient";
 
 export const dynamic = "force-dynamic";
 
