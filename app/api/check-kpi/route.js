@@ -1,10 +1,10 @@
 // app/api/check-kpi/route.js
-import { readValues } from "../_lib/googleSheetsClient";
-import { sheetNames } from "../_lib/sheetName";
-
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
+
+import { readValues } from "../_lib/googleSheetsClient";
+import { sheetNames } from "../_lib/sheetName";
 
 // ===== helpers =====
 function toNum(v) {
@@ -16,64 +16,39 @@ function toNum(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
-// Google serial date -> dd/mm/yyyy (base 1899-12-30)
-function serialToDMY(n) {
-  const base = new Date(Date.UTC(1899, 11, 30));
-  const d = new Date(base.getTime() + n * 24 * 60 * 60 * 1000);
-  const dd = String(d.getUTCDate()).padStart(2, "0");
-  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const yyyy = d.getUTCFullYear();
-  return `${dd}/${mm}/${yyyy}`;
-}
-
-// normalize: bỏ dấu + upper + trim
-function normalize(s) {
-  return String(s || "")
+function normKey(x) {
+  // quan trọng: xoá xuống dòng / khoảng trắng để bắt được "ĐM/\nH"
+  return String(x ?? "")
     .trim()
     .toUpperCase()
     .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, ""); // remove ALL whitespace (space, \n, \t)
 }
 
-// compact normalize: bỏ dấu + upper + bỏ toàn bộ whitespace
-function normCompact(s) {
-  return normalize(s).replace(/\s+/g, "");
-}
-
-// parse date cell: string hoặc serial (lọc serial “hợp lý” để tránh số lượng bị coi là ngày)
-function parseDateCell(v) {
-  if (typeof v === "number" && Number.isFinite(v)) {
-    // Serial date thường khoảng 30000..60000 (1982..2064). Tránh nhầm số lượng 200, 500...
-    if (v >= 30000 && v <= 60000) return serialToDMY(v);
-    return "";
-  }
-
-  const t = String(v || "").trim();
+function parseDateText(v) {
+  const t = String(v ?? "").trim();
   if (!t) return "";
-
-  // dd/mm/yyyy
   const m1 = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (m1) return `${m1[1].padStart(2, "0")}/${m1[2].padStart(2, "0")}/${m1[3]}`;
-
-  // yyyy-mm-dd
-  const m2 = t.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (m2) return `${m2[3]}/${m2[2]}/${m2[1]}`;
-  // dd/mm (không năm)
-  const m3 = t.match(/^(\d{1,2})\/(\d{1,2})$/);
-  if (m3) return `${m3[1].padStart(2, "0")}/${m3[2].padStart(2, "0")}`;
-
+  const m2 = t.match(/^(\d{1,2})\/(\d{1,2})$/);
+  if (m2) return `${m2[1].padStart(2, "0")}/${m2[2].padStart(2, "0")}`;
+  const m3 = t.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m3) return `${m3[3]}/${m3[2]}/${m3[1]}`;
   return t;
 }
 
 function toShortDM(dmy) {
-  const m = String(dmy || "").match(/^(\d{2})\/(\d{2})\/\d{4}$/);
-  if (m) return `${m[1]}/${m[2]};`
-  const m2 = String(dmy || "").match(/^(\d{2})\/(\d{2})$/);
+  const s = String(dmy || "").trim();
+  const m = s.match(/^(\d{2})\/(\d{2})\/\d{4}$/);
+  if (m) return `${m[1]}/${m[2]}`;
+  const m2 = s.match(/^(\d{2})\/(\d{2})$/);
   if (m2) return `${m2[1]}/${m2[2]}`;
   return "";
 }
 
 function sortDatesDesc(a, b) {
+  // ưu tiên dd/mm/yyyy, còn lại sort chuỗi
   const pa = String(a).match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
   const pb = String(b).match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
   if (!pa || !pb) return String(b).localeCompare(String(a));
@@ -82,91 +57,57 @@ function sortDatesDesc(a, b) {
   return db - da;
 }
 
-// ===== find hourly table block (đúng ngày) =====
-function rowHasChosenDM(full, r, chosenShortDM) {
-  if (!chosenShortDM) return true; // nếu không có thì khỏi filter
-  // check trong window: r-4 .. r (nơi thường chứa “24/12”)
-  const start = Math.max(0, r - 4);
-  for (let rr = start; rr <= r; rr++) {
-    const row = full[rr] || [];
-    for (const cell of row) {
-      const s = String(cell || "").trim();
-      if (!s) continue;
-      if (s.includes(chosenShortDM)) return true; // "24/12"
-      // đôi khi nằm dạng dd/mm/yyyy:
-      const d = parseDateCell(cell);
-      if (toShortDM(d) === chosenShortDM) return true;
-    }
-  }
-  return false;
-}
-
-function findHourlyTable(full, chosenShortDM) {
-  let best = null;
+// ===== tìm bảng giờ =====
+function findHourlyTable(full) {
+  let headerRow = -1;
+  let dmDayCol = -1;
+  let dmHCol = -1;
+  let hourCols = [];
+  let hourLabels = [];
 
   for (let r = 0; r < full.length; r++) {
     const row = full[r] || [];
-    const normRow = row.map(normCompact);
+    const nk = row.map(normKey);
 
-    // DM/H (chịu bẩn): DM/H, DMH, ĐM/H, "DM/ H", "DM /H", "DM/H\n"
-    const hasDMH = normRow.some((x) => x === "DM/H" || x === "DMH");
+    const hasDMH = nk.some((k) => k === "DM/H" || k === "DMH" || k.includes("DM/H"));
+    const hasArrowHour = row.some((x) => {
+      const t = String(x || "");
+      return t.includes("->") && /h/i.test(t);
+    });
 
-    // giờ: "->9h" ...
-    const hourCols = [];
-    for (let c = 0; c < row.length; c++) {
-      const t = String(row[c] || "").trim();
-      if (t.includes("->") && /h/i.test(t)) hourCols.push(c);
-    }
-    const hasArrowHour = hourCols.length > 0;
+    if (hasDMH && hasArrowHour) {
+      headerRow = r;
 
-    if (!hasDMH || !hasArrowHour) continue;
-
-    // nếu có chosenShortDM thì ưu tiên block đúng ngày
-    const matchDate = rowHasChosenDM(full, r, chosenShortDM);
-    if (!matchDate && chosenShortDM) continue;
-
-    // tìm DM/NGÀY và DM/H
-    let dmDayCol = -1;
-    let dmHCol = -1;
-
-    for (let c = 0; c < normRow.length; c++) {
-      const x = normRow[c];
-      // DM/NGAY: chịu bẩn nhiều kiểu
-      if (x.includes("DM/NGAY") || x.includes("DMNGAY") || x.includes("ĐM/NGAY") || x.includes("ĐMNGAY")) {
-        dmDayCol = c;
+      for (let c = 0; c < nk.length; c++) {
+        if (nk[c].includes("DM/NGAY") || nk[c].includes("DMNGAY")) dmDayCol = c;
+        if (nk[c] === "DM/H" || nk[c] === "DMH" || nk[c].includes("DM/H")) dmHCol = c;
       }
-      if (x === "DM/H" || x === "DMH") {
-        dmHCol = c;
+
+      hourCols = [];
+      for (let c = 0; c < row.length; c++) {
+        const t = String(row[c] || "").trim();
+        if (t.includes("->") && /h/i.test(t)) hourCols.push(c);
       }
+
+      hourLabels = hourCols.map((c) => String(row[c] || "").trim());
+      break;
     }
-
-    if (dmHCol < 0) continue;
-
-    const hourLabels = hourCols.map((c) => String(row[c] || "").trim());
-
-    best = { headerRow: r, dmDayCol, dmHCol, hourCols, hourLabels };
-    break; // block đầu tiên khớp ngày là đủ
   }
 
-  return best;
+  if (headerRow < 0 || dmHCol < 0 || hourCols.length === 0) return null;
+  return { headerRow, dmDayCol, dmHCol, hourCols, hourLabels };
 }
 
-function pickLineLabel(row, beforeCol) {
-  const limit = Math.max(0, beforeCol);
-  for (let c = 0; c < limit; c++) {
-    const t = String(row[c] || "").trim();
-    if (!t) continue;
-    const n = normCompact(t);
-    // C1..C99, CAT, KCS, HOAN TAT, NM...
-    if (/^(C\d+|CAT|KCS|HOANTAT|HOAN|NM)$/.test(n)) return normalize(t); // trả "C1"...
+function findLineLabelInRow(row, beforeCol) {
+  for (let c = 0; c < beforeCol; c++) {
+    const t = String(row[c] || "").trim().toUpperCase();
+    if (/^C\d+$/.test(t)) return t; // C1..C10 nằm ở cột A như ảnh bạn gửi
   }
-  // fallback: cell đầu
-  const t0 = String(row[0] || "").trim();
-  return t0 ? normalize(t0) : "";
+  return "";
 }
 
-function buildHourlyData(full, chosenShortDM) {
-  const info = findHourlyTable(full, chosenShortDM);
+function buildHourlyData(full) {
+  const info = findHourlyTable(full);
   if (!info) return { byLine: {}, lines: [] };
 
   const { headerRow, dmDayCol, dmHCol, hourCols, hourLabels } = info;
@@ -183,18 +124,18 @@ function buildHourlyData(full, chosenShortDM) {
     const dmDay = dmDayCol >= 0 ? toNum(row[dmDayCol]) : 0;
 
     const hasAnyHour = hourCols.some((c) => String(row[c] || "").trim() !== "");
-    const label = pickLineLabel(row, dmDayCol >= 0 ? dmDayCol : dmHCol);
 
-    // dừng khi trống liên tiếp vài dòng (tránh bị cắt sớm 1 dòng trống trong bảng)
-    if (!hasAnyHour && dmH === 0 && dmDay === 0 && !label) {
+    // nếu gặp vùng trống nhiều dòng thì dừng
+    if (!hasAnyHour && dmH === 0 && dmDay === 0) {
       blankStreak++;
-      if (blankStreak >= 5) break;
+      if (blankStreak >= 6) break;
       continue;
-    } else {
-      blankStreak = 0;
     }
+    blankStreak = 0;
 
-    if (!label) continue;
+    const beforeCol = dmDayCol >= 0 ? dmDayCol : dmHCol;
+    const line = findLineLabelInRow(row, beforeCol);
+    if (!line) continue;
 
     const hours = hourCols.map((c, idx) => {
       const actual = toNum(row[c]);
@@ -202,41 +143,29 @@ function buildHourlyData(full, chosenShortDM) {
       const diff = actual - target;
 
       let status = "CHƯA CÓ ĐM";
-      if (dmH > 0) status = actual >= target ? (actual === target ? "ĐỦ" : "VƯỢT") : "THIẾU";
+      if (dmH > 0) status = actual === target ? "ĐỦ" : actual > target ? "VƯỢT" : "THIẾU";
 
-      return {
-        label: hourLabels[idx] || `H${idx + 1}`,
-        actual,
-        target,
-        diff,
-        status,
-      };
+      return { label: hourLabels[idx] || `H${idx + 1}`, actual, target, diff, status };
     });
 
-    byLine[label] = { line: label, dmDay, dmH, hours };
-    lines.push(label);
+    byLine[line] = { line, dmDay, dmH, hours };
+    lines.push(line);
   }
 
-  // tổng hợp
+  // Tổng hợp
   if (lines.length) {
     const totalDmH = lines.reduce((s, ln) => s + (byLine[ln]?.dmH || 0), 0);
     const totalDmDay = lines.reduce((s, ln) => s + (byLine[ln]?.dmDay || 0), 0);
 
-    const totalHours = (byLine[lines[0]]?.hours || []).map((_, idx) => {
+    const totalHours = byLine[lines[0]].hours.map((_, idx) => {
       const actual = lines.reduce((s, ln) => s + (byLine[ln]?.hours?.[idx]?.actual || 0), 0);
       const target = totalDmH > 0 ? totalDmH * (idx + 1) : 0;
       const diff = actual - target;
 
       let status = "CHƯA CÓ ĐM";
-      if (totalDmH > 0) status = actual >= target ? (actual === target ? "ĐỦ" : "VƯỢT") : "THIẾU";
+      if (totalDmH > 0) status = actual === target ? "ĐỦ" : actual > target ? "VƯỢT" : "THIẾU";
 
-      return {
-        label: byLine[lines[0]]?.hours?.[idx]?.label || `H${idx + 1}`,
-        actual,
-        target,
-        diff,
-        status,
-      };
+      return { label: byLine[lines[0]].hours[idx].label, actual, target, diff, status };
     });
 
     byLine["TỔNG HỢP"] = { line: "TỔNG HỢP", dmDay: totalDmDay, dmH: totalDmH, hours: totalHours };
@@ -246,14 +175,14 @@ function buildHourlyData(full, chosenShortDM) {
 }
 
 async function readConfigDates() {
-  const names = sheetNames(); // chú ý: sheetNames() phải là function trả về object
-  const CONFIG = names.CONFIG_KPI_SHEET_NAME || "CONFIG_KPI";
+  const { CONFIG_KPI_SHEET_NAME } = sheetNames();
 
-  const rows = await readValues(`${CONFIG}!A2:A1000`, {
-    valueRenderOption: "UNFORMATTED_VALUE",
+  // IMPORTANT: dùng FORMATTED_VALUE để tránh số thường bị hiểu nhầm là serial date
+  const rows = await readValues(`${CONFIG_KPI_SHEET_NAME}!A2:A1000`, {
+    valueRenderOption: "FORMATTED_VALUE",
   });
 
-  const dates = rows.map((r) => parseDateCell(r?.[0])).filter(Boolean);
+  const dates = rows.map((r) => parseDateText(r?.[0])).filter(Boolean);
   dates.sort(sortDatesDesc);
   return dates;
 }
@@ -262,33 +191,32 @@ async function readConfigDates() {
 export async function GET(request) {
   try {
     const qDate = request.nextUrl.searchParams.get("date") || "";
-    const qLineRaw = request.nextUrl.searchParams.get("line") || "TỔNG HỢP";
+    const qLine = request.nextUrl.searchParams.get("line") || "TỔNG HỢP";
 
-    const names = sheetNames(); // chú ý: sheetNames() phải là function
-    const KPI = names.KPI_SHEET_NAME || process.env.KPI_SHEET_NAME || "KPI";
+    const { KPI_SHEET_NAME } = sheetNames();
 
     const dates = await readConfigDates();
-    const chosenDate = parseDateCell(qDate) || dates[0] || "";
-    const chosenShortDM = toShortDM(chosenDate);
+    const chosenDate = parseDateText(qDate) || dates[0] || "";
+    const chosenShortDM = toShortDM(chosenDate); // (nếu UI cần)
 
-    const full = await readValues(`${KPI}!A1:AZ2000`, {
+    // đọc KPI (unformatted để lấy số chuẩn)
+    const full = await readValues(`${KPI_SHEET_NAME}!A1:AZ2000`, {
       valueRenderOption: "UNFORMATTED_VALUE",
     });
 
-    const hourly = buildHourlyData(full, chosenShortDM);
+    const hourlyAll = buildHourlyData(full);
 
-    // normalize line query: cho phép "c1" -> "C1"
-    const qLine = normalize(qLineRaw);
-    const selectedLine = hourly.byLine[qLine] ? qLine : "TỔNG HỢP";
-    const lineData = hourly.byLine[selectedLine] || { line: selectedLine, dmDay: 0, dmH: 0, hours: [] };
+    const selectedLine = hourlyAll.byLine[qLine] ? qLine : "TỔNG HỢP";
+    const hourly = hourlyAll.byLine[selectedLine] || { line: selectedLine, dmDay: 0, dmH: 0, hours: [] };
 
     return Response.json({
       ok: true,
       chosenDate,
+      chosenShortDM,
       dates,
-      lines: hourly.lines,
+      lines: hourlyAll.lines,
       selectedLine,
-      hourly: lineData,
+      hourly,
     });
   } catch (e) {
     return Response.json({ ok: false, error: String(e?.message || e) }, { status: 500 });
