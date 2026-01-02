@@ -1,50 +1,47 @@
 // app/api/_lib/googleSheetsClient.js
 import { google } from "googleapis";
 
-// ====== đọc service account từ ENV (nhiều kiểu) ======
-// Ưu tiên 1: GOOGLE_SERVICE_ACCOUNT_JSON (json string)
-// Ưu tiên 2: GOOGLE_SERVICE_ACCOUNT_BASE64 (base64 json)
-// Ưu tiên 3: GOOGLE_CLIENT_EMAIL + GOOGLE_PRIVATE_KEY
-
-function loadServiceAccount() {
-  const rawJson = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-  if (rawJson && rawJson.trim()) {
-    try {
-      return JSON.parse(rawJson);
-    } catch (e) {
-      throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON không phải JSON hợp lệ");
-    }
-  }
-
-  const b64 = process.env.GOOGLE_SERVICE_ACCOUNT_BASE64;
-  if (b64 && b64.trim()) {
-    try {
-      const jsonStr = Buffer.from(b64, "base64").toString("utf8");
-      return JSON.parse(jsonStr);
-    } catch (e) {
-      throw new Error("GOOGLE_SERVICE_ACCOUNT_BASE64 không decode/parse được");
-    }
-  }
-
-  const client_email = process.env.GOOGLE_CLIENT_EMAIL;
-  let private_key = process.env.GOOGLE_PRIVATE_KEY;
-
-  if (client_email && private_key) {
-    // Vercel thường lưu key dạng \n -> phải replace
-    private_key = private_key.replace(/\\n/g, "\n");
-    return { client_email, private_key };
-  }
-
-  throw new Error(
-    "Thiếu ENV Service Account. Cần 1 trong: GOOGLE_SERVICE_ACCOUNT_JSON / GOOGLE_SERVICE_ACCOUNT_BASE64 / (GOOGLE_CLIENT_EMAIL + GOOGLE_PRIVATE_KEY)"
-  );
+function mustGetEnv(name) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing env: ${name}`);
+  return v;
 }
 
-// cache client để khỏi tạo lại nhiều lần
-let _cached = null;
+function loadServiceAccount() {
+  const raw =
+    process.env.GOOGLE_SERVICE_ACCOUNT_JSON ||
+    process.env.GOOGLE_SERVICE_ACCOUNT ||
+    "";
+
+  if (!raw) {
+    throw new Error(
+      "Missing env GOOGLE_SERVICE_ACCOUNT_JSON (or GOOGLE_SERVICE_ACCOUNT). Put full service account JSON here."
+    );
+  }
+
+  // Vercel hay bị escape \n trong private_key
+  let obj;
+  try {
+    obj = JSON.parse(raw);
+  } catch (e) {
+    throw new Error("Service account env is not valid JSON");
+  }
+
+  if (obj.private_key && typeof obj.private_key === "string") {
+    obj.private_key = obj.private_key.replace(/\\n/g, "\n");
+  }
+
+  if (!obj.client_email || !obj.private_key) {
+    throw new Error("Service account JSON missing client_email/private_key");
+  }
+
+  return obj;
+}
+
+let cached = null;
 
 export default async function getSheetsClient() {
-  if (_cached) return _cached;
+  if (cached) return cached;
 
   const sa = loadServiceAccount();
 
@@ -54,12 +51,8 @@ export default async function getSheetsClient() {
     scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
   });
 
-  // test auth (optional, nhưng giúp bắt lỗi key nhanh)
-  await auth.authorize();
-
-  // Đây mới là “Sheets client” đúng kiểu có spreadsheets.values.get
   const sheets = google.sheets({ version: "v4", auth });
 
-  _cached = sheets;
+  cached = sheets;
   return sheets;
 }

@@ -22,10 +22,7 @@ function norm(str) {
 function toNumber(v) {
   const t = trimAll(v);
   if (!t) return 0;
-  const cleaned = t
-    .replace(/,/g, "")
-    .replace(/%/g, "")
-    .replace(/[^\d.\-]/g, "");
+  const cleaned = t.replace(/,/g, "").replace(/[^\d.\-]/g, "");
   const n = Number(cleaned);
   return Number.isFinite(n) ? n : 0;
 }
@@ -62,35 +59,33 @@ function normalizeLine(x) {
 
 // parse mốc giờ: ->9h, ->12h30 ...
 function parseHourFactor(label) {
-  const t = norm(label);
+  const t = norm(label).replace("→", "->");
   const m = t.match(/(\d{1,2})\s*H\s*(\d{2})?/);
   if (!m) return null;
   const hh = Number(m[1]);
   const mm = m[2] ? Number(m[2]) : 0;
   const hour = hh + mm / 60;
 
-  // quy ước: ->9h = 1 (tính từ 8h)
+  // ->9h = 1 (tính từ 8h)
   const factor = hour - 8;
   return Number.isFinite(factor) ? factor : null;
 }
 
-// ===== tìm dòng có các cột giờ (->9h, ->10h, ...) =====
 function findHourRow(values, startRow, endRow) {
   for (let r = startRow; r < endRow; r++) {
     const row = values[r] || [];
     const rowN = row.map(norm);
 
-    // điều kiện: có ít nhất 2 mốc giờ để chắc chắn
     const has9 = rowN.some((c) => c.includes("->9H") || c.includes("→9H"));
     const has10 = rowN.some((c) => c.includes("->10H") || c.includes("→10H"));
     const has11 = rowN.some((c) => c.includes("->11H") || c.includes("→11H"));
+
     if ((has9 && has10) || (has9 && has11) || (has10 && has11)) return r;
   }
   return -1;
 }
 
-// ===== tìm cột trong “cửa sổ” quanh hourRow (do merge header) =====
-function findColInWindow(values, hourRowIdx, needleFn, before = 4, after = 4) {
+function findColInWindow(values, hourRowIdx, needleFn, before = 5, after = 5) {
   const r0 = Math.max(0, hourRowIdx - before);
   const r1 = Math.min(values.length - 1, hourRowIdx + after);
 
@@ -104,34 +99,113 @@ function findColInWindow(values, hourRowIdx, needleFn, before = 4, after = 4) {
   return -1;
 }
 
-// ===== tìm anchor theo ngày rồi tìm hourRow nằm dưới =====
+// lấy một số dòng data (có C1..Cn) để test cột nào “đúng số”
+function collectDataRows(values, hourRowIdx, max = 25) {
+  const out = [];
+  for (let r = hourRowIdx + 1; r < values.length && out.length < max; r++) {
+    const row = values[r] || [];
+    if (!row.length) continue;
+
+    // tìm line token ở vài cột đầu để biết row data
+    const hit = row.slice(0, 5).some((x) => isLineToken(x));
+    if (!hit) {
+      if (out.length > 0) break;
+      continue;
+    }
+    out.push(row);
+  }
+  return out;
+}
+
+// calibrate cột: nếu header bị lệch do merge, chọn cột có “nhiều số hợp lý” nhất
+function calibrateNumericCol(baseIdx, dataRows, scorer) {
+  const candidates = [baseIdx, baseIdx + 1, baseIdx - 1, baseIdx + 2, baseIdx - 2]
+    .filter((x) => x >= 0);
+
+  let best = baseIdx;
+  let bestScore = -1;
+
+  for (const idx of candidates) {
+    let score = 0;
+    for (const row of dataRows) {
+      const val = row[idx];
+      score += scorer(val);
+    }
+    if (score > bestScore || (score === bestScore && Math.abs(idx - baseIdx) < Math.abs(best - baseIdx))) {
+      bestScore = score;
+      best = idx;
+    }
+  }
+  return best;
+}
+
+function scoreDmH(v) {
+  const n = toNumber(v);
+  // DM/H thường > 0 và không quá lớn
+  if (n > 0 && n < 1000) return 2;
+  return 0;
+}
+function scorePercent(v) {
+  const p = toPercent(v);
+  if (p > 0 && p <= 200) return 2;
+  return 0;
+}
+
+// tìm block theo ngày: ưu tiên cột A (vì sheet bạn để ngày ở cột A)
 function findHourRowByDate(values, queryDate) {
   const q = trimAll(queryDate);
   const qDDMM = ddmmFromAnyDateStr(q);
 
   const anchors = [];
-  for (let r = 0; r < values.length; r++) {
-    const row = values[r] || [];
-    for (let c = 0; c < row.length; c++) {
-      const cell = trimAll(row[c]);
-      if (!cell) continue;
 
-      const cellDDMM = ddmmFromAnyDateStr(cell);
-      if (cell === q || (qDDMM && cellDDMM === qDDMM)) {
-        anchors.push(r);
-        break;
+  // ưu tiên tìm ở cột A trước
+  for (let r = 0; r < values.length; r++) {
+    const cell = trimAll(values[r]?.[0]);
+    if (!cell) continue;
+    const cellDDMM = ddmmFromAnyDateStr(cell);
+    if (cell === q || (qDDMM && cellDDMM === qDDMM)) anchors.push(r);
+  }
+
+  // nếu cột A không thấy, tìm toàn sheet
+  if (!anchors.length) {
+    for (let r = 0; r < values.length; r++) {
+      const row = values[r] || [];
+      for (let c = 0; c < row.length; c++) {
+        const cell = trimAll(row[c]);
+        if (!cell) continue;
+        const cellDDMM = ddmmFromAnyDateStr(cell);
+        if (cell === q || (qDDMM && cellDDMM === qDDMM)) {
+          anchors.push(r);
+          break;
+        }
       }
     }
   }
 
-  // ưu tiên tìm hourRow ngay sau anchor ngày
+  // ✅ QUAN TRỌNG: nếu không tìm thấy ngày -> TRẢ LỖI, KHÔNG fallback về ngày 24 nữa
+  if (!anchors.length) return { hourRowIdx: -1, reason: `Không tìm thấy ngày ${q} trong sheet` };
+
+  // thử từng anchor: chọn cái nào parse ra được nhiều data nhất
+  let best = { hourRowIdx: -1, parsedCount: -1, anchor: anchors[0] };
+
   for (const a of anchors) {
-    const hr = findHourRow(values, a, Math.min(values.length, a + 250));
-    if (hr !== -1) return hr;
+    const hr = findHourRow(values, a, Math.min(values.length, a + 300));
+    if (hr === -1) continue;
+
+    // đếm nhanh số dòng data sau hr
+    const dataRows = collectDataRows(values, hr, 20);
+    const count = dataRows.length;
+
+    if (count > best.parsedCount) {
+      best = { hourRowIdx: hr, parsedCount: count, anchor: a };
+    }
   }
 
-  // fallback: tìm toàn sheet
-  return findHourRow(values, 0, values.length);
+  if (best.hourRowIdx === -1) {
+    return { hourRowIdx: -1, reason: `Tìm thấy ngày ${q} nhưng không tìm thấy dòng ->9h ->10h phía dưới` };
+  }
+
+  return best;
 }
 
 export async function GET(req) {
@@ -143,27 +217,26 @@ export async function GET(req) {
     const debug = trimAll(searchParams.get("debug") || "") === "1";
 
     if (!date) {
-      return NextResponse.json({
-        ok: false,
-        error: "Missing query param: date=dd/MM/yyyy (hoặc dd/MM)",
-      });
+      return NextResponse.json(
+        { ok: false, error: "Missing query param: date=dd/MM/yyyy (hoặc dd/MM)" },
+        { headers: { "Cache-Control": "no-store" } }
+      );
     }
 
     const spreadsheetId =
       process.env.GOOGLE_SHEET_ID ||
-      process.env.GOOGLE_SHEETID ||
       process.env.SPREADSHEET_ID ||
       "";
 
     if (!spreadsheetId) {
-      return NextResponse.json({
-        ok: false,
-        error: "Missing env GOOGLE_SHEET_ID (hoặc SPREADSHEET_ID)",
-      });
+      return NextResponse.json(
+        { ok: false, error: "Missing env GOOGLE_SHEET_ID" },
+        { headers: { "Cache-Control": "no-store" } }
+      );
     }
 
     const SHEET_NAME = process.env.KPI_SHEET_NAME || "KPI";
-    const RANGE = `${SHEET_NAME}!A1:AZ5000`; // tăng lên để chắc chắn có ngày 23/12
+    const RANGE = `${SHEET_NAME}!A1:AZ8000`; // tăng để chắc chắn có nhiều ngày
 
     const client = await getSheetsClient();
     const resp = await client.spreadsheets.values.get({
@@ -174,17 +247,21 @@ export async function GET(req) {
 
     const values = resp?.data?.values || [];
     if (!values.length) {
-      return NextResponse.json({ ok: false, error: "Sheet empty / cannot read values" });
+      return NextResponse.json(
+        { ok: false, error: "Sheet empty / cannot read values" },
+        { headers: { "Cache-Control": "no-store" } }
+      );
     }
 
-    // 1) tìm “dòng giờ” theo date (ổn định nhất)
-    const hourRowIdx = findHourRowByDate(values, date);
+    // 1) tìm dòng giờ theo ngày (KHÔNG fallback nữa)
+    const found = findHourRowByDate(values, date);
+    const hourRowIdx = found.hourRowIdx;
+
     if (hourRowIdx === -1) {
-      return NextResponse.json({
-        ok: false,
-        error: "Không tìm thấy dòng header có các cột giờ (->9h, ->10h, ...).",
-        ...(debug ? { _debug: { date, hint: "Kiểm tra sheet có dòng ->9h, ->10h; hoặc tăng RANGE." } } : {}),
-      });
+      return NextResponse.json(
+        { ok: false, error: found.reason || "Không tìm thấy block theo ngày" },
+        { headers: { "Cache-Control": "no-store" } }
+      );
     }
 
     const hourHeaderRow = values[hourRowIdx] || [];
@@ -200,46 +277,48 @@ export async function GET(req) {
       }
     }
     if (!hourCols.length) {
-      return NextResponse.json({
-        ok: false,
-        error: "Tìm thấy hourRow nhưng không parse được cột giờ (->9h...).",
-        ...(debug ? { _debug: { hourRowIdx, hourHeaderRow } } : {}),
-      });
+      return NextResponse.json(
+        { ok: false, error: "Tìm thấy hourRow nhưng không parse được cột giờ (->9h...)" },
+        { headers: { "Cache-Control": "no-store" } }
+      );
     }
 
-    // 3) do header merge, tìm DM/H + SUẤT ĐẠT + ĐỊNH MỨC quanh hourRow (quét +/- 4 dòng)
-    const colDmH = findColInWindow(values, hourRowIdx, (x) => x === "DM/H" || x.includes("DM/H"));
-    const colSuatDat = findColInWindow(values, hourRowIdx, (x) => x.includes("SUAT DAT TRONG NGAY"));
-    const colDinhMuc = findColInWindow(values, hourRowIdx, (x) => x.includes("DINH MUC TRONG NGAY"));
+    // 3) tìm cột theo header quanh hourRow (chịu merge)
+    let colDmH = findColInWindow(values, hourRowIdx, (x) => x === "DM/H" || x.includes("DM/H"));
+    let colSuatDat = findColInWindow(values, hourRowIdx, (x) => x.includes("SUAT DAT TRONG NGAY"));
+    let colDinhMuc = findColInWindow(values, hourRowIdx, (x) => x.includes("DINH MUC TRONG NGAY"));
 
     if (colDmH === -1) {
-      return NextResponse.json({
-        ok: false,
-        error: "Không tìm thấy cột DM/H quanh dòng giờ (do merge/đổi tên).",
-        ...(debug ? { _debug: { hourRowIdx, sampleRows: values.slice(Math.max(0, hourRowIdx - 4), hourRowIdx + 5) } } : {}),
-      });
+      return NextResponse.json(
+        { ok: false, error: "Không tìm thấy cột DM/H quanh dòng giờ (do merge/đổi tên)." },
+        { headers: { "Cache-Control": "no-store" } }
+      );
     }
     if (colSuatDat === -1 || colDinhMuc === -1) {
-      return NextResponse.json({
-        ok: false,
-        error: "Không tìm thấy cột 'SUẤT ĐẠT TRONG NGÀY' hoặc 'ĐỊNH MỨC TRONG NGÀY' quanh dòng giờ (do merge/đổi tên).",
-        ...(debug ? { _debug: { hourRowIdx, colSuatDat, colDinhMuc } } : {}),
-      });
+      return NextResponse.json(
+        { ok: false, error: "Không tìm thấy cột SUẤT ĐẠT TRONG NGÀY hoặc ĐỊNH MỨC TRONG NGÀY (do merge/đổi tên)." },
+        { headers: { "Cache-Control": "no-store" } }
+      );
     }
 
-    // 4) parse dữ liệu: bắt đầu từ sau hourRowIdx
-    const lineMap = new Map();
+    // ✅ 4) CALIBRATE cột số (FIX dmTarget/diff = 0)
+    const dataRowsForCal = collectDataRows(values, hourRowIdx, 25);
 
-    // đoán cột chứa C1..Cn: ưu tiên vùng 0..(colDmH-1)
+    colDmH = calibrateNumericCol(colDmH, dataRowsForCal, scoreDmH);
+    colSuatDat = calibrateNumericCol(colSuatDat, dataRowsForCal, scorePercent);
+    colDinhMuc = calibrateNumericCol(colDinhMuc, dataRowsForCal, scorePercent);
+
+    // 5) parse dữ liệu theo line
+    const lineMap = new Map();
     let lineColGuess = -1;
 
     for (let r = hourRowIdx + 1; r < values.length; r++) {
       const row = values[r] || [];
       if (!row.length) continue;
 
-      // guess line col
       if (lineColGuess === -1) {
-        for (let c = 0; c < Math.min(row.length, Math.max(1, colDmH)); c++) {
+        // đoán cột chứa C1..C10
+        for (let c = 0; c < 8; c++) {
           if (isLineToken(row[c])) {
             lineColGuess = c;
             break;
@@ -250,7 +329,6 @@ export async function GET(req) {
 
       const rawLine = row[lineColGuess];
 
-      // nếu đã parse được rồi mà gặp dòng không phải line => dừng (qua block khác)
       if (!isLineToken(rawLine)) {
         if (lineMap.size > 0) break;
         continue;
@@ -274,14 +352,14 @@ export async function GET(req) {
     const linesOnly = Array.from(lineMap.keys());
     const lines = ["TỔNG HỢP", ...linesOnly];
 
-    // dailyRows
+    // dailyRows + status chuẩn hoá để UI tô màu
     const dailyRows = linesOnly.map((ln) => {
       const it = lineMap.get(ln);
       const status = it.hsDat >= it.hsDm ? "ĐẠT" : "CHƯA ĐẠT";
       return { line: ln, hsDat: it.hsDat, hsDm: it.hsDm, status };
     });
 
-    // hourly (theo line / tổng hợp)
+    // hourly theo line/tổng hợp
     const reqLine = selectedLineRaw.toUpperCase();
     const selectedLine =
       reqLine === "TỔNG HỢP" ? "TỔNG HỢP" : (linesOnly.includes(reqLine) ? reqLine : "TỔNG HỢP");
@@ -303,36 +381,55 @@ export async function GET(req) {
       totalsByHour = it?.hours?.map((h) => h.total) || totalsByHour;
     }
 
+    // ✅ status giờ: ĐỦ nếu chênh ~ 0 (sau khi làm tròn), VƯỢT nếu >0, THIẾU nếu <0
     const hourlyHours = hourLabels.map((hl, i) => {
       const total = totalsByHour[i] || 0;
       const dmTarget = dmHSelected * hl.factor;
       const diff = total - dmTarget;
-      const status = diff >= 0 ? "VƯỢT" : "THIẾU";
-      return { label: hl.label, total, dmTarget, diff, status };
+
+      // làm tròn để tránh float
+      const diffR = Math.round(diff);
+
+      const status = diffR === 0 ? "ĐỦ" : (diffR > 0 ? "VƯỢT" : "THIẾU");
+
+      return {
+        label: hl.label,
+        total,
+        dmTarget,
+        diff,
+        status,
+      };
     });
 
-    return NextResponse.json({
-      ok: true,
-      chosenDate: date,
-      lines,
-      selectedLine,
-      dailyRows,
-      hourly: { line: selectedLine, dmH: dmHSelected, hours: hourlyHours },
-      ...(debug
-        ? {
-            _debug: {
-              hourRowIdx,
-              colDmH,
-              colSuatDat,
-              colDinhMuc,
-              hourCols,
-              parsedLines: linesOnly,
-              lineColGuess,
-            },
-          }
-        : {}),
-    });
+    return NextResponse.json(
+      {
+        ok: true,
+        chosenDate: date,
+        lines,
+        selectedLine,
+        dailyRows,
+        hourly: { line: selectedLine, dmH: dmHSelected, hours: hourlyHours },
+        ...(debug
+          ? {
+              _debug: {
+                anchor: found.anchor,
+                hourRowIdx,
+                colDmH,
+                colSuatDat,
+                colDinhMuc,
+                lineColGuess,
+                parsedLines: linesOnly,
+                hourCols,
+              },
+            }
+          : {}),
+      },
+      { headers: { "Cache-Control": "no-store" } }
+    );
   } catch (e) {
-    return NextResponse.json({ ok: false, error: e?.message || "Server error" });
+    return NextResponse.json(
+      { ok: false, error: e?.message || "Server error" },
+      { headers: { "Cache-Control": "no-store" } }
+    );
   }
 }
