@@ -1,245 +1,201 @@
+// app/kpi/page.js
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import "./kpi.css";
 
-const norm = (s) => (s ?? "").toString().trim();
-const isTongHop = (x) => ["TONG HOP", "TỔNG HỢP"].includes(norm(x).toUpperCase());
-
-function fmtInt(n) {
-  if (n === null || n === undefined) return "-";
-  const x = Number(n);
-  if (!Number.isFinite(x)) return "-";
-  return Math.round(x).toString();
-}
-function fmtPct(n) {
-  if (n === null || n === undefined) return "-";
-  const x = Number(n);
-  if (!Number.isFinite(x)) return "-";
-  return x.toFixed(2);
+function nowDdMmYyyy() {
+  // dd/MM/yyyy (VN)
+  const d = new Date();
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yy = d.getFullYear();
+  return `${dd}/${mm}/${yy}`;
 }
 
-export default function KPIPanel() {
-  const [dates, setDates] = useState([]);
-  const [chosenDate, setChosenDate] = useState("");
-  const [lines, setLines] = useState([]);
-  const [selectedLine, setSelectedLine] = useState("TỔNG HỢP");
+function fmt(n, digits = 0) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return "0";
+  return x.toFixed(digits);
+}
 
-  const [dailyRows, setDailyRows] = useState([]);
-  const [hourly, setHourly] = useState({ line: "", dmH: 0, hours: [] });
+export default function KPIPage() {
+  const [date, setDate] = useState(nowDdMmYyyy());
+  const [line, setLine] = useState("TỔNG HỢP");
+  const [data, setData] = useState(null);
+  const [status, setStatus] = useState("Đang tải...");
+  const [tick, setTick] = useState(0);
 
-  const [statusText, setStatusText] = useState("...");
-  const timerRef = useRef(null);
-
-  const fetchData = async (date, line) => {
-    const qs = new URLSearchParams();
-    if (date) qs.set("date", date);
-    if (line) qs.set("line", line);
-    qs.set("t", String(Date.now())); // bust cache
-
-    const res = await fetch(`/api/check-kpi?${qs.toString()}`, { cache: "no-store" });
-    const json = await res.json();
-
-    if (!json?.ok) {
-      setStatusText("LỖI API");
-      return;
+  async function load(nextDate = date, nextLine = line) {
+    try {
+      setStatus("Đang tải...");
+      const ts = Date.now();
+      const res = await fetch(`/api/check-kpi?date=${encodeURIComponent(nextDate)}&line=${encodeURIComponent(nextLine)}&_ts=${ts}`, {
+        cache: "no-store",
+      });
+      const j = await res.json();
+      if (!j.ok) {
+        setStatus("Lỗi: " + (j.error || "unknown"));
+        setData(null);
+        return;
+      }
+      setData(j);
+      setStatus("OK (tự cập nhật mỗi 15s)");
+    } catch (e) {
+      setStatus("Lỗi: " + String(e?.message || e));
+      setData(null);
     }
+  }
 
-    setDates(json.dates || []);
-    setChosenDate(json.chosenDate || "");
-
-    const newLines = json.lines || [];
-    setLines(newLines);
-
-    let newSelected = json.selectedLine || line || "TỔNG HỢP";
-    // fix C10 sort already in API, but keep stable here
-    if (!newLines.some((x) => norm(x).toUpperCase() === norm(newSelected).toUpperCase())) {
-      newSelected = newLines.find((x) => isTongHop(x)) || newLines[0] || "TỔNG HỢP";
-    }
-    setSelectedLine(newSelected);
-
-    setDailyRows(json.dailyRows || []);
-    setHourly(json.hourly || { line: newSelected, dmH: 0, hours: [] });
-
-    setStatusText("OK (tự cập nhật mỗi 15s)");
-  };
-
-  // initial load
+  // load lần đầu + khi đổi ngày/line => load ngay, không cần refresh
   useEffect(() => {
-    fetchData("", "TỔNG HỢP");
+    load(date, line);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [date, line]);
+
+  // auto refresh 15s
+  useEffect(() => {
+    const id = setInterval(() => {
+      setTick((t) => t + 1);
+    }, 15000);
+    return () => clearInterval(id);
   }, []);
 
-  // auto refresh (15s) + chỉ refresh khi tab đang visible
   useEffect(() => {
-    const tick = () => {
-      if (document.visibilityState !== "visible") return;
-      fetchData(chosenDate, selectedLine);
-    };
-    timerRef.current = setInterval(tick, 15000);
-    return () => clearInterval(timerRef.current);
-  }, [chosenDate, selectedLine]);
+    load(date, line);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tick]);
 
-  // when date changes => load immediately
-  const onChangeDate = (v) => {
-    setChosenDate(v);
-    fetchData(v, selectedLine);
-  };
-
-  // when line changes => load immediately (no refresh button)
-  const onChangeLine = (v) => {
-    setSelectedLine(v);
-    fetchData(chosenDate, v);
-  };
-
-  const dailyForView = useMemo(() => {
-    // show TỔNG HỢP first then C1..C10 (API already sorted)
-    return dailyRows || [];
-  }, [dailyRows]);
+  const lines = useMemo(() => data?.lines || ["TỔNG HỢP"], [data]);
+  const dailyRows = useMemo(() => data?.dailyRows || [], [data]);
+  const hourly = useMemo(() => data?.hourly || { dmH: 0, hours: [] }, [data]);
 
   return (
-    <div className="kpi-wrap">
-      <div className="kpi-top">
+    <div className="kpi-root">
+      <div className="kpi-header">
         <div>
           <div className="kpi-title">KPI Dashboard</div>
           <div className="kpi-sub">Chọn ngày và chuyền để xem dữ liệu</div>
         </div>
 
         <div className="kpi-controls">
-          <div className="ctrl">
+          <div className="kpi-field">
             <label>Chọn ngày</label>
-            <select value={chosenDate} onChange={(e) => onChangeDate(e.target.value)}>
-              {(dates || []).map((d) => (
-                <option key={d} value={d}>
-                  {d}
-                </option>
-              ))}
-            </select>
+            <input
+              className="kpi-input"
+              value={date}
+              onChange={(e) => setDate(e.target.value.trim())}
+              placeholder="dd/MM/yyyy"
+            />
           </div>
 
-          <div className="ctrl">
+          <div className="kpi-field">
             <label>Chọn chuyền</label>
-            <select value={selectedLine} onChange={(e) => onChangeLine(e.target.value)}>
-              {(lines || []).map((l) => (
-                <option key={l} value={l}>
-                  {l}
+            <select className="kpi-select" value={line} onChange={(e) => setLine(e.target.value)}>
+              {lines.map((x) => (
+                <option key={x} value={x}>
+                  {x}
                 </option>
               ))}
             </select>
           </div>
 
-          <div className="kpi-badge">{statusText}</div>
+          <div className="kpi-status">{status}</div>
         </div>
       </div>
 
       <div className="kpi-grid">
         {/* DAILY */}
-        <div className="card">
-          <div className="card-title">Hiệu suất trong ngày (so với định mức)</div>
+        <div className="kpi-card">
+          <div className="kpi-card-title">Hiệu suất trong ngày (so với định mức)</div>
 
-          <div className="table-wrap">
-            <table>
-              <thead>
+          <table className="kpi-table">
+            <thead>
+              <tr>
+                <th>Chuyền/BP</th>
+                <th className="num">HS đạt (%)</th>
+                <th className="num">HS ĐM (%)</th>
+                <th className="center">Trạng thái</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {dailyRows.length === 0 ? (
                 <tr>
-                  <th>Chuyền/BP</th>
-                  <th className="num">HS đạt (%)</th>
-                  <th className="num">HS ĐM (%)</th>
-                  <th className="center">Trạng thái</th>
+                  <td colSpan={4} className="muted">
+                    (Chưa có dữ liệu % trong sheet)
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {dailyForView.length === 0 ? (
-                  <tr>
-                    <td colSpan={4} className="muted">
-                      (Chưa có dữ liệu % trong sheet)
+              ) : (
+                dailyRows.map((r) => (
+                  <tr key={r.line}>
+                    <td className="mono">{r.line}</td>
+                    <td className="num">{fmt(r.hsDat, 2)}</td>
+                    <td className="num">{fmt(r.hsDm, 2)}</td>
+                    <td className="center">
+                      <span className={`pill ${r.status === "ĐẠT" ? "pill-ok" : "pill-bad"}`}>{r.status}</span>
                     </td>
                   </tr>
-                ) : (
-                  dailyForView.map((r) => {
-                    const ok = r.status === "ĐẠT";
-                    return (
-                      <tr key={r.line} className={isTongHop(r.line) ? "row-total" : ""}>
-                        <td>{r.line}</td>
-                        <td className="num">{fmtPct(r.hsDat)}</td>
-                        <td className="num">{fmtPct(r.hsDm)}</td>
-                        <td className="center">
-                          <span className={`pill ${ok ? "pill-ok" : r.status === "CHƯA ĐẠT" ? "pill-bad" : "pill-warn"}`}>
-                            {r.status}
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
+                ))
+              )}
+            </tbody>
+          </table>
 
-          <div className="note">
-            * So sánh: nếu <b>HS đạt ≥ HS ĐM</b> → <b>ĐẠT</b>, ngược lại <b>CHƯA ĐẠT</b>.
-          </div>
+          <div className="kpi-note">* So sánh: nếu HS đạt ≥ HS ĐM → <b>ĐẠT</b>, ngược lại <b>CHƯA ĐẠT</b>.</div>
         </div>
 
         {/* HOURLY */}
-        <div className="card">
-          <div className="card-title">
-            Kiểm lũy tiến theo giờ (so với DM/H) <span className="right">DM/H: {fmtInt(hourly?.dmH)}</span>
+        <div className="kpi-card">
+          <div className="kpi-card-title">
+            Kiểm lũy tiến theo giờ (so với DM/H)
+            <span className="kpi-right">DM/H: {fmt(hourly.dmH, 2)}</span>
           </div>
 
-          <div className="table-wrap">
-            <table>
-              <thead>
+          <table className="kpi-table">
+            <thead>
+              <tr>
+                <th>Giờ</th>
+                <th className="num">Tổng kiểm đạt</th>
+                <th className="num">DM lũy tiến</th>
+                <th className="num">Chênh</th>
+                <th className="center">Trạng thái</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {(!hourly.hours || hourly.hours.length === 0) ? (
                 <tr>
-                  <th>Giờ</th>
-                  <th className="num">Tổng kiểm đạt</th>
-                  <th className="num">DM lũy tiến</th>
-                  <th className="num">Chênh</th>
-                  <th className="center">Trạng thái</th>
-                  <th className="num">Trong giờ</th>
-                  <th className="num">DM/H</th>
-                  <th className="num">Chênh giờ</th>
-                  <th className="center">Trạng thái giờ</th>
+                  <td colSpan={5} className="muted">
+                    (Chưa có dữ liệu theo giờ)
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {(hourly?.hours || []).length === 0 ? (
-                  <tr>
-                    <td colSpan={9} className="muted">
-                      (Chưa có dữ liệu theo giờ)
+              ) : (
+                hourly.hours.map((h) => (
+                  <tr key={h.label}>
+                    <td className="mono">{h.label}</td>
+                    <td className="num">{fmt(h.actual, 0)}</td>
+                    <td className="num">{fmt(h.dmCum, 0)}</td>
+                    <td className={`num ${h.diff >= 0 ? "good" : "bad"}`}>{fmt(h.diff, 0)}</td>
+                    <td className="center">
+                      <span className={`pill ${h.status === "VƯỢT" ? "pill-ok" : "pill-bad"}`}>{h.status}</span>
                     </td>
                   </tr>
-                ) : (
-                  hourly.hours.map((h) => {
-                    const okCum = h.diffCum >= 0;
-                    const okHour = h.diffHour >= 0;
-                    return (
-                      <tr key={h.label}>
-                        <td>{h.label}</td>
-                        <td className="num">{fmtInt(h.cumActual)}</td>
-                        <td className="num">{fmtInt(h.expectedCum)}</td>
-                        <td className={`num ${okCum ? "good" : "bad"}`}>{fmtInt(h.diffCum)}</td>
-                        <td className="center">
-                          <span className={`pill ${okCum ? "pill-ok" : "pill-bad"}`}>{okCum ? "VƯỢT/ĐỦ" : "THIẾU"}</span>
-                        </td>
+                ))
+              )}
+            </tbody>
+          </table>
 
-                        <td className="num">{fmtInt(h.inHour)}</td>
-                        <td className="num">{fmtInt(h.expectedHour)}</td>
-                        <td className={`num ${okHour ? "good" : "bad"}`}>{fmtInt(h.diffHour)}</td>
-                        <td className="center">
-                          <span className={`pill ${okHour ? "pill-ok" : "pill-bad"}`}>{okHour ? "VƯỢT/ĐỦ" : "THIẾU"}</span>
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="note">
-            * Mốc giờ: <b>DM lũy tiến = DM/H × số mốc giờ</b> (-9h=1, -10h=2, ...).
+          <div className="kpi-note">
+            * Mỗi giờ: <b>DM lũy tiến = DM/H × số mốc giờ</b> (-&t;9h = 1, -&t;10h = 2, -&t;12h30 = 4.5, ...).
           </div>
         </div>
       </div>
+
+      {data?._debug ? (
+        <div className="kpi-debug">
+          debug: anchorRow={data._debug.anchorRow}, dailyCount={data._debug.dailyCount}, hourlyCount={data._debug.hourlyCount}
+        </div>
+      ) : null}
     </div>
   );
 }
