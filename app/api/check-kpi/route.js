@@ -22,6 +22,7 @@ function toNumberSafe(v) {
   const t = String(v).trim();
   if (!t) return null;
 
+  // "95.87%" , "1,234"
   const cleaned = t.replace(/%/g, "").replace(/,/g, "");
   const n = Number(cleaned);
   return Number.isFinite(n) ? n : null;
@@ -56,7 +57,7 @@ function sortLine(a, b) {
   const nb = norm(b);
   const ma = na.match(/^C(\d+)$/);
   const mb = nb.match(/^C(\d+)$/);
-  if (ma && mb) return Number(ma[1]) - Number(mb[1]);
+  if (ma && mb) return Number(ma[1]) - Number(ma[2] ? ma[2] : ma[1]) - (Number(mb[1]));
   if (ma && !mb) return -1;
   if (!ma && mb) return 1;
   return na.localeCompare(nb, "vi");
@@ -77,29 +78,46 @@ function pickEnvSheetId() {
   return process.env.GOOGLE_SHEET_ID || process.env.SPREADSHEET_ID || "";
 }
 
-// tìm cột header trong 0..3 dòng phía trên (vì header nhiều tầng / merge)
-function findColumnByHeaderNearby(block, hourHeaderIdx, keywords) {
-  const start = Math.max(0, hourHeaderIdx - 3);
-  for (let r = hourHeaderIdx; r >= start; r--) {
+/**
+ * 🔥 Quan trọng:
+ * Header sheet bạn bị merge/nhiều tầng => KHÔNG được chỉ dò quanh hourHeaderIdx.
+ * Hàm này sẽ dò toàn block, ưu tiên header nằm "thấp" hơn (gần data hơn).
+ */
+function findColumnByHeaderAnywhere(block, keywords, maxRows = 60) {
+  let best = { r: -1, c: -1 };
+  const R = Math.min(block.length, maxRows);
+
+  for (let r = 0; r < R; r++) {
     const row = block[r] || [];
     for (let c = 0; c < row.length; c++) {
       const x = norm(row[c]);
       if (!x) continue;
-      if (keywords.some((k) => x.includes(k))) return c;
+      if (keywords.some((k) => x.includes(k))) {
+        // ưu tiên row lớn hơn (gần data hơn)
+        if (r > best.r) best = { r, c };
+      }
     }
+  }
+  return best.c;
+}
+
+// Ưu tiên nhóm keyword theo thứ tự
+function findColumnByHeaderPriority(block, groups) {
+  for (const g of groups) {
+    const c = findColumnByHeaderAnywhere(block, g);
+    if (c >= 0) return c;
   }
   return -1;
 }
 
 function findDMHColumn(block, hourHeaderIdx) {
-  const start = Math.max(0, hourHeaderIdx - 3);
+  // dò quanh header giờ trước, vì DM/H nằm gần khu giờ
+  const start = Math.max(0, hourHeaderIdx - 5);
   for (let r = hourHeaderIdx; r >= start; r--) {
     const row = block[r] || [];
     for (let c = 0; c < row.length; c++) {
       const x = norm(row[c]);
-      if (x === "DM/H" || x === "DMH" || x === "DM /H" || x === "ĐM/H" || x === "ĐMH") {
-        return c;
-      }
+      if (x === "DM/H" || x === "DMH" || x === "DM /H" || x === "ĐM/H" || x === "ĐMH") return c;
     }
   }
   // fallback: nếu dòng mốc giờ có chữ "H"
@@ -108,6 +126,12 @@ function findDMHColumn(block, hourHeaderIdx) {
     if (norm(row[c]) === "H") return c;
   }
   return -1;
+}
+
+function findLineColumn(block) {
+  // dò toàn block để chắc ăn
+  const c = findColumnByHeaderAnywhere(block, ["CHUYEN", "CHUYỀN", "LINE", "CHUYEN/BP"]);
+  return c >= 0 ? c : 0;
 }
 
 export async function GET(req) {
@@ -126,10 +150,9 @@ export async function GET(req) {
     }
 
     const KPI_SHEET_NAME = process.env.KPI_SHEET_NAME || "KPI";
-
     const sheets = await getSheetsClient();
 
-    // ✅ tăng range để chắc chắn không thiếu cột (bảng bạn khá rộng)
+    // ✅ tăng range (sheet bạn khá rộng)
     const range = `${KPI_SHEET_NAME}!A1:CF500`;
 
     const resp = await sheets.spreadsheets.values.get({
@@ -173,7 +196,7 @@ export async function GET(req) {
 
     if (startRow < 0) {
       return Response.json(
-        { ok: false, error: `Không tìm thấy ngày ${date} trong tab ${KPI_SHEET_NAME}` },
+        { ok: false, error: `Không tìm thấy ngày ${date} trong tab ${KPI_SHEET_NAME}`},
         { status: 404 }
       );
     }
@@ -205,7 +228,7 @@ export async function GET(req) {
         {
           ok: false,
           error: "Không tìm thấy dòng header mốc giờ (->9h / →9h).",
-          _debug: { startRow, endRow, sample: block.slice(0, 12) },
+          _debug: { startRow, endRow, sample: block.slice(0, 20) },
         },
         { status: 500, headers: { "Cache-Control": "no-store" } }
       );
@@ -218,31 +241,29 @@ export async function GET(req) {
         {
           ok: false,
           error: "Không tìm thấy cột DM/H (có thể đang merge).",
-          _debug: { hourHeaderIdx, sample: block.slice(Math.max(0, hourHeaderIdx - 3), hourHeaderIdx + 2) },
+          _debug: { hourHeaderIdx, sample: block.slice(Math.max(0, hourHeaderIdx - 6), hourHeaderIdx + 3) },
         },
         { status: 500, headers: { "Cache-Control": "no-store" } }
       );
     }
 
-    // cột chuyền
-    let colLine = findColumnByHeaderNearby(block, hourHeaderIdx, ["CHUYEN", "CHUYỀN", "LINE"]);
-    if (colLine < 0) colLine = 0;
+    const colLine = findLineColumn(block);
 
-    // ✅ FIX CHÍNH Ở ĐÂY: nới keywords theo header thật của bạn
-    const colHsDat = findColumnByHeaderNearby(block, hourHeaderIdx, [
-      "HIEU SUAT DAT TRONG NGAY",
-      "SUAT DAT TRONG NGAY",
-      "HS DAT TRONG NGAY",
-      "SUAT DAT",
-      "HS DAT",
+    // ✅ HS đạt trong ngày: ưu tiên đúng theo sheet bạn
+    const colHsDat = findColumnByHeaderPriority(block, [
+      ["TY LE HS DAT/NGAY", "TY LE HS DAT NGAY"],
+      ["HIEU SUAT DAT TRONG NGAY", "SUAT DAT TRONG NGAY", "HS DAT TRONG NGAY"],
+      ["H SUAT DAT TRONG NGAY", "H. SUAT DAT TRONG NGAY"],
+      // fallback cuối: có thể bạn đổi tên
+      ["TY LE HS DAT", "HS DAT"],
     ]);
 
-    const colHsDm = findColumnByHeaderNearby(block, hourHeaderIdx, [
-      "HS DINH MUC TRONG NGAY",
-      "DINH MUC TRONG NGAY",
-      "HS DM TRONG NGAY",
-      "DINH MUC",
-      "HS DM",
+    // ✅ HS định mức trong ngày: ưu tiên đúng theo sheet bạn
+    const colHsDm = findColumnByHeaderPriority(block, [
+      ["HS DINH MUC TRONG NGAY", "DINH MUC TRONG NGAY", "HS DM TRONG NGAY"],
+      ["HS DINH MUC BQ", "DINH MUC BQ", "DINH MUC BQ DAU THANG", "HS DINH MUC BQ DAU THANG"],
+      // fallback cuối
+      ["HS DINH MUC", "HS DM", "DINH MUC"],
     ]);
 
     if (colHsDat < 0 || colHsDm < 0) {
@@ -250,11 +271,12 @@ export async function GET(req) {
         {
           ok: false,
           error:
-            "Không thấy cột HS đạt trong ngày / HS định mức trong ngày (header có thể merge hoặc tên khác).",
+            "Không thấy cột HS đạt trong ngày / HS định mức trong ngày (header có thể merge hoặc đổi tên).",
           _debug: {
             hourHeaderIdx,
             found: { colHsDat, colHsDm },
-            sample: block.slice(Math.max(0, hourHeaderIdx - 3), hourHeaderIdx + 2),
+            // show nhiều hơn để bạn nhìn thấy header đúng
+            sample: block.slice(0, 25),
           },
         },
         { status: 500, headers: { "Cache-Control": "no-store" } }
@@ -270,7 +292,7 @@ export async function GET(req) {
       }
     }
 
-    // ===== 5) ĐỌC DÒNG DỮ LIỆU =====
+    // ===== 5) ĐỌC DỮ LIỆU =====
     const rawRows = [];
     for (let i = hourHeaderIdx + 1; i < block.length; i++) {
       const row = block[i] || [];
@@ -284,6 +306,7 @@ export async function GET(req) {
       const hsDat = toNumberSafe(row[colHsDat]) ?? 0;
       const hsDm = toNumberSafe(row[colHsDm]) ?? 0;
 
+      // nếu cả 3 đều 0 thì bỏ qua
       if (dmH === 0 && hsDat === 0 && hsDm === 0) continue;
 
       const hourValues = {};
@@ -308,7 +331,14 @@ export async function GET(req) {
         hsDm: r.hsDm,
         status: r.hsDat >= r.hsDm ? "ĐẠT" : "CHƯA ĐẠT",
       }))
-      .sort((a, b) => sortLine(a.line, b.line));
+      .sort((a, b) => {
+        const ma = norm(a.line).match(/^C(\d+)$/);
+        const mb = norm(b.line).match(/^C(\d+)$/);
+        if (ma && mb) return Number(ma[1]) - Number(mb[1]);
+        if (ma && !mb) return -1;
+        if (!ma && mb) return 1;
+        return norm(a.line).localeCompare(norm(b.line), "vi");
+      });
 
     // ===== 7) LINES =====
     const lines = ["TỔNG HỢP", ...dailyRows.map((x) => x.line)]
@@ -316,7 +346,12 @@ export async function GET(req) {
       .sort((a, b) => {
         if (a === "TỔNG HỢP") return -1;
         if (b === "TỔNG HỢP") return 1;
-        return sortLine(a, b);
+        const ma = norm(a).match(/^C(\d+)$/);
+        const mb = norm(b).match(/^C(\d+)$/);
+        if (ma && mb) return Number(ma[1]) - Number(mb[1]);
+        if (ma && !mb) return -1;
+        if (!ma && mb) return 1;
+        return norm(a).localeCompare(norm(b), "vi");
       });
 
     // ===== 😎 SELECTED LINE =====
@@ -346,6 +381,7 @@ export async function GET(req) {
       const factor = parseHourFactor(label);
       const dmTarget = factor ? (base.dmH || 0) * factor : 0;
       const diff = total - dmTarget;
+
       return {
         label,
         total,
@@ -363,7 +399,16 @@ export async function GET(req) {
         selectedLine,
         dailyRows,
         hourly: { line: base.line, dmH: base.dmH || 0, hours },
-        _debug: { startRow, endRow, hourHeaderIdx, rowCount: rawRows.length, colDMH, colLine, colHsDat, colHsDm },
+        _debug: {
+          startRow,
+          endRow,
+          hourHeaderIdx,
+          rowCount: rawRows.length,
+          colLine,
+          colDMH,
+          colHsDat,
+          colHsDm,
+        },
       },
       { headers: { "Cache-Control": "no-store" } }
     );
