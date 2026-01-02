@@ -18,7 +18,15 @@ function toNum(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
-// Google/Excel serial date -> dd/mm/yyyy (base 1899-12-30)
+function normalize(s) {
+  return String(s || "")
+    .trim()
+    .toUpperCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+// serial date -> dd/mm/yyyy
 function serialToDMY(n) {
   const base = new Date(Date.UTC(1899, 11, 30));
   const d = new Date(base.getTime() + n * 24 * 60 * 60 * 1000);
@@ -28,35 +36,12 @@ function serialToDMY(n) {
   return `${dd}/${mm}/${yyyy}`;
 }
 
-function normalize(s) {
-  return String(s || "")
-    .trim()
-    .toUpperCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
-}
-
-function toShortDM(dmy) {
-  // dd/mm/yyyy -> dd/mm
-  const m = String(dmy || "").match(/^(\d{2})\/(\d{2})\/\d{4}$/);
-  if (m) return `${m[1]}/${m[2]}`;
-  // dd/mm
-  const m2 = String(dmy || "").match(/^(\d{2})\/(\d{2})$/);
-  if (m2) return `${m2[1]}/${m2[2]}`;
-  return "";
-}
-
-/**
- * IMPORTANT FIX:
- * Chỉ coi số là "serial date" nếu nằm trong range hợp lý (tránh 430 -> 1899/1901).
- * 30000 ~ 1982, 70000 ~ 2091
- */
+// tránh 430, 487 bị coi là serial date
 function isLikelySerialDate(n) {
   return typeof n === "number" && Number.isFinite(n) && n >= 30000 && n <= 70000;
 }
 
 function parseDateCell(v) {
-  // serial number nhưng phải hợp lý
   if (isLikelySerialDate(v)) return serialToDMY(v);
 
   const t = String(v || "").trim();
@@ -77,6 +62,14 @@ function parseDateCell(v) {
   return "";
 }
 
+function toShortDM(dmy) {
+  const m = String(dmy || "").match(/^(\d{2})\/(\d{2})\/\d{4}$/);
+  if (m) return `${m[1]}/${m[2]}`;
+  const m2 = String(dmy || "").match(/^(\d{2})\/(\d{2})$/);
+  if (m2) return `${m2[1]}/${m2[2]}`;
+  return "";
+}
+
 function sortDatesDesc(a, b) {
   const pa = String(a).match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
   const pb = String(b).match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
@@ -86,74 +79,76 @@ function sortDatesDesc(a, b) {
   return db - da;
 }
 
-/* ====== FIX LỆCH NGÀY: cắt section theo ô ngày ở cột A ====== */
-function sliceSectionByDate(full, chosenDate) {
-  const chosenShort = toShortDM(chosenDate);
-  if (!chosenDate) return full;
-
-  // tìm start row: ưu tiên cột A (vì file bạn để ngày ở cột A)
-  let start = -1;
-  for (let r = 0; r < full.length; r++) {
-    const d = parseDateCell(full[r]?.[0]);
-    if (!d) continue;
-    if (d === chosenDate || toShortDM(d) === chosenShort) {
-      start = r;
-      break;
-    }
+/* ========= tìm các cột giờ trong 1 row ========= */
+function getHourCols(row) {
+  const cols = [];
+  for (let c = 0; c < row.length; c++) {
+    const t = String(row[c] || "").trim();
+    // ->9h, ->10h, ->12h30 ...
+    if (t.includes("->") && /h/i.test(t)) cols.push(c);
   }
-  if (start < 0) return full;
-
-  // tìm end row = trước ngày kế tiếp (cũng ở cột A)
-  let end = full.length;
-  for (let r = start + 1; r < full.length; r++) {
-    const d = parseDateCell(full[r]?.[0]);
-    if (!d) continue;
-    // gặp một ô ngày khác => đó là ngày mới
-    if (d !== chosenDate && toShortDM(d) !== chosenShort) {
-      end = r;
-      break;
-    }
-  }
-
-  return full.slice(start, end);
+  return cols;
 }
 
-/* ====== tìm bảng “THỐNG KÊ HIỆU SUẤT THEO GIỜ, NGÀY” trong section ====== */
-function findHourlyTable(section) {
-  let headerRow = -1;
-  let dmDayCol = -1;
-  let dmHCol = -1;
-  let hourCols = [];
+/* ========= dò tất cả “header row” có nhiều cột giờ ========= */
+function findAllHourlyHeaders(full) {
+  const headers = [];
+  for (let r = 0; r < full.length; r++) {
+    const row = full[r] || [];
+    const hourCols = getHourCols(row);
+    if (hourCols.length >= 2) {
+      headers.push({ headerRow: r, hourCols });
+    }
+  }
+  return headers;
+}
 
-  for (let r = 0; r < section.length; r++) {
-    const row = section[r] || [];
-    const normRow = row.map(normalize);
+/* ========= tìm “ngày gần nhất phía trên” của 1 headerRow ========= */
+function findNearestDateRow(full, headerRow, chosenShortDM) {
+  const start = Math.max(0, headerRow - 60);
+  for (let r = headerRow; r >= start; r--) {
+    const row = full[r] || [];
+    for (let c = 0; c < row.length; c++) {
+      const d = parseDateCell(row[c]);
+      if (!d) continue;
+      if (toShortDM(d) === chosenShortDM) return r;
+    }
+  }
+  return -1;
+}
 
-    const hasDMH = normRow.some((x) => x === "DM/H" || x === "DMH" || x === "ĐM/H" || x === "DM / H");
-    const hasArrowHour = row.some((x) => String(x || "").includes("->") && /h/i.test(String(x)));
+/* ========= chọn đúng bảng giờ theo ngày ========= */
+function selectHourlyTableByDate(full, chosenDate) {
+  const chosenShort = toShortDM(chosenDate);
+  const candidates = findAllHourlyHeaders(full);
 
-    if (hasDMH && hasArrowHour) {
-      headerRow = r;
+  let best = null;
+  let bestScore = Infinity;
 
-      for (let c = 0; c < normRow.length; c++) {
-        const cell = normRow[c];
-        if (cell.includes("DM/NGAY") || cell.includes("DMNGAY") || cell.includes("ĐM/NGAY")) dmDayCol = c;
-        if (cell === "DM/H" || cell === "DMH" || cell === "ĐM/H") dmHCol = c;
-      }
-
-      hourCols = [];
-      for (let c = 0; c < row.length; c++) {
-        const t = String(row[c] || "").trim();
-        if (t.includes("->") && /h/i.test(t)) hourCols.push(c);
-      }
-      break;
+  for (const cand of candidates) {
+    const dateRow = findNearestDateRow(full, cand.headerRow, chosenShort);
+    if (dateRow < 0) continue;
+    const score = cand.headerRow - dateRow; // càng gần càng tốt
+    if (score < bestScore) {
+      bestScore = score;
+      best = { ...cand, dateRow };
     }
   }
 
-  if (headerRow < 0 || dmHCol < 0 || hourCols.length === 0) return null;
+  // fallback: nếu không match ngày, lấy bảng đầu tiên (đỡ trống)
+  if (!best && candidates.length) best = { ...candidates[0], dateRow: -1 };
+  if (!best) return null;
 
-  const hourLabels = hourCols.map((c) => String((section[headerRow] || [])[c] || "").trim());
-  return { headerRow, dmDayCol, dmHCol, hourCols, hourLabels };
+  const { headerRow, hourCols } = best;
+
+  // dmHCol: cột ngay trước cột giờ đầu tiên
+  const firstHourCol = Math.min(...hourCols);
+  const dmHCol = Math.max(0, firstHourCol - 1);
+  const dmDayCol = Math.max(0, firstHourCol - 2);
+
+  const hourLabels = hourCols.map((c) => String((full[headerRow] || [])[c] || "").trim());
+
+  return { headerRow, hourCols, hourLabels, dmHCol, dmDayCol, dateRow: best.dateRow };
 }
 
 function pickLineLabel(row, beforeCol) {
@@ -167,8 +162,9 @@ function pickLineLabel(row, beforeCol) {
   return t0 || "";
 }
 
-function buildHourlyData(section) {
-  const info = findHourlyTable(section);
+/* ========= build hourly data từ table đã chọn ========= */
+function buildHourlyData(full, chosenDate) {
+  const info = selectHourlyTableByDate(full, chosenDate);
   if (!info) return { byLine: {}, lines: [] };
 
   const { headerRow, dmDayCol, dmHCol, hourCols, hourLabels } = info;
@@ -176,8 +172,8 @@ function buildHourlyData(section) {
   const byLine = {};
   const lines = [];
 
-  for (let r = headerRow + 1; r < section.length; r++) {
-    const row = section[r] || [];
+  for (let r = headerRow + 1; r < full.length; r++) {
+    const row = full[r] || [];
 
     const dmH = toNum(row[dmHCol]);
     const dmDay = dmDayCol >= 0 ? toNum(row[dmDayCol]) : 0;
@@ -185,11 +181,10 @@ function buildHourlyData(section) {
     const hasAnyHour = hourCols.some((c) => String(row[c] || "").trim() !== "");
     const line = pickLineLabel(row, dmDayCol >= 0 ? dmDayCol : dmHCol);
 
-    // kết thúc bảng: dòng trống hoàn toàn
+    // hết bảng
     if (!hasAnyHour && dmH === 0 && dmDay === 0 && !line) break;
     if (!line) continue;
 
-    // bỏ qua các dòng tiêu đề phụ / TOTAL KIỂM ĐẠT... nếu cần
     const normLine = normalize(line);
     if (normLine.includes("TOTAL") || normLine.includes("TONG KIEM") || normLine.includes("TONG MAY")) {
       continue;
@@ -207,20 +202,14 @@ function buildHourlyData(section) {
         else status = "THIẾU";
       }
 
-      return {
-        label: hourLabels[idx] || `H${idx + 1}`,
-        actual,
-        target,
-        diff,
-        status,
-      };
+      return { label: hourLabels[idx] || `H${idx + 1}`, actual, target, diff, status };
     });
 
     byLine[line] = { line, dmDay, dmH, hours };
     lines.push(line);
   }
 
-  // Tổng hợp
+  // tổng hợp
   if (lines.length) {
     const totalDmH = lines.reduce((s, ln) => s + (byLine[ln]?.dmH || 0), 0);
     const totalDmDay = lines.reduce((s, ln) => s + (byLine[ln]?.dmDay || 0), 0);
@@ -249,19 +238,23 @@ function buildHourlyData(section) {
     byLine["TỔNG HỢP"] = { line: "TỔNG HỢP", dmDay: totalDmDay, dmH: totalDmH, hours: totalHours };
   }
 
-  // lines list để dropdown
-  return { byLine, lines: ["TỔNG HỢP", ...lines] };
+  return { byLine, lines: lines.length ? ["TỔNG HỢP", ...lines] : [] };
 }
 
-/* ====== Map MÃ HÀNG theo chuyền trong section (để bảng “hiệu suất ngày” có mã hàng) ====== */
-function buildMaHangMap(section) {
-  let maHangCol = -1;
-  let headerRow = -1;
+/* ========= Map MÃ HÀNG (để bảng hiệu suất ngày có mã hàng) ========= */
+function buildMaHangMap(full, aroundRow) {
+  // tìm cell "MÃ HÀNG" trong vùng gần aroundRow
+  const map = {};
+  const r0 = Math.max(0, aroundRow - 80);
+  const r1 = Math.min(full.length - 1, aroundRow + 80);
 
-  for (let r = 0; r < Math.min(section.length, 60); r++) {
-    const row = section[r] || [];
+  let headerRow = -1;
+  let maHangCol = -1;
+
+  for (let r = r0; r <= r1; r++) {
+    const row = full[r] || [];
     for (let c = 0; c < row.length; c++) {
-      if (normalize(row[c]) === "MA HANG") {
+      if (normalize(row[c]) === "MA HANG" || normalize(row[c]) === "MÃ HÀNG") {
         headerRow = r;
         maHangCol = c;
         break;
@@ -270,12 +263,11 @@ function buildMaHangMap(section) {
     if (maHangCol >= 0) break;
   }
 
-  const map = {};
-  if (maHangCol < 0 || headerRow < 0) return map;
+  if (headerRow < 0 || maHangCol < 0) return map;
 
-  for (let r = headerRow + 1; r < section.length; r++) {
-    const row = section[r] || [];
-    const line = String(row[0] || "").trim(); // cột A là C1..C10...
+  for (let r = headerRow + 1; r <= r1; r++) {
+    const row = full[r] || [];
+    const line = String(row[0] || "").trim(); // cột A
     if (!line) continue;
 
     const n = normalize(line);
@@ -288,7 +280,7 @@ function buildMaHangMap(section) {
   return map;
 }
 
-/* ====== Bảng “hiệu suất trong ngày” (tính từ giờ cuối / ĐM) ====== */
+/* ========= Bảng hiệu suất ngày: lấy theo giờ cuối / ĐM lũy tiến ========= */
 function buildDailyRows(hourly, maHangMap) {
   const lines = hourly.lines || [];
   const out = [];
@@ -307,9 +299,7 @@ function buildDailyRows(hourly, maHangMap) {
     if (targetEnd > 0) hsDat = (actualEnd / targetEnd) * 100;
 
     let status = "CHƯA CÓ DỮ LIỆU";
-    if (targetEnd > 0) {
-      status = actualEnd >= targetEnd ? "ĐẠT/VƯỢT" : "CHƯA ĐẠT";
-    }
+    if (targetEnd > 0) status = actualEnd >= targetEnd ? "ĐẠT/VƯỢT" : "CHƯA ĐẠT";
 
     out.push({
       line,
@@ -323,7 +313,7 @@ function buildDailyRows(hourly, maHangMap) {
   return out;
 }
 
-/* ====== đọc dates từ CONFIG_KPI: chỉ nhận giá trị là date hợp lý ====== */
+/* ========= đọc dates từ CONFIG_KPI ========= */
 async function readConfigDates() {
   const { CONFIG_KPI_SHEET_NAME } = sheetNames();
 
@@ -331,10 +321,7 @@ async function readConfigDates() {
     valueRenderOption: "UNFORMATTED_VALUE",
   });
 
-  const dates = rows
-    .map((r) => parseDateCell(r?.[0]))
-    .filter(Boolean);
-
+  const dates = rows.map((r) => parseDateCell(r?.[0])).filter(Boolean);
   dates.sort(sortDatesDesc);
   return dates;
 }
@@ -351,38 +338,48 @@ export async function GET(request) {
     const dates = await readConfigDates();
     const chosenDate = parseDateCell(qDate) || dates[0] || "";
 
-    // đọc KPI rộng
     const full = await readValues(`${KPI_SHEET_NAME}!A1:AZ2000`, {
       valueRenderOption: "UNFORMATTED_VALUE",
     });
 
-    // ===== FIX: chỉ xử lý section đúng ngày =====
-    const section = sliceSectionByDate(full, chosenDate);
+    // ✅ build hourly theo “đúng bảng đúng ngày”
+    const hourlyAll = buildHourlyData(full, chosenDate);
 
-    // build hourly theo section
-    const hourly = buildHourlyData(section);
+    // nếu không tìm được bảng => trả debug nhẹ để bạn biết
+    if (!hourlyAll.lines?.length) {
+      return Response.json({
+        ok: true,
+        chosenDate,
+        dates,
+        lines: [],
+        selectedLine: "TỔNG HỢP",
+        dailyRows: [],
+        hourly: { line: "TỔNG HỢP", dmDay: 0, dmH: 0, hours: [] },
+        debug: "Không tìm thấy header có cột ->9h... cho ngày này (kiểm tra row chứa ->9h có nằm trong A1:AZ2000 không).",
+      });
+    }
 
-    // build daily rows
-    const maHangMap = buildMaHangMap(section);
-    const dailyRows = buildDailyRows(hourly, maHangMap);
+    // maHang map (tìm gần header của bảng giờ)
+    // lấy headerRow của bảng (dò lại lần nữa để biết aroundRow)
+    const tableInfo = selectHourlyTableByDate(full, chosenDate);
+    const aroundRow = tableInfo?.headerRow ?? 0;
+    const maHangMap = buildMaHangMap(full, aroundRow);
 
-    // chọn line
-    const line = hourly.byLine[qLine] ? qLine : "TỔNG HỢP";
-    const lineData = hourly.byLine[line] || { line, dmDay: 0, dmH: 0, hours: [] };
+    const dailyRows = buildDailyRows(hourlyAll, maHangMap);
+
+    const line = hourlyAll.byLine[qLine] ? qLine : "TỔNG HỢP";
+    const lineData = hourlyAll.byLine[line] || { line, dmDay: 0, dmH: 0, hours: [] };
 
     return Response.json({
       ok: true,
       chosenDate,
       dates,
-      lines: hourly.lines,
+      lines: hourlyAll.lines,
       selectedLine: line,
-      dailyRows,         // ✅ bảng hiệu suất ngày
-      hourly: lineData,  // ✅ bảng từng giờ actual/target/diff/status
+      dailyRows,
+      hourly: lineData,
     });
   } catch (e) {
-    return Response.json(
-      { ok: false, error: String(e?.message || e) },
-      { status: 500 }
-    );
+    return Response.json({ ok: false, error: String(e?.message || e) }, { status: 500 });
   }
 }
