@@ -1,96 +1,77 @@
+
+// app/api/kpi-config/route.js
 export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
 import { readValues } from "../_lib/googleSheetsClient";
+import { sheetNames } from "../_lib/sheetNames";
 
-const TZ = "Asia/Ho_Chi_Minh";
+function normalizeVNDate(v) {
+  const s = String(v ?? "").trim();
+  // dd/mm hoặc dd/mm/yyyy
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
+  if (!m) return null;
 
-// Google Sheets serial date (vd 46014) -> dd/mm/yyyy
-function serialToDDMMYYYY(n) {
-  // Google Sheets serial day 0 = 1899-12-30
-  const ms = (Number(n) - 25569) * 86400 * 1000; // 25569 days between 1899-12-30 and 1970-01-01
-  if (!Number.isFinite(ms)) return null;
+  const dd = String(m[1]).padStart(2, "0");
+  const mm = String(m[2]).padStart(2, "0");
 
-  const d = new Date(ms);
-  const vn = new Date(d.toLocaleString("en-US", { timeZone: TZ }));
-  const dd = String(vn.getDate()).padStart(2, "0");
-  const mm = String(vn.getMonth() + 1).padStart(2, "0");
-  const yyyy = vn.getFullYear();
+  // nếu thiếu năm -> lấy năm hiện tại (giờ VN)
+  let yyyy = m[3];
+  if (!yyyy) {
+    const now = new Date();
+    const vn = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Ho_Chi_Minh" }));
+    yyyy = String(vn.getFullYear());
+  } else {
+    yyyy = yyyy.length === 2 ? `20${yyyy}` : yyyy;
+  }
+
   return `${dd}/${mm}/${yyyy}`;
 }
 
-function normalizeDateCell(v) {
-  if (v === null || v === undefined) return null;
-
-  // serial number date
-  if (typeof v === "number") return serialToDDMMYYYY(v);
-
-  const s = String(v).trim();
-  if (!s) return null;
-
-  // dd/mm hoặc dd/mm/yyyy
-  let m = s.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
-  if (m) {
-    const dd = String(m[1]).padStart(2, "0");
-    const mm = String(m[2]).padStart(2, "0");
-    let yyyy = m[3];
-    if (!yyyy) return null; // yêu cầu có năm để thống nhất
-    if (yyyy.length === 2) yyyy = `20${yyyy}`;
-    return `${dd}/${mm}/${yyyy}`;
-  }
-
-  // yyyy-mm-dd
-  m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
-  if (m) {
-    const yyyy = m[1];
-    const mm = String(m[2]).padStart(2, "0");
-    const dd = String(m[3]).padStart(2, "0");
-    return `${dd}/${mm}/${yyyy}`;
-  }
-
-  return null;
+function sortKeyVNDate(d) {
+  const m = String(d).match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!m) return 0;
+  const dd = Number(m[1]);
+  const mm = Number(m[2]);
+  const yyyy = Number(m[3]);
+  return new Date(yyyy, mm - 1, dd).getTime();
 }
 
 export async function GET() {
   try {
-    const sheetName = process.env.KPI_SHEET_NAME || "KPI";
+    const { KPI_SHEET_NAME, CONFIG_KPI_SHEET_NAME } = sheetNames();
 
-    // QUÉT MỘT VÙNG VỪA ĐỦ (đỡ nặng)
-    const full = await readValues(`${sheetName}!A1:AZ400`, {
-      valueRenderOption: "UNFORMATTED_VALUE", // để bắt được cả số 46014
+    // ===== 1) Lấy danh sách chuyền (C1..Cn) từ KPI cột A =====
+    const colA = await readValues(`${KPI_SHEET_NAME}!A4:A200`, {
+      valueRenderOption: "FORMATTED_VALUE",
     });
 
-    // 1) Lấy danh sách chuyền C1..Cx
     const linesSet = new Set();
-    for (const row of full || []) {
-      for (const cell of row || []) {
-        const s = String(cell ?? "").trim().toUpperCase();
-        if (/^C\d+$/.test(s)) linesSet.add(s);
-      }
+    for (const r of colA || []) {
+      const s = String(r?.[0] ?? "").trim().toUpperCase();
+      if (/^C\d+$/.test(s)) linesSet.add(s);
     }
 
-    const lines = [...linesSet].sort(
+    const lines = Array.from(linesSet).sort(
       (a, b) => parseInt(a.slice(1), 10) - parseInt(b.slice(1), 10)
     );
 
-    // thêm option tổng hợp
+    // (tuỳ bạn) thêm "TỔNG HỢP" lên đầu list
     const linesOut = ["TỔNG HỢP", ...lines];
 
-    // 2) Lấy danh sách ngày
+    // ===== 2) Lấy danh sách ngày từ CONFIG_KPI!A2:A =====
+    // KHÔNG quét toàn KPI để tránh “ngày 1900”
+    const datesRaw = await readValues(`${CONFIG_KPI_SHEET_NAME}!A2:A`, {
+      valueRenderOption: "FORMATTED_VALUE",
+    });
+
     const datesSet = new Set();
-    for (const row of full || []) {
-      for (const cell of row || []) {
-        const d = normalizeDateCell(cell);
-        if (d) datesSet.add(d);
-      }
+    for (const r of datesRaw || []) {
+      const d = normalizeVNDate(r?.[0]);
+      if (d) datesSet.add(d);
     }
 
-    // sort giảm dần (mới nhất trước)
-    const dates = [...datesSet].sort((a, b) => {
-      const [da, ma, ya] = a.split("/").map(Number);
-      const [db, mb, yb] = b.split("/").map(Number);
-      return new Date(yb, mb - 1, db).getTime() - new Date(ya, ma - 1, da).getTime();
-    });
+    const dates = Array.from(datesSet).sort((a, b) => sortKeyVNDate(b) - sortKeyVNDate(a));
 
     return NextResponse.json({ ok: true, dates, lines: linesOut });
   } catch (e) {
