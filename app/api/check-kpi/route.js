@@ -22,7 +22,6 @@ function toNumberSafe(v) {
   const t = String(v).trim();
   if (!t) return null;
 
-  // bỏ % và dấu phẩy ngăn cách nghìn
   const cleaned = t.replace(/%/g, "").replace(/,/g, "");
   const n = Number(cleaned);
   return Number.isFinite(n) ? n : null;
@@ -30,13 +29,21 @@ function toNumberSafe(v) {
 
 function isLikelyDateCell(x) {
   const t = String(x ?? "").trim();
-  // dd/MM/yyyy hoặc dd/MM
   return /^\d{2}\/\d{2}(\/\d{4})?$/.test(t);
 }
 
+// hỗ trợ "->9h", "-> 9h", "→9h", "→ 12h30"
+function isHourHeaderCell(x) {
+  const s = String(x ?? "").trim();
+  if (!s) return false;
+  return /^(->|→)\s*\d{1,2}\s*h(\s*\d{1,2})?$/i.test(s.replace(/\s+/g, ""));
+}
+
 function parseHourFactor(label) {
-  // label dạng "->9h", "->12h30"
-  const s = norm(label).replace(/^->/g, "");
+  // label: "->9h", "→12h30"
+  let s = String(label ?? "").trim();
+  s = s.replace(/^->\s*/i, "").replace(/^→\s*/i, "");
+  s = s.replace(/\s+/g, "").toUpperCase(); // "12H30"
   const m = s.match(/^(\d{1,2})H(\d{1,2})?$/);
   if (!m) return null;
   const hh = Number(m[1]);
@@ -57,7 +64,6 @@ function sortLine(a, b) {
 }
 
 function shouldSkipLine(lineNorm) {
-  // bạn muốn bỏ: CẮT, HOÀN TẤT, KCS, NM
   return (
     lineNorm === "CAT" ||
     lineNorm === "CẮT" ||
@@ -69,11 +75,42 @@ function shouldSkipLine(lineNorm) {
 }
 
 function pickEnvSheetId() {
-  return (
-    process.env.GOOGLE_SHEET_ID ||
-    process.env.SPREADSHEET_ID || // fallback nếu bạn lỡ đặt tên cũ
-    ""
-  );
+  return process.env.GOOGLE_SHEET_ID || process.env.SPREADSHEET_ID || "";
+}
+
+function findDMHColumn(block, hourHeaderIdx) {
+  // tìm cột có "DM/H" hoặc "DMH" trong 0..3 dòng phía trên dòng mốc giờ
+  const start = Math.max(0, hourHeaderIdx - 3);
+  for (let r = hourHeaderIdx; r >= start; r--) {
+    const row = block[r] || [];
+    for (let c = 0; c < row.length; c++) {
+      const x = norm(row[c]);
+      if (x === "DM/H" || x === "DMH" || x === "DM /H" || x === "ĐM/H" || x === "ĐMH") {
+        return c;
+      }
+    }
+  }
+
+  // fallback: nếu dòng mốc giờ có chữ "H" (subheader), thử lấy cột đó
+  const row = block[hourHeaderIdx] || [];
+  for (let c = 0; c < row.length; c++) {
+    if (norm(row[c]) === "H") return c;
+  }
+
+  return -1;
+}
+
+function findColumnByHeaderNearby(block, hourHeaderIdx, keywords) {
+  // tìm cột theo keywords trong 0..3 dòng phía trên (do header nhiều tầng)
+  const start = Math.max(0, hourHeaderIdx - 3);
+  for (let r = hourHeaderIdx; r >= start; r--) {
+    const row = block[r] || [];
+    for (let c = 0; c < row.length; c++) {
+      const x = norm(row[c]);
+      if (keywords.some((k) => x.includes(k))) return c;
+    }
+  }
+  return -1;
 }
 
 export async function GET(req) {
@@ -88,18 +125,13 @@ export async function GET(req) {
 
     const spreadsheetId = pickEnvSheetId();
     if (!spreadsheetId) {
-      return Response.json(
-        { ok: false, error: "Thiếu env GOOGLE_SHEET_ID" },
-        { status: 500 }
-      );
+      return Response.json({ ok: false, error: "Thiếu env GOOGLE_SHEET_ID" }, { status: 500 });
     }
 
     const KPI_SHEET_NAME = process.env.KPI_SHEET_NAME || "KPI";
 
     const sheets = await getSheetsClient();
-
-    // đọc rộng để khỏi phụ thuộc vị trí cột
-    const range = `${KPI_SHEET_NAME}!A1:AZ500`;
+    const range = `${KPI_SHEET_NAME}!A1:AZ5000`;
 
     const resp = await sheets.spreadsheets.values.get({
       spreadsheetId,
@@ -117,17 +149,18 @@ export async function GET(req) {
     const short = norm(date.replace(/\/\d{4}$/, "")); // dd/MM
 
     // ===== 1) TÌM BLOCK THEO NGÀY =====
-    // ưu tiên tìm ở cột A (đúng như file bạn đang để ngày ở A)
     let startRow = -1;
+
+    // ưu tiên cột A
     for (let r = 0; r < values.length; r++) {
-      const v = values[r]?.[0];
-      const nv = norm(v);
+      const nv = norm(values[r]?.[0]);
       if (nv === target || nv === short) {
         startRow = r;
         break;
       }
     }
-    // fallback: quét toàn sheet
+
+    // fallback quét toàn sheet
     if (startRow < 0) {
       outer: for (let r = 0; r < values.length; r++) {
         const row = values[r] || [];
@@ -148,11 +181,10 @@ export async function GET(req) {
       );
     }
 
-    // endRow = trước ngày tiếp theo (để không dính 23/12)
     let endRow = values.length;
     for (let r = startRow + 1; r < values.length; r++) {
       const v = values[r]?.[0];
-      if (isLikelyDateCell(v) && r > startRow) {
+      if (isLikelyDateCell(v)) {
         endRow = r;
         break;
       }
@@ -160,66 +192,74 @@ export async function GET(req) {
 
     const block = values.slice(startRow, endRow);
 
-    // ===== 2) TÌM HEADER CỦA BẢNG "THỐNG KÊ HIỆU SUẤT THEO GIỜ, NGÀY" =====
-    // header phải có DM/H và có mốc giờ (->9h)
-    let headerIdx = -1;
+    // ===== 2) TÌM DÒNG HEADER MỐC GIỜ (->9h / →9h) =====
+    let hourHeaderIdx = -1;
     for (let i = 0; i < block.length; i++) {
       const row = block[i] || [];
-      const rowN = row.map(norm);
-
-      const hasDMH = rowN.some((x) => x === "DM/H" || x === "DMH" || x === "DM /H");
-      const hasHour = rowN.some((x) => x.startsWith("->") && x.includes("H"));
-
-      // ở file bạn, header có ->9h, ->10h... và DM/H
-      if (hasDMH && hasHour) {
-        headerIdx = i;
+      const hourCount = row.filter(isHourHeaderCell).length;
+      if (hourCount >= 2) { // có ít nhất 2 mốc giờ thì chắc chắn là header giờ
+        hourHeaderIdx = i;
         break;
       }
     }
 
-    if (headerIdx < 0) {
+    if (hourHeaderIdx < 0) {
+      // trả debug 10 dòng đầu của block cho dễ nhìn
       return Response.json(
-        { ok: false, error: "Không tìm thấy header bảng giờ (có DM/H và ->9h...)." },
-        { status: 500 }
+        {
+          ok: false,
+          error: "Không tìm thấy dòng header mốc giờ (->9h / →9h).",
+          _debug: { startRow, endRow, sample: block.slice(0, 12) },
+        },
+        { status: 500, headers: { "Cache-Control": "no-store" } }
       );
     }
 
-    const header = block[headerIdx] || [];
-    const headerN = header.map(norm);
+    // ===== 3) TÌM CÁC CỘT QUAN TRỌNG (header nhiều tầng) =====
+    const colDMH = findDMHColumn(block, hourHeaderIdx);
+    if (colDMH < 0) {
+      return Response.json(
+        {
+          ok: false,
+          error: "Không tìm thấy cột DM/H (có thể đang merge).",
+          _debug: { hourHeaderIdx, sample: block.slice(Math.max(0, hourHeaderIdx - 3), hourHeaderIdx + 2) },
+        },
+        { status: 500, headers: { "Cache-Control": "no-store" } }
+      );
+    }
 
-    const colDMH = headerN.findIndex((x) => x === "DM/H" || x === "DMH" || x === "DM /H");
+    // cột chuyền
+    let colLine = findColumnByHeaderNearby(block, hourHeaderIdx, ["CHUYEN", "CHUYỀN", "LINE"]);
+    if (colLine < 0) colLine = 0; // fallback
 
-    // cố tìm cột chuyền
-    let colLine = headerN.findIndex((x) => x.includes("CHUYEN") || x.includes("CHUYỀN") || x === "LINE");
-    if (colLine < 0) colLine = Math.max(0, colDMH - 1); // fallback: ngay trước DM/H
-
-    // cột hiệu suất ngày (ở file bạn nằm bên phải)
-    const colHsDat = headerN.findIndex((x) => x.includes("SUAT DAT TRONG NGAY"));
-    const colHsDm = headerN.findIndex((x) => x.includes("DINH MUC TRONG NGAY"));
+    // cột hiệu suất ngày: "SUẤT ĐẠT TRONG NGÀY" và "ĐỊNH MỨC TRONG NGÀY"
+    const colHsDat = findColumnByHeaderNearby(block, hourHeaderIdx, ["SUAT DAT TRONG NGAY"]);
+    const colHsDm  = findColumnByHeaderNearby(block, hourHeaderIdx, ["DINH MUC TRONG NGAY"]);
 
     if (colHsDat < 0 || colHsDm < 0) {
       return Response.json(
         {
           ok: false,
           error:
-            "Không thấy cột 'SUẤT ĐẠT TRONG NGÀY' hoặc 'ĐỊNH MỨC TRONG NGÀY' trong header. Hãy kiểm tra đúng tiêu đề trên sheet.",
+            "Không thấy cột 'SUẤT ĐẠT TRONG NGÀY' hoặc 'ĐỊNH MỨC TRONG NGÀY' (header có thể đang merge).",
+          _debug: { hourHeaderIdx, sample: block.slice(Math.max(0, hourHeaderIdx - 3), hourHeaderIdx + 2) },
         },
-        { status: 500 }
+        { status: 500, headers: { "Cache-Control": "no-store" } }
       );
     }
 
-    // lấy danh sách cột giờ
+    // ===== 4) LẤY DANH SÁCH CỘT GIỜ TỪ DÒNG hourHeaderIdx =====
+    const hourHeaderRow = block[hourHeaderIdx] || [];
     const hourCols = [];
-    for (let c = 0; c < header.length; c++) {
-      const hn = headerN[c];
-      if (hn.startsWith("->") && hn.includes("H")) {
-        hourCols.push({ c, label: String(header[c] ?? "").trim() || hn });
+    for (let c = 0; c < hourHeaderRow.length; c++) {
+      if (isHourHeaderCell(hourHeaderRow[c])) {
+        hourCols.push({ c, label: String(hourHeaderRow[c]).trim() });
       }
     }
 
-    // ===== 3) ĐỌC DATA ROWS =====
+    // ===== 5) ĐỌC DATA ROWS (từ sau headerIdx xuống) =====
     const rawRows = [];
-    for (let i = headerIdx + 1; i < block.length; i++) {
+    for (let i = hourHeaderIdx + 1; i < block.length; i++) {
       const row = block[i] || [];
       const line = String(row[colLine] ?? "").trim();
       if (!line) continue;
@@ -227,13 +267,12 @@ export async function GET(req) {
       const lineNorm = norm(line);
       if (shouldSkipLine(lineNorm)) continue;
 
-      const dmH = toNumberSafe(row[colDMH]);
+      const dmH = toNumberSafe(row[colDMH]) ?? 0;
+      const hsDat = toNumberSafe(row[colHsDat]) ?? 0;
+      const hsDm = toNumberSafe(row[colHsDm]) ?? 0;
 
-      const hsDat = toNumberSafe(row[colHsDat]);
-      const hsDm = toNumberSafe(row[colHsDm]);
-
-      // nếu cả 3 đều null thì bỏ
-      if (dmH === null && hsDat === null && hsDm === null) continue;
+      // nếu row toàn 0 thì bỏ
+      if (dmH === 0 && hsDat === 0 && hsDm === 0) continue;
 
       const hourValues = {};
       for (const hc of hourCols) {
@@ -242,9 +281,9 @@ export async function GET(req) {
 
       rawRows.push({
         line: line.toUpperCase(),
-        dmH: dmH ?? 0,
-        hsDat: hsDat ?? 0,
-        hsDm: hsDm ?? 0,
+        dmH,
+        hsDat,
+        hsDm,
         hourValues,
       });
     }
@@ -258,13 +297,13 @@ export async function GET(req) {
           selectedLine: "TỔNG HỢP",
           dailyRows: [],
           hourly: { line: "TỔNG HỢP", dmH: 0, hours: [] },
-          _debug: { startRow, endRow, headerIdx, note: "Không lấy được row dữ liệu dưới header." },
+          _debug: { startRow, endRow, hourHeaderIdx, note: "Không đọc được dòng dữ liệu dưới header." },
         },
         { headers: { "Cache-Control": "no-store" } }
       );
     }
 
-    // ===== 4) DAILY ROWS (ĐẠT/CHƯA ĐẠT theo HS đạt vs HS ĐM) =====
+    // ===== 6) DAILY (HS đạt vs HS ĐM) =====
     const dailyRows = rawRows
       .map((r) => ({
         line: r.line,
@@ -274,7 +313,7 @@ export async function GET(req) {
       }))
       .sort((a, b) => sortLine(a.line, b.line));
 
-    // ===== 5) LINES LIST =====
+    // ===== 7) LINES LIST =====
     const lines = ["TỔNG HỢP", ...dailyRows.map((x) => x.line)]
       .filter((v, i, arr) => arr.indexOf(v) === i)
       .sort((a, b) => {
@@ -283,16 +322,15 @@ export async function GET(req) {
         return sortLine(a, b);
       });
 
-    // ===== 6) PICK SELECTED LINE =====
+    // ===== 😎 SELECTED LINE =====
     const want = norm(lineParam);
     let selectedLine = "TỔNG HỢP";
     const found = lines.find((x) => norm(x) === want);
     if (found) selectedLine = found;
 
-    // ===== 7) HOURLY for selected line =====
+    // ===== 9) HOURLY (lũy tiến vs DM/H * mốc giờ) =====
     let base;
     if (selectedLine === "TỔNG HỢP") {
-      // tổng hợp = cộng tất cả chuyền
       const sumDmH = rawRows.reduce((s, r) => s + (r.dmH || 0), 0);
       const sumHour = {};
       for (const hc of hourCols) sumHour[hc.label] = 0;
@@ -308,11 +346,9 @@ export async function GET(req) {
     const hours = hourCols.map((hc) => {
       const label = hc.label;
       const total = Number(base.hourValues?.[label] ?? 0) || 0;
-
       const factor = parseHourFactor(label);
       const dmTarget = factor ? (base.dmH || 0) * factor : 0;
       const diff = total - dmTarget;
-
       return {
         label,
         total,
@@ -329,12 +365,8 @@ export async function GET(req) {
         lines,
         selectedLine,
         dailyRows,
-        hourly: {
-          line: base.line,
-          dmH: base.dmH || 0,
-          hours,
-        },
-        _debug: { startRow, endRow, headerIdx, rowCount: rawRows.length },
+        hourly: { line: base.line, dmH: base.dmH || 0, hours },
+        _debug: { startRow, endRow, hourHeaderIdx, rowCount: rawRows.length, colDMH, colLine, colHsDat, colHsDm },
       },
       { headers: { "Cache-Control": "no-store" } }
     );
