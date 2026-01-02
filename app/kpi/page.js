@@ -1,201 +1,211 @@
+
 // app/kpi/page.js
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
 import "./kpi.css";
 
-function nowDdMmYyyy() {
-  // dd/MM/yyyy (VN)
-  const d = new Date();
-  const dd = String(d.getDate()).padStart(2, "0");
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const yy = d.getFullYear();
-  return `${dd}/${mm}/${yy}`;
+function ddmmyyyyFromISO(iso) {
+  const m = String(iso || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return "";
+  return `${m[3]}/${m[2]}/${m[1]}`;
 }
 
-function fmt(n, digits = 0) {
-  const x = Number(n);
-  if (!Number.isFinite(x)) return "0";
-  return x.toFixed(digits);
+function todayISO() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function pillClass(status) {
+  const s = String(status || "").toUpperCase();
+  if (s === "ĐẠT" || s === "VUOT" || s === "VƯỢT") return "pill pill-ok";
+  if (s === "ĐỦ" || s === "DU") return "pill pill-warn";
+  return "pill pill-bad";
 }
 
 export default function KPIPage() {
-  const [date, setDate] = useState(nowDdMmYyyy());
+  const [isoDate, setIsoDate] = useState(todayISO());
   const [line, setLine] = useState("TỔNG HỢP");
   const [data, setData] = useState(null);
-  const [status, setStatus] = useState("Đang tải...");
-  const [tick, setTick] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
 
-  async function load(nextDate = date, nextLine = line) {
+  const ddmmyyyy = useMemo(() => ddmmyyyyFromISO(isoDate), [isoDate]);
+
+  async function loadKPI({ silent = false } = {}) {
+    if (!ddmmyyyy) return;
+    if (!silent) setLoading(true);
+    setErr("");
+
     try {
-      setStatus("Đang tải...");
-      const ts = Date.now();
-      const res = await fetch(`/api/check-kpi?date=${encodeURIComponent(nextDate)}&line=${encodeURIComponent(nextLine)}&_ts=${ts}`, {
-        cache: "no-store",
+      const qs = new URLSearchParams({
+        date: ddmmyyyy,
+        line,
+        _ts: String(Date.now()), // cache-bust để sheet đổi là thấy
       });
-      const j = await res.json();
-      if (!j.ok) {
-        setStatus("Lỗi: " + (j.error || "unknown"));
-        setData(null);
-        return;
-      }
-      setData(j);
-      setStatus("OK (tự cập nhật mỗi 15s)");
+
+      const res = await fetch(`/api/check-kpi?${qs.toString()}`, { cache: "no-store" });
+      const json = await res.json();
+
+      if (!json.ok) throw new Error(json.error || "API error");
+      setData(json);
     } catch (e) {
-      setStatus("Lỗi: " + String(e?.message || e));
+      setErr(e?.message || "Load failed");
       setData(null);
+    } finally {
+      if (!silent) setLoading(false);
     }
   }
 
-  // load lần đầu + khi đổi ngày/line => load ngay, không cần refresh
+  // load khi đổi ngày / đổi chuyền (KHÔNG CẦN REFRESH)
   useEffect(() => {
-    load(date, line);
+    loadKPI();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [date, line]);
+  }, [ddmmyyyy, line]);
 
-  // auto refresh 15s
+  // auto refresh mỗi 15s
   useEffect(() => {
-    const id = setInterval(() => {
-      setTick((t) => t + 1);
-    }, 15000);
-    return () => clearInterval(id);
-  }, []);
-
-  useEffect(() => {
-    load(date, line);
+    const t = setInterval(() => loadKPI({ silent: true }), 15000);
+    return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tick]);
+  }, [ddmmyyyy, line]);
 
-  const lines = useMemo(() => data?.lines || ["TỔNG HỢP"], [data]);
-  const dailyRows = useMemo(() => data?.dailyRows || [], [data]);
-  const hourly = useMemo(() => data?.hourly || { dmH: 0, hours: [] }, [data]);
+  // nếu line hiện tại không tồn tại trong data.lines thì reset về TỔNG HỢP
+  useEffect(() => {
+    const lines = data?.lines || [];
+    if (!lines.length) return;
+    if (!lines.includes(line.toUpperCase())) setLine("TỔNG HỢP");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data?.lines?.join("|")]);
+
+  const lines = data?.lines || [];
+  const dailyRows = data?.dailyRows || [];
+  const hourly = data?.hourly || null;
 
   return (
-    <div className="kpi-root">
-      <div className="kpi-header">
-        <div>
-          <div className="kpi-title">KPI Dashboard</div>
-          <div className="kpi-sub">Chọn ngày và chuyền để xem dữ liệu</div>
+    <div className="kpi-wrap">
+      <h1 className="kpi-title">KPI Dashboard</h1>
+      <p className="kpi-sub">Chọn ngày và chuyền để xem dữ liệu</p>
+
+      <div className="kpi-toolbar">
+        <div className="kpi-field">
+          <div className="kpi-label">Chọn ngày</div>
+          <input
+            className="kpi-input"
+            type="date"
+            value={isoDate}
+            onChange={(e) => setIsoDate(e.target.value)}
+          />
         </div>
 
-        <div className="kpi-controls">
-          <div className="kpi-field">
-            <label>Chọn ngày</label>
-            <input
-              className="kpi-input"
-              value={date}
-              onChange={(e) => setDate(e.target.value.trim())}
-              placeholder="dd/MM/yyyy"
-            />
-          </div>
-
-          <div className="kpi-field">
-            <label>Chọn chuyền</label>
-            <select className="kpi-select" value={line} onChange={(e) => setLine(e.target.value)}>
-              {lines.map((x) => (
-                <option key={x} value={x}>
-                  {x}
+        <div className="kpi-field">
+          <div className="kpi-label">Chọn chuyền</div>
+          <select
+            className="kpi-select"
+            value={line}
+            onChange={(e) => setLine(e.target.value)}
+          >
+            {/* nếu API chưa có lines thì vẫn cho chọn tổng hợp */}
+            <option value="TỔNG HỢP">TỔNG HỢP</option>
+            {lines
+              .filter((x) => x !== "TỔNG HỢP")
+              .map((l) => (
+                <option key={l} value={l}>
+                  {l}
                 </option>
               ))}
-            </select>
-          </div>
+          </select>
+        </div>
 
-          <div className="kpi-status">{status}</div>
+        <div className="kpi-status">
+          {loading ? "Đang tải..." : err ? `Lỗi: ${err}` : `OK (tự cập nhật mỗi 15s)`}
         </div>
       </div>
 
       <div className="kpi-grid">
-        {/* DAILY */}
+        {/* ===== DAILY ===== */}
         <div className="kpi-card">
-          <div className="kpi-card-title">Hiệu suất trong ngày (so với định mức)</div>
+          <h3>Hiệu suất trong ngày (so với định mức)</h3>
 
-          <table className="kpi-table">
-            <thead>
-              <tr>
-                <th>Chuyền/BP</th>
-                <th className="num">HS đạt (%)</th>
-                <th className="num">HS ĐM (%)</th>
-                <th className="center">Trạng thái</th>
-              </tr>
-            </thead>
-
-            <tbody>
-              {dailyRows.length === 0 ? (
+          {!dailyRows.length ? (
+            <div className="kpi-note">(Chưa có dữ liệu ngày này)</div>
+          ) : (
+            <table className="kpi-table">
+              <thead>
                 <tr>
-                  <td colSpan={4} className="muted">
-                    (Chưa có dữ liệu % trong sheet)
-                  </td>
+                  <th>Chuyền/BP</th>
+                  <th className="num">HS đạt (%)</th>
+                  <th className="num">HS ĐM (%)</th>
+                  <th>Trạng thái</th>
                 </tr>
-              ) : (
-                dailyRows.map((r) => (
+              </thead>
+              <tbody>
+                {dailyRows.map((r) => (
                   <tr key={r.line}>
-                    <td className="mono">{r.line}</td>
-                    <td className="num">{fmt(r.hsDat, 2)}</td>
-                    <td className="num">{fmt(r.hsDm, 2)}</td>
-                    <td className="center">
-                      <span className={`pill ${r.status === "ĐẠT" ? "pill-ok" : "pill-bad"}`}>{r.status}</span>
+                    <td>{r.line}</td>
+                    <td className="num">{Number(r.hsDat).toFixed(2)}</td>
+                    <td className="num">{Number(r.hsDm).toFixed(2)}</td>
+                    <td>
+                      <span className={pillClass(r.status)}>{r.status}</span>
                     </td>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-
-          <div className="kpi-note">* So sánh: nếu HS đạt ≥ HS ĐM → <b>ĐẠT</b>, ngược lại <b>CHƯA ĐẠT</b>.</div>
-        </div>
-
-        {/* HOURLY */}
-        <div className="kpi-card">
-          <div className="kpi-card-title">
-            Kiểm lũy tiến theo giờ (so với DM/H)
-            <span className="kpi-right">DM/H: {fmt(hourly.dmH, 2)}</span>
-          </div>
-
-          <table className="kpi-table">
-            <thead>
-              <tr>
-                <th>Giờ</th>
-                <th className="num">Tổng kiểm đạt</th>
-                <th className="num">DM lũy tiến</th>
-                <th className="num">Chênh</th>
-                <th className="center">Trạng thái</th>
-              </tr>
-            </thead>
-
-            <tbody>
-              {(!hourly.hours || hourly.hours.length === 0) ? (
-                <tr>
-                  <td colSpan={5} className="muted">
-                    (Chưa có dữ liệu theo giờ)
-                  </td>
-                </tr>
-              ) : (
-                hourly.hours.map((h) => (
-                  <tr key={h.label}>
-                    <td className="mono">{h.label}</td>
-                    <td className="num">{fmt(h.actual, 0)}</td>
-                    <td className="num">{fmt(h.dmCum, 0)}</td>
-                    <td className={`num ${h.diff >= 0 ? "good" : "bad"}`}>{fmt(h.diff, 0)}</td>
-                    <td className="center">
-                      <span className={`pill ${h.status === "VƯỢT" ? "pill-ok" : "pill-bad"}`}>{h.status}</span>
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+                ))}
+              </tbody>
+            </table>
+          )}
 
           <div className="kpi-note">
-            * Mỗi giờ: <b>DM lũy tiến = DM/H × số mốc giờ</b> (-&t;9h = 1, -&t;10h = 2, -&t;12h30 = 4.5, ...).
+            * So sánh: nếu <b>HS đạt ≥ HS ĐM</b> → <b>ĐẠT</b>, ngược lại <b>CHƯA ĐẠT</b>.
           </div>
         </div>
-      </div>
 
-      {data?._debug ? (
-        <div className="kpi-debug">
-          debug: anchorRow={data._debug.anchorRow}, dailyCount={data._debug.dailyCount}, hourlyCount={data._debug.hourlyCount}
+        {/* ===== HOURLY ===== */}
+        <div className="kpi-card">
+          <h3>Kiểm lũy tiến theo giờ (so với DM/H)</h3>
+
+          {!hourly?.hours?.length ? (
+            <div className="kpi-note">(Chưa có dữ liệu theo giờ cho chuyền/ngày này)</div>
+          ) : (
+            <>
+              <div className="kpi-note" style={{ marginTop: 0 }}>
+                DM/H: <b className="num">{Number(hourly.dmH).toFixed(2)}</b>
+              </div>
+
+              <table className="kpi-table" style={{ marginTop: 10 }}>
+                <thead>
+                  <tr>
+                    <th>Giờ</th>
+                    <th className="num">Tổng kiểm đạt</th>
+                    <th className="num">DM lũy tiến</th>
+                    <th className="num">Chênh</th>
+                    <th>Trạng thái</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {hourly.hours.map((h) => (
+                    <tr key={h.label}>
+                      <td>{h.label}</td>
+                      <td className="num">{Number(h.total).toFixed(2)}</td>
+                      <td className="num">{Number(h.dmTarget).toFixed(2)}</td>
+                      <td className="num">{Number(h.diff).toFixed(2)}</td>
+                      <td>
+                        <span className={pillClass(h.status)}>{h.status}</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              <div className="kpi-note">
+                * Mỗi giờ: <b>DM lũy tiến = DM/H × số mốc giờ</b> (→9h=1, →10h=2, →12h30=4.5, …).
+              </div>
+            </>
+          )}
         </div>
-      ) : null}
+      </div>
     </div>
   );
 }
