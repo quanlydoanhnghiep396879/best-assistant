@@ -1,16 +1,10 @@
-
 // app/kpi/page.js
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import "./kpi.css";
 
-function ddmmyyyyFromISO(iso) {
-  const m = String(iso || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) return "";
-  return `${m[3]}/${m[2]}/${m[1]}`;
-}
-
+/* ================= helpers ================= */
 function todayISO() {
   const d = new Date();
   const yyyy = d.getFullYear();
@@ -19,40 +13,107 @@ function todayISO() {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+function ddmmyyyyFromISO(iso) {
+  const m = String(iso || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return "";
+  return `${m[3]}/${m[2]}/${m[1]}`;
+}
+
+function noMark(str) {
+  return String(str || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\u00A0/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function normLine(x) {
+  const t = String(x || "").replace(/\u00A0/g, " ").trim().toUpperCase();
+  if (t === "TONG HOP" || t === "TỔNG HỢP") return "TỔNG HỢP";
+  const m = t.match(/^C\s*0*([0-9]+)$/);
+  if (m) return `C${Number(m[1])}`;
+  return t;
+}
+
+function sortLines(a, b) {
+  const A = normLine(a);
+  const B = normLine(b);
+
+  if (A === "TỔNG HỢP" && B !== "TỔNG HỢP") return -1;
+  if (B === "TỔNG HỢP" && A !== "TỔNG HỢP") return 1;
+
+  const ma = A.match(/^C(\d+)$/);
+  const mb = B.match(/^C(\d+)$/);
+  if (ma && mb) return Number(ma[1]) - Number(mb[1]);
+  if (ma && !mb) return -1;
+  if (!ma && mb) return 1;
+
+  return A.localeCompare(B, "vi");
+}
+
 function pillClass(status) {
-  const s = String(status || "").toUpperCase();
-  if (s === "ĐẠT" || s === "VUOT" || s === "VƯỢT") return "pill pill-ok";
-  if (s === "ĐỦ" || s === "DU") return "pill pill-warn";
+  const s = noMark(status);
+  // ĐẠT / VƯỢT
+  if (s === "dat" || s === "vuot" || s === "vươt") return "pill pill-ok";
+  // ĐỦ
+  if (s === "du") return "pill pill-warn";
+  // THIẾU / CHƯA ĐẠT
   return "pill pill-bad";
 }
 
+function n2(v) {
+  const x = Number(v);
+  return Number.isFinite(x) ? x.toFixed(2) : "0.00";
+}
+
+function n0(v) {
+  const x = Number(v);
+  return Number.isFinite(x) ? Math.round(x).toLocaleString("vi-VN") : "0";
+}
+
+/* ================= page ================= */
 export default function KPIPage() {
   const [isoDate, setIsoDate] = useState(todayISO());
   const [line, setLine] = useState("TỔNG HỢP");
+
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
+  const [lastAt, setLastAt] = useState("");
 
   const ddmmyyyy = useMemo(() => ddmmyyyyFromISO(isoDate), [isoDate]);
+  const lineNorm = useMemo(() => normLine(line), [line]);
+
+  // tránh race condition: request cũ về sau ghi đè request mới
+  const reqIdRef = useRef(0);
 
   async function loadKPI({ silent = false } = {}) {
     if (!ddmmyyyy) return;
+
+    const myId = ++reqIdRef.current;
     if (!silent) setLoading(true);
     setErr("");
 
     try {
       const qs = new URLSearchParams({
         date: ddmmyyyy,
-        line,
-        _ts: String(Date.now()), // cache-bust để sheet đổi là thấy
+        line: lineNorm,
+        _ts: String(Date.now()), // cache-bust
       });
 
-      const res = await fetch(`/api/check-kpi?${qs.toString()}`, { cache: "no-store" });
-      const json = await res.json();
+      const res = await fetch(`/api/check-kpi?${qs.toString()}`, {
+        cache: "no-store",
+      });
 
-      if (!json.ok) throw new Error(json.error || "API error");
+      const json = await res.json();
+      if (myId !== reqIdRef.current) return; // bỏ response cũ
+
+      if (!json?.ok) throw new Error(json?.error || "API error");
       setData(json);
+      setLastAt(new Date().toLocaleTimeString("vi-VN"));
     } catch (e) {
+      if (myId !== reqIdRef.current) return;
       setErr(e?.message || "Load failed");
       setData(null);
     } finally {
@@ -60,28 +121,34 @@ export default function KPIPage() {
     }
   }
 
-  // load khi đổi ngày / đổi chuyền (KHÔNG CẦN REFRESH)
+  // load ngay khi đổi ngày / đổi chuyền (không cần nút refresh)
   useEffect(() => {
     loadKPI();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ddmmyyyy, line]);
+  }, [ddmmyyyy, lineNorm]);
 
-  // auto refresh mỗi 15s
+  // auto refresh 15s
   useEffect(() => {
     const t = setInterval(() => loadKPI({ silent: true }), 15000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ddmmyyyy, line]);
+  }, [ddmmyyyy, lineNorm]);
 
-  // nếu line hiện tại không tồn tại trong data.lines thì reset về TỔNG HỢP
+  // lines cho dropdown (sort C1..C10)
+  const lines = useMemo(() => {
+    const arr = (data?.lines || []).map(normLine);
+    const uniq = Array.from(new Set(arr));
+    if (!uniq.includes("TỔNG HỢP")) uniq.unshift("TỔNG HỢP");
+    return uniq.sort(sortLines);
+  }, [data?.lines]);
+
+  // nếu line hiện tại không có trong lines => reset về tổng hợp
   useEffect(() => {
-    const lines = data?.lines || [];
     if (!lines.length) return;
-    if (!lines.includes(line.toUpperCase())) setLine("TỔNG HỢP");
+    if (!lines.includes(lineNorm)) setLine("TỔNG HỢP");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data?.lines?.join("|")]);
+  }, [lines.join("|")]);
 
-  const lines = data?.lines || [];
   const dailyRows = data?.dailyRows || [];
   const hourly = data?.hourly || null;
 
@@ -105,23 +172,23 @@ export default function KPIPage() {
           <div className="kpi-label">Chọn chuyền</div>
           <select
             className="kpi-select"
-            value={line}
+            value={lineNorm}
             onChange={(e) => setLine(e.target.value)}
           >
-            {/* nếu API chưa có lines thì vẫn cho chọn tổng hợp */}
-            <option value="TỔNG HỢP">TỔNG HỢP</option>
-            {lines
-              .filter((x) => x !== "TỔNG HỢP")
-              .map((l) => (
-                <option key={l} value={l}>
-                  {l}
-                </option>
-              ))}
+            {lines.map((l) => (
+              <option key={l} value={l}>
+                {l}
+              </option>
+            ))}
           </select>
         </div>
 
         <div className="kpi-status">
-          {loading ? "Đang tải..." : err ? `Lỗi: ${err}` : `OK (tự cập nhật mỗi 15s)`}
+          {loading
+            ? "Đang tải..."
+            : err
+            ? `Lỗi: ${err}`
+            : `OK (auto 15s) • cập nhật: ${lastAt || "--:--:--"}`}
         </div>
       </div>
 
@@ -146,8 +213,8 @@ export default function KPIPage() {
                 {dailyRows.map((r) => (
                   <tr key={r.line}>
                     <td>{r.line}</td>
-                    <td className="num">{Number(r.hsDat).toFixed(2)}</td>
-                    <td className="num">{Number(r.hsDm).toFixed(2)}</td>
+                    <td className="num">{n2(r.hsDat)}</td>
+                    <td className="num">{n2(r.hsDm)}</td>
                     <td>
                       <span className={pillClass(r.status)}>{r.status}</span>
                     </td>
@@ -171,7 +238,7 @@ export default function KPIPage() {
           ) : (
             <>
               <div className="kpi-note" style={{ marginTop: 0 }}>
-                DM/H: <b className="num">{Number(hourly.dmH).toFixed(2)}</b>
+                DM/H: <b className="num">{n2(hourly.dmH)}</b>
               </div>
 
               <table className="kpi-table" style={{ marginTop: 10 }}>
@@ -188,9 +255,14 @@ export default function KPIPage() {
                   {hourly.hours.map((h) => (
                     <tr key={h.label}>
                       <td>{h.label}</td>
-                      <td className="num">{Number(h.total).toFixed(2)}</td>
-                      <td className="num">{Number(h.dmTarget).toFixed(2)}</td>
-                      <td className="num">{Number(h.diff).toFixed(2)}</td>
+                      <td className="num">{n0(h.total)}</td>
+
+                      {/* ✅ đúng key API */}
+                      <td className="num">{n0(h.dmLuyTien)}</td>
+
+                      {/* ✅ đúng key API */}
+                      <td className="num">{n0(h.delta)}</td>
+
                       <td>
                         <span className={pillClass(h.status)}>{h.status}</span>
                       </td>
