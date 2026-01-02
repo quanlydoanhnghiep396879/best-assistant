@@ -4,7 +4,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import "./kpi.css";
 
-/* ================= helpers ================= */
+// ===== helpers =====
+function isoToDDMMYYYY(iso) {
+  // iso: YYYY-MM-DD
+  const m = String(iso || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return "";
+  return `${m[3]}/${m[2]}/${m[1]}`;
+}
+
 function todayISO() {
   const d = new Date();
   const yyyy = d.getFullYear();
@@ -13,66 +20,82 @@ function todayISO() {
   return `${yyyy}-${mm}-${dd}`;
 }
 
-function ddmmyyyyFromISO(iso) {
-  const m = String(iso || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) return "";
-  return `${m[3]}/${m[2]}/${m[1]}`;
-}
-
-function noMark(str) {
-  return String(str || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
+function toNum(v) {
+  if (v === null || v === undefined) return 0;
+  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+  const s = String(v)
     .replace(/\u00A0/g, " ")
     .trim()
-    .toLowerCase();
+    .replace(/%/g, "")
+    .replace(/,/g, "")
+    .replace(/^'+/, "");
+  const n = Number(s);
+  return Number.isFinite(n) ? n : 0;
 }
 
-function normLine(x) {
-  const t = String(x || "").replace(/\u00A0/g, " ").trim().toUpperCase();
-  if (t === "TONG HOP" || t === "TỔNG HỢP") return "TỔNG HỢP";
-  const m = t.match(/^C\s*0*([0-9]+)$/);
-  if (m) return `C${Number(m[1])}`;
-  return t;
-}
-
-function sortLines(a, b) {
-  const A = normLine(a);
-  const B = normLine(b);
-
-  if (A === "TỔNG HỢP" && B !== "TỔNG HỢP") return -1;
-  if (B === "TỔNG HỢP" && A !== "TỔNG HỢP") return 1;
-
-  const ma = A.match(/^C(\d+)$/);
-  const mb = B.match(/^C(\d+)$/);
-  if (ma && mb) return Number(ma[1]) - Number(mb[1]);
-  if (ma && !mb) return -1;
-  if (!ma && mb) return 1;
-
-  return A.localeCompare(B, "vi");
+function upperNoDiacritic(str) {
+  // bỏ dấu + normalize để so status
+  const s = String(str ?? "")
+    .replace(/\u00A0/g, " ")
+    .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  return s.toUpperCase();
 }
 
 function pillClass(status) {
-  const s = noMark(status);
-  // ĐẠT / VƯỢT
-  if (s === "dat" || s === "vuot" || s === "vươt") return "pill pill-ok";
-  // ĐỦ
-  if (s === "du") return "pill pill-warn";
-  // THIẾU / CHƯA ĐẠT
-  return "pill pill-bad";
+  const s = upperNoDiacritic(status);
+  // xanh
+  if (s === "DAT" || s === "VUOT" || s === "DU") return "pill pill-ok";
+  // đỏ
+  if (s === "THIEU" || s === "CHUA DAT") return "pill pill-bad";
+  // mặc định
+  return "pill pill-warn";
 }
 
-function n2(v) {
-  const x = Number(v);
-  return Number.isFinite(x) ? x.toFixed(2) : "0.00";
+function fmt0(n) {
+  const x = toNum(n);
+  return x.toLocaleString("en-US", { maximumFractionDigits: 0 });
 }
 
-function n0(v) {
-  const x = Number(v);
-  return Number.isFinite(x) ? Math.round(x).toLocaleString("vi-VN") : "0";
+function fmt2(n) {
+  const x = toNum(n);
+  return x.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-/* ================= page ================= */
+// ->9h, ->12h30 ...
+function labelToHourValue(label) {
+  const s = String(label || "").replace(/\s+/g, "").toLowerCase();
+  // match "->12h30" or "->9h"
+  const m = s.match(/(\d{1,2})h(\d{2})?/);
+  if (!m) return null;
+  const hh = Number(m[1]);
+  const mm = m[2] ? Number(m[2]) : 0;
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+  return hh + mm / 60;
+}
+
+function calcMultiplierFromLabel(label) {
+  // theo quy ước của bạn: ->9h = 1  => base = 8.0
+  const t = labelToHourValue(label);
+  if (t === null) return 0;
+  const mult = t - 8.0;
+  return mult > 0 ? mult : 0;
+}
+
+function getDailyStatus(row) {
+  // ưu tiên status từ API, nếu không có thì tự so
+  if (row?.status) return row.status;
+  const hsDat = toNum(row?.hsDat);
+  const hsDm = toNum(row?.hsDm);
+  if (hsDat >= hsDm) return "ĐẠT";
+  return "CHƯA ĐẠT";
+}
+
+function getHourlyStatus(diff) {
+  return toNum(diff) >= 0 ? "VƯỢT" : "THIẾU";
+}
+
 export default function KPIPage() {
   const [isoDate, setIsoDate] = useState(todayISO());
   const [line, setLine] = useState("TỔNG HỢP");
@@ -80,77 +103,129 @@ export default function KPIPage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
-  const [lastAt, setLastAt] = useState("");
+  const [lastAt, setLastAt] = useState(null);
 
-  const ddmmyyyy = useMemo(() => ddmmyyyyFromISO(isoDate), [isoDate]);
-  const lineNorm = useMemo(() => normLine(line), [line]);
+  const ddmmyyyy = useMemo(() => isoToDDMMYYYY(isoDate), [isoDate]);
 
-  // tránh race condition: request cũ về sau ghi đè request mới
-  const reqIdRef = useRef(0);
+  const abortRef = useRef(null);
+  const inFlightRef = useRef(false);
 
   async function loadKPI({ silent = false } = {}) {
     if (!ddmmyyyy) return;
+    if (inFlightRef.current) return;
 
-    const myId = ++reqIdRef.current;
+    inFlightRef.current = true;
     if (!silent) setLoading(true);
     setErr("");
 
     try {
+      // hủy request cũ nếu có
+      if (abortRef.current) abortRef.current.abort();
+      const ac = new AbortController();
+      abortRef.current = ac;
+
       const qs = new URLSearchParams({
-        date: ddmmyyyy,
-        line: lineNorm,
-        _ts: String(Date.now()), // cache-bust
+        date: ddmmyyyy,       // dd/MM/yyyy
+        line: line || "TỔNG HỢP",
+        _ts: String(Date.now()) // chống cache
       });
 
       const res = await fetch(`/api/check-kpi?${qs.toString()}`, {
         cache: "no-store",
+        signal: ac.signal,
       });
 
-      const json = await res.json();
-      if (myId !== reqIdRef.current) return; // bỏ response cũ
+      const ct = res.headers.get("content-type") || "";
+      const json = ct.includes("application/json") ? await res.json() : null;
 
+      if (!res.ok) throw new Error(json?.error || HTTP `${res.status}`);
       if (!json?.ok) throw new Error(json?.error || "API error");
+
       setData(json);
-      setLastAt(new Date().toLocaleTimeString("vi-VN"));
+      setLastAt(new Date());
     } catch (e) {
-      if (myId !== reqIdRef.current) return;
-      setErr(e?.message || "Load failed");
-      setData(null);
+      if (e?.name !== "AbortError") {
+        setErr(e?.message || "Load failed");
+        setData(null);
+      }
     } finally {
+      inFlightRef.current = false;
       if (!silent) setLoading(false);
     }
   }
 
-  // load ngay khi đổi ngày / đổi chuyền (không cần nút refresh)
+  // load khi đổi ngày / đổi chuyền
   useEffect(() => {
     loadKPI();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ddmmyyyy, lineNorm]);
+  }, [ddmmyyyy, line]);
 
-  // auto refresh 15s
+  // auto refresh mỗi 15s
   useEffect(() => {
     const t = setInterval(() => loadKPI({ silent: true }), 15000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ddmmyyyy, lineNorm]);
+  }, [ddmmyyyy, line]);
 
-  // lines cho dropdown (sort C1..C10)
+  // lines cho dropdown
   const lines = useMemo(() => {
-    const arr = (data?.lines || []).map(normLine);
-    const uniq = Array.from(new Set(arr));
-    if (!uniq.includes("TỔNG HỢP")) uniq.unshift("TỔNG HỢP");
-    return uniq.sort(sortLines);
+    const arr = Array.isArray(data?.lines) ? data.lines : [];
+    const uniq = Array.from(new Set(arr.map(x => String(x || "").trim()).filter(Boolean)));
+    if (!uniq.some(x => upperNoDiacritic(x) === "TONG HOP")) uniq.unshift("TỔNG HỢP");
+    return uniq;
   }, [data?.lines]);
 
-  // nếu line hiện tại không có trong lines => reset về tổng hợp
+  // nếu line đang chọn không tồn tại trong list thì reset
   useEffect(() => {
     if (!lines.length) return;
-    if (!lines.includes(lineNorm)) setLine("TỔNG HỢP");
+    const ok = lines.some((x) => upperNoDiacritic(x) === upperNoDiacritic(line));
+    if (!ok) setLine("TỔNG HỢP");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lines.join("|")]);
 
-  const dailyRows = data?.dailyRows || [];
-  const hourly = data?.hourly || null;
+  const dailyRowsRaw = Array.isArray(data?.dailyRows) ? data.dailyRows : [];
+  const hourlyRaw = data?.hourly || null;
+
+  // ===== build DAILY rows (fallback status) =====
+  const dailyRows = useMemo(() => {
+    return dailyRowsRaw
+      .map(r => ({
+        line: r?.line ?? "",
+        hsDat: toNum(r?.hsDat),
+        hsDm: toNum(r?.hsDm),
+        status: getDailyStatus(r),
+      }))
+      .filter(r => String(r.line || "").trim() !== "");
+  }, [dailyRowsRaw]);
+
+  // ===== build HOURLY rows (fallback dmTarget/diff/status) =====
+  const hourly = useMemo(() => {
+    if (!hourlyRaw) return null;
+
+    const dmH = toNum(hourlyRaw.dmH);
+    const hoursRaw = Array.isArray(hourlyRaw.hours) ? hourlyRaw.hours : [];
+
+    const hours = hoursRaw.map((h) => {
+      const label = String(h?.label ?? "");
+      const total = toNum(h?.total);
+
+      const mult = calcMultiplierFromLabel(label);
+      const dmTarget = toNum(h?.dmTarget) || (dmH * mult);
+      const diff = toNum(h?.diff) || (total - dmTarget);
+
+      const status = h?.status || getHourlyStatus(diff);
+
+      return { label, total, dmTarget, diff, status };
+    });
+
+    return {
+      line: hourlyRaw.line || "TỔNG HỢP",
+      dmH,
+      hours,
+    };
+  }, [hourlyRaw]);
+
+  const apiChosenDate = data?.chosenDate || ""; // để bạn check: chọn 23 mà api trả 24 sẽ thấy ở đây
 
   return (
     <div className="kpi-wrap">
@@ -172,7 +247,7 @@ export default function KPIPage() {
           <div className="kpi-label">Chọn chuyền</div>
           <select
             className="kpi-select"
-            value={lineNorm}
+            value={line}
             onChange={(e) => setLine(e.target.value)}
           >
             {lines.map((l) => (
@@ -187,8 +262,8 @@ export default function KPIPage() {
           {loading
             ? "Đang tải..."
             : err
-            ? `Lỗi: ${err}`
-            : `OK (auto 15s) • cập nhật: ${lastAt || "--:--:--"}`}
+              ? `Lỗi: ${err}`
+              : `OK (auto 15s) • UI date=${ddmmyyyy}${apiChosenDate ? ` • API chosenDate=${apiChosenDate}` : ""}${lastAt ? ` • ${lastAt.toLocaleTimeString()}` : ""}`}
         </div>
       </div>
 
@@ -213,8 +288,8 @@ export default function KPIPage() {
                 {dailyRows.map((r) => (
                   <tr key={r.line}>
                     <td>{r.line}</td>
-                    <td className="num">{n2(r.hsDat)}</td>
-                    <td className="num">{n2(r.hsDm)}</td>
+                    <td className="num">{fmt2(r.hsDat)}</td>
+                    <td className="num">{fmt2(r.hsDm)}</td>
                     <td>
                       <span className={pillClass(r.status)}>{r.status}</span>
                     </td>
@@ -238,7 +313,7 @@ export default function KPIPage() {
           ) : (
             <>
               <div className="kpi-note" style={{ marginTop: 0 }}>
-                DM/H: <b className="num">{n2(hourly.dmH)}</b>
+                DM/H: <b className="num">{fmt2(hourly.dmH)}</b>
               </div>
 
               <table className="kpi-table" style={{ marginTop: 10 }}>
@@ -255,14 +330,9 @@ export default function KPIPage() {
                   {hourly.hours.map((h) => (
                     <tr key={h.label}>
                       <td>{h.label}</td>
-                      <td className="num">{n0(h.total)}</td>
-
-                      {/* ✅ đúng key API */}
-                      <td className="num">{n0(h.dmLuyTien)}</td>
-
-                      {/* ✅ đúng key API */}
-                      <td className="num">{n0(h.delta)}</td>
-
+                      <td className="num">{fmt0(h.total)}</td>
+                      <td className="num">{fmt0(h.dmTarget)}</td>
+                      <td className="num">{fmt0(h.diff)}</td>
                       <td>
                         <span className={pillClass(h.status)}>{h.status}</span>
                       </td>
@@ -272,7 +342,8 @@ export default function KPIPage() {
               </table>
 
               <div className="kpi-note">
-                * Mỗi giờ: <b>DM lũy tiến = DM/H × số mốc giờ</b> (→9h=1, →10h=2, →12h30=4.5, …).
+                * Tự tính nếu API thiếu: <b>DM lũy tiến = DM/H × (giờ - 8)</b>
+                (→9h=1, →10h=2, →12h30=4.5, …). <b>Chênh = Tổng - DM lũy tiến</b>.
               </div>
             </>
           )}
