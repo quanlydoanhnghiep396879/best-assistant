@@ -36,7 +36,6 @@ function serialToDMY(n) {
   return `${dd}/${mm}/${yyyy}`;
 }
 
-// tránh 430/487 bị coi là serial date
 function isLikelySerialDate(n) {
   return typeof n === "number" && Number.isFinite(n) && n >= 30000 && n <= 70000;
 }
@@ -48,7 +47,7 @@ function parseDateCell(v) {
   if (!t) return "";
 
   // dd/mm/yyyy
-  const m1 = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);``
+  const m1 = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (m1) return `${m1[1].padStart(2, "0")}/${m1[2].padStart(2, "0")}/${m1[3]}`;
 
   // yyyy-mm-dd
@@ -80,98 +79,40 @@ function sortDatesDesc(a, b) {
   return db - da;
 }
 
-// number/string -> percent 0..100
 function toPercent(v) {
   if (v === null || v === undefined) return 0;
 
   if (typeof v === "number") {
     if (!Number.isFinite(v)) return 0;
-    // 0.9587 => 95.87
-    if (v >= 0 && v <= 1.5) return v * 100;
+    if (v >= 0 && v <= 1.5) return v * 100; // 0.95 => 95
     return v;
   }
 
   const t = String(v).trim();
   if (!t) return 0;
 
-  // "95.87%" => 95.87
   const cleaned = t.replace("%", "").replace(/,/g, "").trim();
   const n = Number(cleaned);
   if (!Number.isFinite(n)) return 0;
 
-  // "0.9587" => 95.87
   if (n >= 0 && n <= 1.5 && !t.includes("%")) return n * 100;
   return n;
 }
 
-/* ========= tìm cột giờ ========= */
+/* ========== FIX: nhận cả "->9h" và "→9h" ========== */
+function isHourHeaderCell(x) {
+  const t = String(x || "").trim();
+  if (!t) return false;
+  const hasArrow = t.includes("->") || t.includes("→");
+  return hasArrow && /h/i.test(t);
+}
+
 function getHourCols(row) {
   const cols = [];
   for (let c = 0; c < row.length; c++) {
-    const t = String(row[c] || "").trim();
-    if (t.includes("->") && /h/i.test(t)) cols.push(c);
+    if (isHourHeaderCell(row[c])) cols.push(c);
   }
   return cols;
-}
-
-function findAllHourlyHeaders(full) {
-  const headers = [];
-  for (let r = 0; r < full.length; r++) {
-    const row = full[r] || [];
-    const hourCols = getHourCols(row);
-    if (hourCols.length >= 2) headers.push({ headerRow: r, hourCols });
-  }
-  return headers;
-}
-
-/* ====== điểm mấu chốt FIX LỖI NGÀY: lấy "ngày gần nhất phía trên" (date đầu tiên gặp khi đi lên) ====== */
-function closestDateAbove(full, fromRow, maxUp = 200) {
-  const start = Math.max(0, fromRow - maxUp);
-  for (let r = fromRow; r >= start; r--) {
-    const row = full[r] || [];
-    for (let c = 0; c < row.length; c++) {
-      const d = parseDateCell(row[c]);
-      if (d) return { row: r, dmy: d, short: toShortDM(d) };
-    }
-  }
-  return null;
-}
-
-function selectHourlyTableByDate(full, chosenDate) {
-  const chosenShort = toShortDM(chosenDate);
-  const candidates = findAllHourlyHeaders(full);
-  if (!candidates.length) return null;
-
-  let best = null;
-  let bestDist = Infinity;
-
-  for (const cand of candidates) {
-    const near = closestDateAbove(full, cand.headerRow, 200);
-    if (!near) continue;
-
-    // chỉ nhận đúng ngày (dd/mm)
-    if (near.short !== chosenShort) continue;
-
-    const dist = cand.headerRow - near.row; // càng nhỏ càng đúng khối
-    if (dist < bestDist) {
-      bestDist = dist;
-      best = { ...cand, dateRow: near.row };
-    }
-  }
-
-  // nếu không match được, fallback lấy bảng đầu tiên để không trả trống
-  if (!best) best = { ...candidates[0], dateRow: -1 };
-
-  const { headerRow, hourCols } = best;
-  const firstHourCol = Math.min(...hourCols);
-
-  // dmHCol = cột ngay trước giờ đầu tiên (sheet bạn đang ghi "H" chứ không phải "DM/H")
-  const dmHCol = Math.max(0, firstHourCol - 1);
-  const dmDayCol = Math.max(0, firstHourCol - 2);
-
-  const hourLabels = hourCols.map((c) => String((full[headerRow] || [])[c] || "").trim());
-
-  return { headerRow, hourCols, hourLabels, dmHCol, dmDayCol, dateRow: best.dateRow };
 }
 
 function pickLineLabel(row, beforeCol) {
@@ -185,16 +126,81 @@ function pickLineLabel(row, beforeCol) {
   return t0 || "";
 }
 
+/* =================== FIX CHÍNH: cắt vùng theo ngày =================== */
+
+// tìm tất cả "mốc ngày" trong sheet (row nào có cell là date)
+function findDateAnchors(full) {
+  const anchors = [];
+  for (let r = 0; r < full.length; r++) {
+    const row = full[r] || [];
+    for (let c = 0; c < row.length; c++) {
+      const dmy = parseDateCell(row[c]);
+      if (dmy) {
+        anchors.push({ row: r, dmy, short: toShortDM(dmy) });
+        break;
+      }
+    }
+  }
+  // bỏ trùng (cùng short, lấy mốc xuất hiện đầu tiên)
+  const seen = new Set();
+  const out = [];
+  for (const a of anchors) {
+    const k = `${a.short}@${a.row}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(a);
+  }
+  // sort theo row
+  out.sort((a, b) => a.row - b.row);
+  return out;
+}
+
+// lấy range row [start..end] thuộc đúng ngày đang chọn
+function getDayRange(full, chosenDate) {
+  const chosenShort = toShortDM(chosenDate);
+  const anchors = findDateAnchors(full);
+
+  // tìm anchor có short đúng ngày
+  const idx = anchors.findIndex((a) => a.short === chosenShort);
+  if (idx < 0) {
+    // fallback: cả sheet
+    return { start: 0, end: full.length - 1, chosenShort, anchorRow: -1 };
+  }
+
+  const start = anchors[idx].row;
+  const end = idx + 1 < anchors.length ? anchors[idx + 1].row - 1 : full.length - 1;
+
+  return { start, end, chosenShort, anchorRow: anchors[idx].row };
+}
+
+// tìm header bảng giờ trong vùng ngày
+function findHourlyHeaderInRange(full, start, end) {
+  for (let r = start; r <= end; r++) {
+    const row = full[r] || [];
+    const hourCols = getHourCols(row);
+    if (hourCols.length >= 2) {
+      const hourLabels = hourCols.map((c) => String(row[c] || "").trim());
+      const firstHourCol = Math.min(...hourCols);
+      const dmHCol = Math.max(0, firstHourCol - 1);
+      const dmDayCol = Math.max(0, firstHourCol - 2);
+
+      return { headerRow: r, hourCols, hourLabels, dmHCol, dmDayCol };
+    }
+  }
+  return null;
+}
+
 function buildHourlyData(full, chosenDate) {
-  const info = selectHourlyTableByDate(full, chosenDate);
-  if (!info) return { byLine: {}, lines: [], info: null };
+  const range = getDayRange(full, chosenDate);
+  const info = findHourlyHeaderInRange(full, range.start, range.end);
+  if (!info) return { byLine: {}, lines: [], info: null, range };
 
   const { headerRow, dmDayCol, dmHCol, hourCols, hourLabels } = info;
 
   const byLine = {};
   const lines = [];
 
-  for (let r = headerRow + 1; r < full.length; r++) {
+  for (let r = headerRow + 1; r <= range.end; r++) {
     const row = full[r] || [];
 
     const dmH = toNum(row[dmHCol]);
@@ -203,6 +209,7 @@ function buildHourlyData(full, chosenDate) {
     const hasAnyHour = hourCols.some((c) => String(row[c] || "").trim() !== "");
     const line = pickLineLabel(row, dmDayCol >= 0 ? dmDayCol : dmHCol);
 
+    // ra khỏi khối
     if (!hasAnyHour && dmH === 0 && dmDay === 0 && !line) break;
     if (!line) continue;
 
@@ -221,7 +228,7 @@ function buildHourlyData(full, chosenDate) {
         else status = "THIẾU";
       }
 
-      return { label: hourLabels[idx] || `H${idx + 1}`, actual, target, diff, status };
+      return { label: hourLabels[idx] || `H${idx + 1}, actual, target, diff, status` };
     });
 
     byLine[line] = { line, dmDay, dmH, hours };
@@ -256,66 +263,56 @@ function buildHourlyData(full, chosenDate) {
     byLine["TỔNG HỢP"] = { line: "TỔNG HỢP", dmDay: totalDmDay, dmH: totalDmH, hours: totalHours };
   }
 
-  return { byLine, lines: lines.length ? ["TỔNG HỢP", ...lines] : [], info };
+  return { byLine, lines: lines.length ? ["TỔNG HỢP", ...lines] : [], info, range };
 }
 
-/* ========= parse bảng %: "SUẤT ĐẠT TRỌNG" & "ĐỊNH MỨC TRỌNG" ========= */
-function findDailyPerfTableNear(full, aroundRow) {
-  const r0 = Math.max(0, aroundRow - 250);
-  const r1 = Math.min(full.length - 1, aroundRow + 250);
-
+/* ========= FIX: tìm mềm header bảng % =========
+   Chỉ cần có "SUAT DAT" & "DINH MUC" là nhận
+*/
+function findDailyPerfHeaderInRange(full, start, end) {
   let best = null;
-  let bestDist = Infinity;
-
-  for (let r = r0; r <= r1; r++) {
+  for (let r = start; r <= end; r++) {
     const row = full[r] || [];
     const norm = row.map(normalize);
 
-    const suatCol = norm.findIndex((x) => x.includes("SUAT DAT TRONG"));
-    const dinhCol = norm.findIndex((x) => x.includes("DINH MUC TRONG"));
+    const suatCol = norm.findIndex((x) => x.includes("SUAT DAT"));
+    const dinhCol = norm.findIndex((x) => x.includes("DINH MUC"));
 
     if (suatCol >= 0 && dinhCol >= 0) {
-      const dist = Math.abs(r - aroundRow);
-      if (dist < bestDist) {
-        bestDist = dist;
-        best = { headerRow: r, suatCol, dinhCol };
-      }
+      best = { headerRow: r, suatCol, dinhCol };
+      break;
     }
   }
-
-  return best; // {headerRow, suatCol, dinhCol} | null
+  return best;
 }
 
-function buildDailyRowsFromSheet(full, hourlyInfo, chosenDate) {
-  if (!hourlyInfo?.info) return [];
+function buildDailyRowsFromSheet(full, hourlyPack, chosenDate) {
+  const range = hourlyPack?.range || getDayRange(full, chosenDate);
+  const header = findDailyPerfHeaderInRange(full, range.start, range.end);
+  if (!header) return [];
 
-  const aroundRow = hourlyInfo.info.headerRow ?? 0;
-
-  // đảm bảo đúng ngày: chỉ lấy daily table trong cùng “khối ngày”
-  // vì selectHourlyTableByDate đã chọn đúng khối theo chosenDate rồi, nên aroundRow đã thuộc đúng ngày
-  const t = findDailyPerfTableNear(full, aroundRow);
-  if (!t) return [];
-
-  const { headerRow, suatCol, dinhCol } = t;
+  const { headerRow, suatCol, dinhCol } = header;
   const beforeCol = Math.min(suatCol, dinhCol);
 
   const out = [];
 
-  for (let r = headerRow + 1; r < full.length; r++) {
+  for (let r = headerRow + 1; r <= range.end; r++) {
     const row = full[r] || [];
     const line = pickLineLabel(row, beforeCol);
-    const hsDat = toPercent(row[suatCol]);
-    const hsDm = toPercent(row[dinhCol]);
 
-    const any = String(row[suatCol] || "").trim() || String(row[dinhCol] || "").trim();
-    if (!any && !line) break;
+    const rawA = String(row[suatCol] ?? "").trim();
+    const rawB = String(row[dinhCol] ?? "").trim();
 
+    if (!rawA && !rawB && !line) break;
     if (!line) continue;
 
     const normLine = normalize(line);
     if (!/^(TONG HOP|C\d+|CAT|KCS|HOAN|HOAN TAT|NM)/.test(normLine)) continue;
 
-    const status = hsDat >= hsDm && hsDm > 0 ? "ĐẠT" : "CHƯA ĐẠT";
+    const hsDat = toPercent(row[suatCol]);
+    const hsDm = toPercent(row[dinhCol]);
+
+    const status = hsDm > 0 && hsDat >= hsDm ? "ĐẠT" : "CHƯA ĐẠT";
 
     out.push({
       line,
@@ -325,18 +322,15 @@ function buildDailyRowsFromSheet(full, hourlyInfo, chosenDate) {
     });
   }
 
-  // nếu không có TỔNG HỢP trong bảng thì mình vẫn giữ TỔNG HỢP từ hourly lines
   return out;
 }
 
 /* ========= đọc dates từ CONFIG_KPI ========= */
 async function readConfigDates() {
   const { CONFIG_KPI_SHEET_NAME } = sheetNames();
-
   const rows = await readValues(`${CONFIG_KPI_SHEET_NAME}!A2:A1000`, {
     valueRenderOption: "UNFORMATTED_VALUE",
   });
-
   const dates = rows.map((r) => parseDateCell(r?.[0])).filter(Boolean);
   dates.sort(sortDatesDesc);
   return dates;
@@ -354,20 +348,14 @@ export async function GET(request) {
     const dates = await readConfigDates();
     const chosenDate = parseDateCell(qDate) || dates[0] || "";
 
-    // nếu sheet dài hơn 2000 dòng thì tăng lên 5000 cho chắc
     const full = await readValues(`${KPI_SHEET_NAME}!A1:AZ5000`, {
       valueRenderOption: "UNFORMATTED_VALUE",
     });
 
-    // 1) hourly đúng ngày
     const hourlyAll = buildHourlyData(full, chosenDate);
-
-    // 2) dailyRows lấy từ cột % trong sheet (SUẤT ĐẠT TRỌNG / ĐỊNH MỨC TRỌNG)
     const dailyRows = buildDailyRowsFromSheet(full, hourlyAll, chosenDate);
 
-    // lines dropdown lấy từ hourlyAll (đúng ngày)
     const lines = hourlyAll.lines || [];
-
     const line = hourlyAll.byLine?.[qLine] ? qLine : "TỔNG HỢP";
     const lineData = hourlyAll.byLine?.[line] || { line, dmDay: 0, dmH: 0, hours: [] };
 
@@ -377,8 +365,8 @@ export async function GET(request) {
       dates,
       lines,
       selectedLine: line,
-      dailyRows, // ✅ HS đạt + HS ĐM đúng theo sheet
-      hourly: lineData, // ✅ từng giờ: actual/target/diff/status
+      dailyRows,
+      hourly: lineData,
     });
   } catch (e) {
     return Response.json({ ok: false, error: String(e?.message || e) }, { status: 500 });
