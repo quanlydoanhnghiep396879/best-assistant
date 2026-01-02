@@ -1,453 +1,352 @@
 // app/api/check-kpi/route.js
-import { getGoogleSheetsClient } from "../_lib/googleSheetsClient";
+import { NextResponse } from "next/server";
+import getSheetsClientMaybe from "../_lib/googleSheetsClient";
 
 export const dynamic = "force-dynamic";
 
-const DEFAULT_SHEET_NAME = process.env.KPI_SHEET_NAME || "KPI";
-const SPREADSHEET_ID = process.env.GOOGLE_SHEET_ID;
-
 // ===== helpers =====
-const s = (v) => (v == null ? "" : String(v));
+const s = (v) => (v === null || v === undefined ? "" : String(v));
+const normSpaces = (str) => s(str).replace(/\u00A0/g, " ").trim();
 
+// bỏ dấu + đổi Đ/đ -> D/d
 function noMark(str) {
-  return s(str)
+  return normSpaces(str)
     .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[Đđ]/g, (m) => (m === "Đ" ? "D" : "d"));
 }
 
 function norm(str) {
-  return noMark(str)
-    .toUpperCase()
-    .replace(/\s+/g, " ")
-    .trim();
+  return noMark(str).toUpperCase();
 }
 
-function toNumber(v) {
-  if (v == null) return 0;
-  if (typeof v === "number" && Number.isFinite(v)) return v;
-
-  let t = s(v).trim();
-  if (!t || t === "####") return 0;
-
-  const hasPct = t.includes("%");
-  t = t.replace(/%/g, "").replace(/\s+/g, "");
-
-  const hasDot = t.includes(".");
-  const hasComma = t.includes(",");
-
-  if (hasDot && hasComma) {
-    const lastDot = t.lastIndexOf(".");
-    const lastComma = t.lastIndexOf(",");
-    if (lastComma > lastDot) t = t.replace(/\./g, "").replace(/,/g, ".");
-    else t = t.replace(/,/g, "");
-  } else if (hasComma && !hasDot) {
-    t = t.replace(/,/g, ".");
-  } else {
-    t = t.replace(/,/g, "");
-  }
-
-  const n = Number(t);
-  if (!Number.isFinite(n)) return 0;
-  return n;
+function toNumberSafe(v) {
+  if (v === null || v === undefined) return 0;
+  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+  const t = normSpaces(v);
+  if (!t) return 0;
+  // bỏ dấu % nếu có
+  const cleaned = t.replace(/%/g, "").replace(/,/g, "");
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : 0;
 }
 
-function toPercent(v) {
-  const raw = s(v).trim();
-  if (!raw) return 0;
-  if (raw.includes("%")) return toNumber(raw); // "95.87%"
-  const n = toNumber(raw);
-  if (n > 0 && n <= 1) return n * 100; // 0.9587 => 95.87
-  return n;
+function isDateCell(v) {
+  return /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(normSpaces(v));
 }
 
-function isLineLabel(v) {
-  const t = norm(v);
-  return /^C\s*0*\d+$/.test(t);
+function normalizeLineLabel(raw) {
+  const t = normSpaces(raw);
+  // C01 / c1 / C 1 -> C1
+  const m = t.match(/^C\s*0*([0-9]+)$/i);
+  if (m) return `C${Number(m[1])}`;
+  return t;
 }
 
-function normalizeLine(v) {
-  const m = norm(v).match(/^C\s*0*(\d+)$/);
-  if (!m) return "";
-  return `C${parseInt(m[1], 10)}`;
+function isLineC(raw) {
+  const t = normalizeLineLabel(raw);
+  return /^C([1-9]|10|[0-9]{2,})$/i.test(t); // cho C1..C10..C99...
 }
 
-function sortLines(lines) {
-  return [...lines].sort((a, b) => {
-    const na = parseInt(a.replace(/^C/i, ""), 10);
-    const nb = parseInt(b.replace(/^C/i, ""), 10);
-    return na - nb;
+function lineSort(a, b) {
+  const na = Number(String(a).replace(/[^0-9]/g, "")) || 0;
+  const nb = Number(String(b).replace(/[^0-9]/g, "")) || 0;
+  return na - nb;
+}
+
+function jsonNoStore(obj, status = 200) {
+  return NextResponse.json(obj, {
+    status,
+    headers: { "Cache-Control": "no-store, max-age=0" },
   });
 }
 
-// ===== hour header detection (robust) =====
-function unifyArrowText(t) {
-  // chuẩn hoá mũi tên unicode về "->"
-  return t
-    .replace(/[→➜➔⇒]/g, "->")
-    .replace(/[–—]/g, "-")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function extractHourLabel(cell) {
-  let t = norm(cell);
-  if (!t) return null;
-  t = unifyArrowText(t);
-
-  // loại DM/H
-  if (t.includes("DM/H")) return null;
-
-  // tìm dạng "->9H", "->12H30", "9H", "12H30"...
-  const m = t.match(/(\d{1,2})\s*H\s*(30)?/);
-  if (!m) return null;
-
-  const hh = parseInt(m[1], 10);
-  if (!(hh >= 7 && hh <= 23)) return null;
-
-  const hasArrow = t.includes("->") || t.includes(">") || t.startsWith("-");
-
-  // ưu tiên những ô có mũi tên, nhưng vẫn cho qua nếu đúng dạng giờ (để chịu merge)
-  const label = `->${hh}h${m[2] ? "30" : ""}`;
-  return { label, hasArrow };
-}
-
-function findBestHourlyHeaderRow(grid) {
-  let best = { r: -1, score: 0, hasDmHNear: false };
-
-  for (let r = 0; r < grid.length; r++) {
-    const row = grid[r] || [];
-    const hoursSet = new Set();
-    let hasArrowCount = 0;
-
+// ===== tìm cột theo header trong 1 vùng hàng =====
+function findColByHeaders(rows, headersNeed) {
+  // rows: array of rows (2D), tìm thấy header ở bất kỳ row nào -> trả col index
+  // headersNeed: array of strings (đã norm)
+  for (const row of rows) {
     for (let c = 0; c < row.length; c++) {
-      const ex = extractHourLabel(row[c]);
-      if (ex) {
-        hoursSet.add(ex.label);
-        if (ex.hasArrow) hasArrowCount++;
-      }
-    }
-
-    // score: số mốc giờ unique, cộng thêm arrowCount để ưu tiên đúng dòng
-    const score = hoursSet.size * 10 + hasArrowCount;
-
-    if (score > best.score) {
-      // check DM/H gần đó (r-2..r+2)
-      let nearDmH = false;
-      for (let k = Math.max(0, r - 2); k <= Math.min(grid.length - 1, r + 2); k++) {
-        const rr = (grid[k] || []).map((x) => norm(x)).join(" | ");
-        if (rr.includes("DM/H")) {
-          nearDmH = true;
-          break;
-        }
-      }
-      best = { r, score, hasDmHNear: nearDmH };
-    }
-  }
-
-  // yêu cầu tối thiểu phải có >= 2 mốc giờ (score >= 20)
-  if (best.score < 20) return -1;
-  return best.r;
-}
-
-function findColumnByHeaderPriority(headerRows, groups) {
-  const H = [];
-  for (const row of headerRows) {
-    if (!row) continue;
-    for (let i = 0; i < row.length; i++) {
-      if (!H[i]) H[i] = [];
-      H[i].push(norm(row[i]));
-    }
-  }
-
-  for (const group of groups) {
-    for (let col = 0; col < H.length; col++) {
-      const mergedText = (H[col] || []).join(" | ");
-      for (const kw of group) {
-        const k = norm(kw);
-        if (k && mergedText.includes(k)) return col;
-      }
+      const cell = norm(row[c]);
+      if (!cell) continue;
+      if (headersNeed.some((h) => cell.includes(h))) return c;
     }
   }
   return -1;
 }
 
-function detectLineColumn(grid, headerRowIdx) {
-  const maxLook = Math.min(grid.length, headerRowIdx + 40);
-  const counts = new Map();
-
-  for (let r = headerRowIdx + 1; r < maxLook; r++) {
-    const row = grid[r] || [];
-    for (let c = 0; c < Math.min(row.length, 25); c++) {
-      if (isLineLabel(row[c])) counts.set(c, (counts.get(c) || 0) + 1);
+// ===== tìm hàng chứa header hours "->9h" ... =====
+function findHourHeaderRow(values) {
+  for (let r = 0; r < values.length; r++) {
+    const row = values[r] || [];
+    let hit = 0;
+    for (const cell of row) {
+      const t = normSpaces(cell);
+      if (/^->?\s*\d{1,2}h(30)?$/i.test(t)) hit++;
     }
+    // chỉ cần thấy vài mốc giờ là coi như hàng header giờ
+    if (hit >= 3) return r;
   }
-
-  let bestCol = -1,
-    bestCount = 0;
-  for (const [c, ct] of counts.entries()) {
-    if (ct > bestCount) {
-      bestCount = ct;
-      bestCol = c;
-    }
-  }
-  return bestCol;
+  return -1;
 }
+
+function buildHourCols(values, hourHeaderIdx) {
+  const row = values[hourHeaderIdx] || [];
+  const cols = [];
+  for (let c = 0; c < row.length; c++) {
+    const t = normSpaces(row[c]);
+    if (/^->?\s*\d{1,2}h(30)?$/i.test(t)) {
+      // chuẩn hoá label hiển thị dạng "->9h"
+      const label = t.startsWith("->") ? t : `->${t.replace(/^>/, "")}`;
+      cols.push({ label, col: c });
+    }
+  }
+  return cols;
+}
+
+// hệ số giờ để tính DM lũy tiến
+const HOUR_FACTORS = {
+  "->9H": 1,
+  "->10H": 2,
+  "->11H": 3,
+  "->12H30": 4.5,
+  "->13H30": 5.5,
+  "->14H30": 6.5,
+  "->15H30": 7.5,
+  "->16H30": 8,
+};
 
 function hourFactor(label) {
-  const t = norm(label).replace(">", "").replace("-", "");
-  const m = t.match(/(\d{1,2})H(30)?/);
-  if (!m) return 0;
-  const hh = parseInt(m[1], 10);
-  let f = hh - 8; // 9h ->1
-  if (m[2]) f += 0.5; // 12h30 ->4.5
-  if (hh >= 16) f = 8; // clamp
-  return f;
+  const k = norm(label);
+  return HOUR_FACTORS[k] ?? null;
 }
 
-// ===== API =====
+// ===== main =====
 export async function GET(req) {
+  const { searchParams } = new URL(req.url);
+  const date = normSpaces(searchParams.get("date")); // dd/MM/yyyy
+  const selectedLineRaw = normSpaces(searchParams.get("line") || "TỔNG HỢP");
+  const wantDebug = searchParams.get("debug") === "1";
+
+  if (!date || !isDateCell(date)) {
+    return jsonNoStore({ ok: false, error: "Thiếu hoặc sai định dạng date (dd/MM/yyyy)" }, 400);
+  }
+
+  const spreadsheetId = process.env.GOOGLE_SHEET_ID || process.env.SPREADSHEET_ID;
+  if (!spreadsheetId) {
+    return jsonNoStore({ ok: false, error: "Missing env GOOGLE_SHEET_ID" }, 500);
+  }
+
+  const sheetName = process.env.KPI_SHEET_NAME || "KPI";
+  const range = `${sheetName}!A1:Z400`;
+
+  // lấy client
+  let client = getSheetsClientMaybe;
+  if (typeof getSheetsClientMaybe === "function") {
+    client = await getSheetsClientMaybe();
+  }
+
+  // validate shape
+  if (!client?.spreadsheets?.values?.get) {
+    return jsonNoStore(
+      {
+        ok: false,
+        error: "googleSheetsClient không đúng kiểu. Cần có client.spreadsheets.values.get(...)",
+      },
+      500
+    );
+  }
+
+  // đọc sheet
+  let values = [];
   try {
-    if (!SPREADSHEET_ID) {
-      return Response.json(
-        { ok: false, error: "Missing env GOOGLE_SHEET_ID" },
-        { status: 500, headers: { "Cache-Control": "no-store" } }
-      );
-    }
-
-    const { searchParams } = new URL(req.url);
-    const date = s(searchParams.get("date")).trim(); // dd/MM/yyyy
-    const lineReq = s(searchParams.get("line") || "TỔNG HỢP").trim();
-    const debug = searchParams.get("debug") === "1";
-
-    if (!/^\d{2}\/\d{2}\/\d{4}$/.test(date)) {
-      return Response.json(
-        { ok: false, error: "date phải dạng dd/MM/yyyy (vd 24/12/2025)" },
-        { status: 400, headers: { "Cache-Control": "no-store" } }
-      );
-    }
-
-    const sheets = await getGoogleSheetsClient();
-
-    const range = `${DEFAULT_SHEET_NAME}!A1:Z400`; // tăng range chút cho chắc
-    const resp = await sheets.spreadsheets.values.get({
-      spreadsheetId: SPREADSHEET_ID,
+    const res = await client.spreadsheets.values.get({
+      spreadsheetId,
       range,
       valueRenderOption: "UNFORMATTED_VALUE",
       dateTimeRenderOption: "FORMATTED_STRING",
     });
+    values = res?.data?.values || [];
+  } catch (e) {
+    return jsonNoStore({ ok: false, error: e?.message || "Read sheet failed" }, 500);
+  }
 
-    const grid = resp.data.values || [];
-    if (!grid.length) {
-      return Response.json(
-        { ok: false, error: "Sheet rỗng hoặc không đọc được range" },
-        { status: 500, headers: { "Cache-Control": "no-store" } }
-      );
+  // tìm dòng có ngày
+  let dateRow = -1;
+  for (let r = 0; r < values.length; r++) {
+    const v = normSpaces(values[r]?.[0]);
+    if (v === date) {
+      dateRow = r;
+      break;
     }
+  }
+  if (dateRow < 0) {
+    return jsonNoStore({ ok: true, chosenDate: date, lines: ["TỔNG HỢP"], selectedLine: "TỔNG HỢP", dailyRows: [], hourly: { line: "TỔNG HỢP", dmH: 0, hours: [] } });
+  }
 
-    // ===== 1) tìm dòng header giờ theo kiểu robust =====
-    const hourHeaderIdx = findBestHourlyHeaderRow(grid);
-    if (hourHeaderIdx < 0) {
-      return Response.json(
-        {
-          ok: false,
-          error: "Không tìm thấy header bảng giờ (->9h, ->10h...).",
-          _debug: debug
-            ? {
-                range,
-                hint:
-                  "Bật debug=1 để xem header sample. Nếu sheet dùng ký hiệu khác '->9h' hãy chụp đúng dòng mốc giờ.",
-                top30: grid.slice(0, 30),
-              }
-            : undefined,
-        },
-        { status: 500, headers: { "Cache-Control": "no-store" } }
-      );
+  // tìm header daily (cột suất đạt & định mức trong ngày) bằng cách scan toàn sheet
+  let dailyHeaderRow = -1;
+  let colHsDat = -1;
+  let colHsDm = -1;
+
+  const needDat = ["SUAT DAT TRONG NGAY", "HS DAT TRONG NGAY", "TY LE HS DAT"];
+  const needDm = ["DINH MUC TRONG NGAY", "HS DINH MUC TRONG NGAY", "TY LE HS DINH MUC", "DINH MUC"];
+
+  for (let r = 0; r < Math.min(values.length, 80); r++) {
+    const row = values[r] || [];
+    const rowNorm = row.map((x) => norm(x));
+    const hasDat = rowNorm.some((x) => needDat.some((k) => x.includes(k)));
+    const hasDm = rowNorm.some((x) => needDm.some((k) => x.includes(k)));
+    if (hasDat && hasDm) {
+      dailyHeaderRow = r;
+      break;
     }
+  }
 
-    // headerRows: lấy cả trên/dưới để chịu merge
-    const headerRows = [
-      grid[hourHeaderIdx - 2],
-      grid[hourHeaderIdx - 1],
-      grid[hourHeaderIdx],
-      grid[hourHeaderIdx + 1],
-      grid[hourHeaderIdx + 2],
-    ].filter(Boolean);
+  if (dailyHeaderRow >= 0) {
+    // tìm col trong vùng vài hàng quanh header (phòng merge)
+    const dailyHeaderRows = values.slice(Math.max(0, dailyHeaderRow - 1), dailyHeaderRow + 2);
+    colHsDat = findColByHeaders(dailyHeaderRows, needDat);
+    colHsDm = findColByHeaders(dailyHeaderRows, needDm);
+  }
 
-    // ===== 2) tìm cột DM/H =====
-    const colDmH = findColumnByHeaderPriority(headerRows, [["DM/H"]]);
+  // tìm header giờ
+  const hourHeaderIdx = findHourHeaderRow(values);
+  const hourCols = hourHeaderIdx >= 0 ? buildHourCols(values, hourHeaderIdx) : [];
+
+  // tìm cột DM/H (hoặc ĐM/H) quanh header giờ
+  let colDmH = -1;
+  if (hourHeaderIdx >= 0 && hourCols.length) {
+    const around = values.slice(Math.max(0, hourHeaderIdx - 3), hourHeaderIdx + 2);
+    colDmH = findColByHeaders(around, [
+      "DM/H",
+      "DMH",
+      "DINH MUC/H",
+      "DINH MUC GIO",
+      "DINH MUC GIO/H",
+      "ĐM/H", // đã được norm() thành DM/H nhờ noMark()
+    ]);
+
+    // fallback nếu merge làm mất text: lấy cột ngay trước mốc giờ đầu tiên
     if (colDmH < 0) {
-      return Response.json(
-        {
-          ok: false,
-          error: "Không tìm thấy cột DM/H (do merge/đổi tên).",
-          _debug: debug ? { hourHeaderIdx, headerRows } : undefined,
-        },
-        { status: 500, headers: { "Cache-Control": "no-store" } }
-      );
+      const firstHourCol = Math.min(...hourCols.map((x) => x.col));
+      const guess = firstHourCol - 1;
+      if (guess >= 0) colDmH = guess;
     }
+  }
 
-    // ===== 3) tìm các cột giờ từ dòng có nhiều mốc giờ nhất =====
-    const bestRow = grid[hourHeaderIdx] || [];
-    const hourCols = [];
-    const hourLabels = [];
+  // ===== parse lines rows: từ dateRow+1 đến khi gặp dòng trống hoặc ngày khác =====
+  const lineRows = [];
+  for (let r = dateRow + 1; r < values.length; r++) {
+    const first = normSpaces(values[r]?.[0]);
 
-    for (let c = 0; c < bestRow.length; c++) {
-      const ex = extractHourLabel(bestRow[c]);
-      if (ex) {
-        hourCols.push(c);
-        hourLabels.push(s(bestRow[c]).trim());
-      }
-    }
+    if (!first) break;
+    if (isDateCell(first)) break; // sang ngày khác
 
-    if (hourCols.length < 2) {
-      // fallback: thử dòng kế bên (do header 2 tầng)
-      const row2 = grid[hourHeaderIdx + 1] || [];
-      for (let c = 0; c < row2.length; c++) {
-        const ex = extractHourLabel(row2[c]);
-        if (ex) {
-          hourCols.push(c);
-          hourLabels.push(s(row2[c]).trim());
-        }
-      }
-    }
+    const line = normalizeLineLabel(first);
 
-    if (hourCols.length < 2) {
-      return Response.json(
-        {
-          ok: false,
-          error: "Tìm được dòng header nhưng không lấy được các cột ->9h, ->10h...",
-          _debug: debug ? { hourHeaderIdx, bestRow } : undefined,
-        },
-        { status: 500, headers: { "Cache-Control": "no-store" } }
-      );
-    }
+    // chỉ lấy C1..C10.. (bỏ CẮT/KCS/HOÀN TẤT/NM...)
+    if (!isLineC(line)) continue;
 
-    // ===== 4) daily columns =====
-    let colTGsx = findColumnByHeaderPriority(headerRows, [["TG SX", "TGSX"]]);
-    let colHsDat = findColumnByHeaderPriority(headerRows, [
-      ["SUAT DAT TRONG NGAY", "HIEU SUAT DAT TRONG NGAY", "HS DAT TRONG NGAY"],
-      ["SUAT DAT TRONG"],
-    ]);
-    let colHsDm = findColumnByHeaderPriority(headerRows, [
-      ["DINH MUC TRONG NGAY", "HS DINH MUC TRONG NGAY", "HS DM TRONG NGAY"],
-      ["DINH MUC TRONG"],
-    ]);
+    const hsDat = colHsDat >= 0 ? toNumberSafe(values[r]?.[colHsDat]) : 0;
+    const hsDm = colHsDm >= 0 ? toNumberSafe(values[r]?.[colHsDm]) : 0;
 
-    if ((colHsDat < 0 || colHsDm < 0) && colTGsx >= 0) {
-      colHsDat = colTGsx + 1;
-      colHsDm = colTGsx + 2;
-    }
+    // giờ
+    const dmH = colDmH >= 0 ? toNumberSafe(values[r]?.[colDmH]) : 0;
 
-    if (colHsDat < 0 || colHsDm < 0) {
-      return Response.json(
-        {
-          ok: false,
-          error: "Không map được cột SUẤT ĐẠT TRONG NGÀY / ĐỊNH MỨC TRONG NGÀY (do merge/đổi tên).",
-          _debug: debug ? { hourHeaderIdx, headerRows, found: { colTGsx, colHsDat, colHsDm } } : undefined,
-        },
-        { status: 500, headers: { "Cache-Control": "no-store" } }
-      );
-    }
-
-    // ===== 5) dò cột line C1..C10 =====
-    const colLine = detectLineColumn(grid, hourHeaderIdx);
-    if (colLine < 0) {
-      return Response.json(
-        { ok: false, error: "Không dò ra cột chứa C1..C10." },
-        { status: 500, headers: { "Cache-Control": "no-store" } }
-      );
-    }
-
-    // ===== 6) đọc data rows =====
-    const linesSet = new Set();
-    const lineRows = [];
-
-    for (let r = hourHeaderIdx + 1; r < grid.length; r++) {
-      const row = grid[r] || [];
-      const rawLine = row[colLine];
-      if (!isLineLabel(rawLine)) continue;
-
-      const line = normalizeLine(rawLine);
-      if (!line) continue;
-
-      const n = parseInt(line.replace("C", ""), 10);
-      if (!(n >= 1 && n <= 10)) continue;
-
-      const dmH = toNumber(row[colDmH]);
-      const hours = hourCols.map((c, idx) => ({
-        label: hourLabels[idx],
-        total: toNumber(row[c]),
-      }));
-
-      const hsDat = toPercent(row[colHsDat]);
-      const hsDm = toPercent(row[colHsDm]);
-
-      linesSet.add(line);
-      lineRows.push({ line, dmH, hsDat, hsDm, hours });
-    }
-
-    const lines = sortLines([...linesSet]);
-    const selectedLine =
-      norm(lineReq) === "TỔNG HỢP" ? "TỔNG HỢP" : normalizeLine(lineReq) || "TỔNG HỢP";
-
-    const dailyRows = lineRows.map((x) => ({
-      line: x.line,
-      hsDat: x.hsDat,
-      hsDm: x.hsDm,
-      status: x.hsDat >= x.hsDm ? "ĐẠT" : "CHƯA ĐẠT",
+    const hours = hourCols.map(({ label, col }) => ({
+      label,
+      total: toNumberSafe(values[r]?.[col]),
     }));
 
-    // hourly
-    let hourly = { line: selectedLine, dmH: 0, hours: [] };
+    lineRows.push({ r, line, hsDat, hsDm, dmH, hours });
+  }
 
+  // lines list
+  const lines = ["TỔNG HỢP", ...lineRows.map((x) => x.line).sort(lineSort)];
+
+  // dailyRows output (luôn trả toàn bộ)
+  const dailyRows = lineRows
+    .map((x) => {
+      const status = x.hsDat >= x.hsDm ? "ĐẠT" : "CHƯA ĐẠT";
+      return { line: x.line, hsDat: x.hsDat, hsDm: x.hsDm, status };
+    })
+    .sort((a, b) => lineSort(a.line, b.line));
+
+  // ===== hourly for selected line / tổng hợp =====
+  const selectedLine = norm(selectedLineRaw) === "TONG HOP" || norm(selectedLineRaw) === "TỔNG HỢP" ? "TỔNG HỢP" : normalizeLineLabel(selectedLineRaw);
+
+  let hourly = { line: selectedLine, dmH: 0, hours: [] };
+
+  if (!hourCols.length) {
+    // không có bảng giờ
+    hourly = { line: selectedLine, dmH: 0, hours: [] };
+  } else {
     if (selectedLine === "TỔNG HỢP") {
-      const dmHsum = lineRows.reduce((acc, x) => acc + (Number.isFinite(x.dmH) ? x.dmH : 0), 0);
-      hourly.dmH = dmHsum;
+      const dmH = lineRows.reduce((sum, x) => sum + (x.dmH || 0), 0);
 
-      hourly.hours = hourLabels.map((label, idx) => {
-        const total = lineRows.reduce((acc, x) => acc + (x.hours[idx]?.total || 0), 0);
+      const hours = hourCols.map(({ label }) => {
+        const total = lineRows.reduce((sum, x) => {
+          const found = x.hours.find((h) => h.label === label);
+          return sum + (found?.total || 0);
+        }, 0);
+
         const f = hourFactor(label);
-        const dmTarget = dmHsum * f;
+        const dmTarget = f === null ? 0 : dmH * f;
         const diff = total - dmTarget;
-        return { label, total, dmTarget, diff, status: diff >= 0 ? "VƯỢT" : "THIẾU" };
+        const status = diff >= 0 ? "VƯỢT" : "THIẾU";
+
+        return { label, total, dmTarget, diff, status };
       });
+
+      hourly = { line: "TỔNG HỢP", dmH, hours };
     } else {
-      const row = lineRows.find((x) => x.line === selectedLine);
-      if (row) {
-        hourly.dmH = row.dmH;
-        hourly.hours = row.hours.map((h) => {
-          const f = hourFactor(h.label);
-          const dmTarget = row.dmH * f;
-          const diff = h.total - dmTarget;
-          return { label: h.label, total: h.total, dmTarget, diff, status: diff >= 0 ? "VƯỢT" : "THIẾU" };
+      const row = lineRows.find((x) => norm(x.line) === norm(selectedLine));
+      if (!row) {
+        hourly = { line: selectedLine, dmH: 0, hours: [] };
+      } else {
+        const dmH = row.dmH || 0;
+        const hours = hourCols.map(({ label }) => {
+          const found = row.hours.find((h) => h.label === label);
+          const total = found?.total || 0;
+
+          const f = hourFactor(label);
+          const dmTarget = f === null ? 0 : dmH * f;
+          const diff = total - dmTarget;
+          const status = diff >= 0 ? "VƯỢT" : "THIẾU";
+
+          return { label, total, dmTarget, diff, status };
         });
+
+        hourly = { line: row.line, dmH, hours };
       }
     }
-
-    return Response.json(
-      {
-        ok: true,
-        chosenDate: date,
-        lines: ["TỔNG HỢP", ...lines],
-        selectedLine,
-        dailyRows,
-        hourly,
-        _debug: debug
-          ? {
-              sheet: DEFAULT_SHEET_NAME,
-              range,
-              hourHeaderIdx,
-              cols: { colLine, colDmH, hourCols, colHsDat, colHsDm },
-              headerSample: headerRows.map((r) => (r || []).slice(0, 40)),
-            }
-          : undefined,
-      },
-      { headers: { "Cache-Control": "no-store" } }
-    );
-  } catch (e) {
-    return Response.json(
-      { ok: false, error: e?.message || "Unknown error" },
-      { status: 500, headers: { "Cache-Control": "no-store" } }
-    );
   }
+
+  // debug
+  const _debug = wantDebug
+    ? {
+        sheetName,
+        range,
+        dateRow,
+        dailyHeaderRow,
+        colHsDat,
+        colHsDm,
+        hourHeaderIdx,
+        colDmH,
+        hourCols: hourCols.slice(0, 20),
+        sampleRow0: values[dateRow] || null,
+        sampleNext: values[dateRow + 1] || null,
+      }
+    : undefined;
+
+  return jsonNoStore({
+    ok: true,
+    chosenDate: date,
+    lines,
+    selectedLine,
+    dailyRows,
+    hourly,
+    ...(wantDebug ? { _debug } : {}),
+  });
 }
